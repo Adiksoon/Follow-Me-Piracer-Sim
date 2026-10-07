@@ -1,0 +1,149 @@
+"""Launch the baseline PiRacer model in Gazebo Classic."""
+
+import os
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    SetEnvironmentVariable,
+)
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration
+from launch_ros.actions import Node
+import xacro
+
+
+def _build_simulation(context):
+    description_share = get_package_share_directory("robot_description")
+    simulation_share = get_package_share_directory("robot_simulation")
+    assets_share = get_package_share_directory("simulation_assets")
+    gazebo_share = get_package_share_directory("gazebo_ros")
+
+    xacro_path = os.path.join(description_share, "urdf", "piracer.urdf.xacro")
+    default_world_path = os.path.join(simulation_share, "worlds", "room15x15.world")
+    world_path = LaunchConfiguration("world").perform(context) or default_world_path
+    camera_enabled = LaunchConfiguration("camera_enabled").perform(context).lower()
+    yolo_enabled = LaunchConfiguration("yolo_enabled").perform(context).lower()
+    robot_description = xacro.process_file(
+        xacro_path, mappings={"include_camera": camera_enabled}
+    ).toxml()
+
+    gazebo_server = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(gazebo_share, "launch", "gzserver.launch.py")
+        ),
+        launch_arguments={"world": world_path, "factory": "true"}.items(),
+    )
+    gazebo_client = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(gazebo_share, "launch", "gzclient.launch.py")
+        ),
+        condition=IfCondition(LaunchConfiguration("gui")),
+    )
+    state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        parameters=[{"robot_description": robot_description, "use_sim_time": True}],
+    )
+    spawn_model = Node(
+        package="gazebo_ros",
+        executable="spawn_entity.py",
+        arguments=[
+            "-topic", "robot_description", "-entity", "piracer", "-timeout", "120",
+            "-x", LaunchConfiguration("robot_spawn_x"),
+            "-y", LaunchConfiguration("robot_spawn_y"),
+            "-z", LaunchConfiguration("robot_spawn_z"),
+            "-Y", LaunchConfiguration("robot_spawn_yaw"),
+        ],
+        output="screen",
+    )
+    suitcase_control_gui = Node(
+        package="rqt_robot_steering",
+        executable="rqt_robot_steering",
+        remappings=[("/cmd_vel", "/sim012_target/cmd_vel")],
+        condition=IfCondition(LaunchConfiguration("suitcase_control_gui")),
+        output="screen",
+    )
+    camera_viewer = Node(
+        package="rqt_image_view",
+        executable="rqt_image_view",
+        arguments=[LaunchConfiguration("camera_view_topic")],
+        condition=IfCondition(LaunchConfiguration("camera_enabled")),
+        output="screen",
+    )
+    yolo_nodes = []
+    if yolo_enabled in {"1", "true", "yes"}:
+        perception_share = get_package_share_directory("robot_perception")
+        model_path = LaunchConfiguration("yolo_model_path").perform(context).strip()
+        if not model_path:
+            model_path = os.path.join(
+                perception_share,
+                "models",
+                "object_detection_yolox_m_20260918.onnx",
+            )
+        yolo_nodes.append(Node(
+            package="robot_perception",
+            executable="yolo_node",
+            parameters=[{
+                "image_topic": LaunchConfiguration("yolo_image_topic").perform(context),
+                "model_path": model_path,
+                "confidence": float(
+                    LaunchConfiguration("yolo_confidence").perform(context)
+                ),
+                "opencv_num_threads": int(
+                    LaunchConfiguration("yolo_opencv_num_threads").perform(context)
+                ),
+            }],
+            output="screen",
+        ))
+
+    return [
+        SetEnvironmentVariable("GAZEBO_MODEL_DATABASE_URI", ""),
+        SetEnvironmentVariable(
+            "GAZEBO_MODEL_PATH",
+            [
+                os.path.join(simulation_share, "models"),
+                ":",
+                os.path.join(assets_share, "assets"),
+                ":",
+                os.path.dirname(description_share),
+                ":",
+                EnvironmentVariable("GAZEBO_MODEL_PATH", default_value=""),
+            ],
+        ),
+        SetEnvironmentVariable(
+            "GAZEBO_PLUGIN_PATH",
+            ["/opt/ros/humble/lib:", EnvironmentVariable("GAZEBO_PLUGIN_PATH", default_value="")],
+        ),
+        gazebo_server,
+        gazebo_client,
+        state_publisher,
+        spawn_model,
+        suitcase_control_gui,
+        *yolo_nodes,
+        camera_viewer,
+    ]
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument("gui", default_value="true"),
+        DeclareLaunchArgument("camera_enabled", default_value="true"),
+        DeclareLaunchArgument("suitcase_control_gui", default_value="true"),
+        DeclareLaunchArgument("yolo_enabled", default_value="false"),
+        DeclareLaunchArgument("yolo_model_path", default_value=""),
+        DeclareLaunchArgument("yolo_image_topic", default_value="/piracer/sim_camera/color/image_raw"),
+        DeclareLaunchArgument("yolo_confidence", default_value="0.35"),
+        DeclareLaunchArgument("yolo_opencv_num_threads", default_value="8"),
+        DeclareLaunchArgument("camera_view_topic", default_value="/piracer/sim_camera/color/image_raw"),
+        DeclareLaunchArgument("world", default_value=""),
+        DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),
+        DeclareLaunchArgument("robot_spawn_y", default_value="0.0"),
+        DeclareLaunchArgument("robot_spawn_z", default_value="0.0"),
+        DeclareLaunchArgument("robot_spawn_yaw", default_value="0.0"),
+        OpaqueFunction(function=_build_simulation),
+    ])

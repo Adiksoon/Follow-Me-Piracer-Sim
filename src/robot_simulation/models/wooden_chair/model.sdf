@@ -1,0 +1,82 @@
+<?xml version="1.0"?>
+<sdf version="1.5">
+  <model name="wooden_chair">
+    <static>true</static>
+    <link name="chair">
+      <collision name="seat_collision">
+        <pose>0 0 0.45 0 0 0</pose>
+        <geometry><box><size>0.52 0.48 0.06</size></box></geometry>
+      </collision>
+      <visual name="seat">
+        <pose>0 0 0.45 0 0 0</pose>
+        <geometry><box><size>0.52 0.48 0.06</size></box></geometry>
+        <material><ambient>0.34 0.16 0.06 1</ambient><diffuse>0.55 0.28 0.10 1</diffuse></material>
+      </visual>
+
+      <collision name="front_left_leg_collision">
+        <pose>-0.19 -0.18 0.21 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.42</size></box></geometry>
+      </collision>
+      <visual name="front_left_leg">
+        <pose>-0.19 -0.18 0.21 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.42</size></box></geometry>
+        <material><ambient>0.34 0.16 0.06 1</ambient><diffuse>0.55 0.28 0.10 1</diffuse></material>
+      </visual>
+      <collision name="front_right_leg_collision">
+        <pose>0.19 -0.18 0.21 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.42</size></box></geometry>
+      </collision>
+      <visual name="front_right_leg">
+        <pose>0.19 -0.18 0.21 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.42</size></box></geometry>
+        <material><ambient>0.34 0.16 0.06 1</ambient><diffuse>0.55 0.28 0.10 1</diffuse></material>
+      </visual>
+      <collision name="rear_left_leg_collision">
+        <pose>-0.19 0.18 0.21 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.42</size></box></geometry>
+      </collision>
+      <visual name="rear_left_leg">
+        <pose>-0.19 0.18 0.21 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.42</size></box></geometry>
+        <material><ambient>0.34 0.16 0.06 1</ambient><diffuse>0.55 0.28 0.10 1</diffuse></material>
+      </visual>
+      <collision name="rear_right_leg_collision">
+        <pose>0.19 0.18 0.21 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.42</size></box></geometry>
+      </collision>
+      <visual name="rear_right_leg">
+        <pose>0.19 0.18 0.21 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.42</size></box></geometry>
+        <material><ambient>0.34 0.16 0.06 1</ambient><diffuse>0.55 0.28 0.10 1</diffuse></material>
+      </visual>
+
+      <collision name="back_left_post_collision">
+        <pose>-0.19 0.19 0.67 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.48</size></box></geometry>
+      </collision>
+      <visual name="back_left_post">
+        <pose>-0.19 0.19 0.67 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.48</size></box></geometry>
+        <material><ambient>0.34 0.16 0.06 1</ambient><diffuse>0.55 0.28 0.10 1</diffuse></material>
+      </visual>
+      <collision name="back_right_post_collision">
+        <pose>0.19 0.19 0.67 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.48</size></box></geometry>
+      </collision>
+      <visual name="back_right_post">
+        <pose>0.19 0.19 0.67 0 0 0</pose>
+        <geometry><box><size>0.07 0.07 0.48</size></box></geometry>
+        <material><ambient>0.34 0.16 0.06 1</ambient><diffuse>0.55 0.28 0.10 1</diffuse></material>
+      </visual>
+      <collision name="backrest_collision">
+        <pose>0 0.19 0.76 0 0 0</pose>
+        <geometry><box><size>0.52 0.07 0.40</size></box></geometry>
+      </collision>
+      <visual name="backrest">
+        <pose>0 0.19 0.76 0 0 0</pose>
+        <geometry><box><size>0.52 0.07 0.40</size></box></geometry>
+        <material><ambient>0.34 0.16 0.06 1</ambient><diffuse>0.55 0.28 0.10 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+</sdf>

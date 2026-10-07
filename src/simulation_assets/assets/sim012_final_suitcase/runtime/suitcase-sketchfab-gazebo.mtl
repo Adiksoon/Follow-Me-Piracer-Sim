@@ -1,0 +1,37 @@
+# Compatibility copy for the filename declared by suitcase.obj.
+# Material definitions are identical to suitcase.mtl; do not edit independently.
+
+newmtl Mat 1
+Kd 0.82 0.02 0.02
+Ka 0.70 0.01 0.01
+Ks 0.400000006 0.400000006 0.400000006
+Ke 0 0 0
+Ni 1
+Ns 0
+illum 1
+
+newmtl Mat 2
+Kd 0.0310633089 0.0310633089 0.0310633089
+Ka 0.100000001 0.100000001 0.100000001
+Ks 0.400000006 0.400000006 0.400000006
+Ke 0 0 0
+Ni 1
+Ns 0
+illum 1
+
+newmtl Mat 3
+Kd 0.800000012 0.800000012 0.800000012
+Ka 0.100000001 0.100000001 0.100000001
+Ks 0.400000006 0.400000006 0.400000006
+Ke 0 0 0
+Ni 1
+Ns 0
+illum 1
+
+newmtl material_3
+Kd 1 1 1
+Ka 0.100000001 0.100000001 0.100000001
+Ks 0.400000006 0.400000006 0.400000006
+Ke 0 0 0
+Ni 1
+illum 1
