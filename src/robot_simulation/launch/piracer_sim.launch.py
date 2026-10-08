@@ -24,7 +24,7 @@ def _build_simulation(context):
     gazebo_share = get_package_share_directory("gazebo_ros")
 
     xacro_path = os.path.join(description_share, "urdf", "piracer.urdf.xacro")
-    default_world_path = os.path.join(simulation_share, "worlds", "room15x15.world")
+    default_world_path = os.path.join(simulation_share, "worlds", "sala_laboratoryjna.world")
     world_path = LaunchConfiguration("world").perform(context) or default_world_path
     camera_enabled = LaunchConfiguration("camera_enabled").perform(context).lower()
     yolo_enabled = LaunchConfiguration("yolo_enabled").perform(context).lower()
