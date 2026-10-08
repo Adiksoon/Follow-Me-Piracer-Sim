@@ -2,7 +2,7 @@
 
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -78,6 +78,13 @@ def _build_simulation(context):
     yolo_nodes = []
     if yolo_enabled in {"1", "true", "yes"}:
         perception_share = get_package_share_directory("robot_perception")
+        perception_prefix = get_package_prefix("robot_perception")
+        workspace_root = os.path.dirname(os.path.dirname(perception_prefix))
+        gpu_python = os.path.join(workspace_root, ".venv", "bin", "python")
+        if not os.path.isfile(gpu_python):
+            raise RuntimeError(
+                f"YOLO GPU Python environment was not found at {gpu_python}"
+            )
         model_path = LaunchConfiguration("yolo_model_path").perform(context).strip()
         if not model_path:
             model_path = os.path.join(
@@ -98,6 +105,7 @@ def _build_simulation(context):
                     LaunchConfiguration("yolo_opencv_num_threads").perform(context)
                 ),
             }],
+            prefix=gpu_python,
             output="screen",
         ))
 
