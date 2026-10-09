@@ -28,6 +28,7 @@ def _build_simulation(context):
     world_path = LaunchConfiguration("world").perform(context) or default_world_path
     camera_enabled = LaunchConfiguration("camera_enabled").perform(context).lower()
     yolo_enabled = LaunchConfiguration("yolo_enabled").perform(context).lower()
+    yolo_backend = LaunchConfiguration("yolo_backend").perform(context).strip().lower()
     robot_description = xacro.process_file(
         xacro_path, mappings={"include_camera": camera_enabled}
     ).toxml()
@@ -86,28 +87,66 @@ def _build_simulation(context):
                 f"YOLO GPU Python environment was not found at {gpu_python}"
             )
         model_path = LaunchConfiguration("yolo_model_path").perform(context).strip()
-        if not model_path:
-            model_path = os.path.join(
-                perception_share,
-                "models",
-                "object_detection_yolox_m_20260918.onnx",
+        if yolo_backend == "yolox":
+            if not model_path:
+                model_path = os.path.join(
+                    perception_share,
+                    "models",
+                    "object_detection_yolox_m_20260918.onnx",
+                )
+            yolo_nodes.append(Node(
+                package="robot_perception",
+                executable="yolo_node",
+                parameters=[{
+                    "image_topic": LaunchConfiguration("yolo_image_topic").perform(context),
+                    "model_path": model_path,
+                    "confidence": float(
+                        LaunchConfiguration("yolo_confidence").perform(context)
+                    ),
+                    "opencv_num_threads": int(
+                        LaunchConfiguration("yolo_opencv_num_threads").perform(context)
+                    ),
+                }],
+                prefix=gpu_python,
+                output="screen",
+            ))
+        elif yolo_backend == "yolo11n_dnn":
+            if not model_path:
+                raise RuntimeError(
+                    "yolo_model_path must name the YOLO11n ONNX file when "
+                    "yolo_backend:=yolo11n_dnn"
+                )
+            yolo_nodes.append(Node(
+                package="robot_perception",
+                executable="yolo11n_node",
+                parameters=[{
+                    "image_topic": LaunchConfiguration("yolo_image_topic").perform(context),
+                    "model_path": model_path,
+                    "confidence": float(
+                        LaunchConfiguration("yolo_confidence").perform(context)
+                    ),
+                    "nms_iou": float(LaunchConfiguration("yolo_nms_iou").perform(context)),
+                    "imgsz": int(LaunchConfiguration("yolo_imgsz").perform(context)),
+                    "opencv_num_threads": int(
+                        LaunchConfiguration("yolo_opencv_num_threads").perform(context)
+                    ),
+                    "torch_num_threads": int(
+                        LaunchConfiguration("yolo_torch_num_threads").perform(context)
+                    ),
+                }],
+                prefix=gpu_python,
+                additional_env={
+                    "OMP_NUM_THREADS": "1",
+                    "MKL_NUM_THREADS": "1",
+                    "OPENBLAS_NUM_THREADS": "1",
+                },
+                output="screen",
+            ))
+        else:
+            raise ValueError(
+                "yolo_backend must be 'yolox' or 'yolo11n_dnn'; "
+                f"received {yolo_backend!r}"
             )
-        yolo_nodes.append(Node(
-            package="robot_perception",
-            executable="yolo_node",
-            parameters=[{
-                "image_topic": LaunchConfiguration("yolo_image_topic").perform(context),
-                "model_path": model_path,
-                "confidence": float(
-                    LaunchConfiguration("yolo_confidence").perform(context)
-                ),
-                "opencv_num_threads": int(
-                    LaunchConfiguration("yolo_opencv_num_threads").perform(context)
-                ),
-            }],
-            prefix=gpu_python,
-            output="screen",
-        ))
 
     return [
         SetEnvironmentVariable("GAZEBO_MODEL_DATABASE_URI", ""),
@@ -143,10 +182,14 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_enabled", default_value="true"),
         DeclareLaunchArgument("suitcase_control_gui", default_value="true"),
         DeclareLaunchArgument("yolo_enabled", default_value="false"),
+        DeclareLaunchArgument("yolo_backend", default_value="yolox"),
         DeclareLaunchArgument("yolo_model_path", default_value=""),
         DeclareLaunchArgument("yolo_image_topic", default_value="/piracer/sim_camera/color/image_raw"),
         DeclareLaunchArgument("yolo_confidence", default_value="0.35"),
+        DeclareLaunchArgument("yolo_nms_iou", default_value="0.5"),
+        DeclareLaunchArgument("yolo_imgsz", default_value="640"),
         DeclareLaunchArgument("yolo_opencv_num_threads", default_value="8"),
+        DeclareLaunchArgument("yolo_torch_num_threads", default_value="1"),
         DeclareLaunchArgument("camera_view_topic", default_value="/piracer/sim_camera/color/image_raw"),
         DeclareLaunchArgument("world", default_value=""),
         DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),
