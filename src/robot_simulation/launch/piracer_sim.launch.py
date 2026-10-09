@@ -132,6 +132,7 @@ def _build_simulation(context):
                     ),
                     "nms_iou": float(LaunchConfiguration("yolo_nms_iou").perform(context)),
                     "imgsz": int(LaunchConfiguration("yolo_imgsz").perform(context)),
+                    "class_filter": LaunchConfiguration("yolo_class_filter").perform(context).strip(),
                     "opencv_num_threads": int(
                         LaunchConfiguration("yolo_opencv_num_threads").perform(context)
                     ),
@@ -194,6 +195,7 @@ def generate_launch_description():
         DeclareLaunchArgument("yolo_confidence", default_value="0.35"),
         DeclareLaunchArgument("yolo_nms_iou", default_value="0.5"),
         DeclareLaunchArgument("yolo_imgsz", default_value="640"),
+        DeclareLaunchArgument("yolo_class_filter", default_value=""),
         DeclareLaunchArgument("yolo_opencv_num_threads", default_value="8"),
         DeclareLaunchArgument("yolo_torch_num_threads", default_value="1"),
         DeclareLaunchArgument("camera_view_topic", default_value="/piracer/sim_camera/color/image_raw"),
