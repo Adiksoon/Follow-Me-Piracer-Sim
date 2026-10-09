@@ -151,7 +151,7 @@ def generate_launch_description():
         DeclareLaunchArgument("world", default_value=""),
         DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),
         DeclareLaunchArgument("robot_spawn_y", default_value="0.0"),
-        DeclareLaunchArgument("robot_spawn_z", default_value="0.0"),
+        DeclareLaunchArgument("robot_spawn_z", default_value="0.019"),
         DeclareLaunchArgument("robot_spawn_yaw", default_value="0.0"),
         OpaqueFunction(function=_build_simulation),
     ])
