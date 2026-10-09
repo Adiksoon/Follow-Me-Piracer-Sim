@@ -108,6 +108,10 @@ def _build_simulation(context):
                     "confidence": float(
                         LaunchConfiguration("yolo_confidence").perform(context)
                     ),
+                    "nms_threshold": float(
+                        LaunchConfiguration("yolo_nms_iou").perform(context)
+                    ),
+                    "class_filter": LaunchConfiguration("yolo_class_filter").perform(context).strip(),
                     "opencv_num_threads": int(
                         LaunchConfiguration("yolo_opencv_num_threads").perform(context)
                     ),
