@@ -27,10 +27,15 @@ def _build_simulation(context):
     default_world_path = os.path.join(simulation_share, "worlds", "sala_laboratoryjna.world")
     world_path = LaunchConfiguration("world").perform(context) or default_world_path
     camera_enabled = LaunchConfiguration("camera_enabled").perform(context).lower()
+    camera_update_rate = LaunchConfiguration("camera_update_rate").perform(context)
     yolo_enabled = LaunchConfiguration("yolo_enabled").perform(context).lower()
     yolo_backend = LaunchConfiguration("yolo_backend").perform(context).strip().lower()
     robot_description = xacro.process_file(
-        xacro_path, mappings={"include_camera": camera_enabled}
+        xacro_path,
+        mappings={
+            "include_camera": camera_enabled,
+            "camera_update_rate": camera_update_rate,
+        },
     ).toxml()
 
     gazebo_server = IncludeLaunchDescription(
@@ -180,6 +185,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("camera_enabled", default_value="true"),
+        DeclareLaunchArgument("camera_update_rate", default_value="30.0"),
         DeclareLaunchArgument("suitcase_control_gui", default_value="true"),
         DeclareLaunchArgument("yolo_enabled", default_value="false"),
         DeclareLaunchArgument("yolo_backend", default_value="yolox"),
