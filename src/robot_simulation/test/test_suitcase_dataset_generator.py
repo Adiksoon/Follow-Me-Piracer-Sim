@@ -1,0 +1,150 @@
+import importlib.util
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+import unittest
+
+import numpy as np
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "suitcase_dataset_generator.py"
+SPEC = importlib.util.spec_from_file_location("suitcase_dataset_generator", SCRIPT)
+generator = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = generator
+SPEC.loader.exec_module(generator)
+
+
+class PilotPlanTests(unittest.TestCase):
+    def test_pilot_has_20_samples_and_keeps_distance_groups_separate(self):
+        samples = generator.pilot_samples()
+        self.assertEqual(20, len(samples))
+        self.assertEqual(10, sum(sample.split == "train" for sample in samples))
+        self.assertEqual(10, sum(sample.split == "val" for sample in samples))
+        self.assertEqual({2.7}, {sample.x_m for sample in samples if sample.split == "train"})
+        self.assertEqual({3.3}, {sample.x_m for sample in samples if sample.split == "val"})
+        self.assertEqual(set(generator.PILOT_YAWS_DEG), {sample.yaw_deg for sample in samples})
+        self.assertEqual(20, len({sample.sample_id for sample in samples}))
+
+
+class CaptureSafeguardTests(unittest.TestCase):
+    def test_set_entity_state_request_uses_only_declared_request_fields(self):
+        class SetRequest:
+            __slots__ = ("state",)
+
+            def __init__(self):
+                self.state = SimpleNamespace(
+                    name="",
+                    reference_frame="",
+                    pose=SimpleNamespace(
+                        position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                        orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+                    ),
+                )
+
+        sample = generator.PilotSample("sample", "train", "scenario", 2.7, 0.0, 0.05, 90)
+        request = generator.populate_set_entity_state_request(SetRequest(), "suitcase_target", sample)
+        self.assertEqual("suitcase_target", request.state.name)
+        self.assertEqual("world", request.state.reference_frame)
+        self.assertEqual((2.7, 0.0, 0.05), (
+            request.state.pose.position.x,
+            request.state.pose.position.y,
+            request.state.pose.position.z,
+        ))
+        self.assertAlmostEqual(np.sqrt(0.5), request.state.pose.orientation.z)
+        self.assertAlmostEqual(np.sqrt(0.5), request.state.pose.orientation.w)
+
+    def test_rgb_and_depth_must_both_follow_the_current_pose_timestamp(self):
+        self.assertTrue(generator.rgbd_timestamps_are_fresh(10.02, 10.03, 10.01, 0.05))
+        self.assertFalse(generator.rgbd_timestamps_are_fresh(10.00, 10.03, 10.01, 0.05))
+        self.assertFalse(generator.rgbd_timestamps_are_fresh(10.03, 10.00, 10.01, 0.05))
+        self.assertFalse(generator.rgbd_timestamps_are_fresh(10.02, 10.10, 10.01, 0.05))
+
+    def test_capture_pose_check_compares_full_translation_and_orientation(self):
+        position_delta, orientation_delta = generator.capture_pose_delta(
+            (2.7, 0.0, 0.05),
+            (0.0, 0.0, 0.0, 1.0),
+            (2.7, 0.0, 0.07),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+        self.assertAlmostEqual(0.02, position_delta)
+        self.assertAlmostEqual(0.0, orientation_delta)
+        _, yaw_delta = generator.capture_pose_delta(
+            (2.7, 0.0, 0.05),
+            (0.0, 0.0, 0.0, 1.0),
+            (2.7, 0.0, 0.05),
+            (0.0, 0.0, np.sin(np.deg2rad(6.0)), np.cos(np.deg2rad(6.0))),
+        )
+        self.assertAlmostEqual(np.deg2rad(12.0), yaw_delta)
+
+
+class GeometryTests(unittest.TestCase):
+    def test_approved_dae_geometry_is_read_from_the_real_mesh(self):
+        mesh = generator.load_collada_geometry(generator.ROOT / generator.MESH_REL)
+        self.assertEqual(5, mesh.geometry_count)
+        self.assertEqual(83104, mesh.vertices.shape[0])
+        self.assertEqual(124944, mesh.triangle_count)
+        self.assertAlmostEqual(1.0065, mesh.local_bounds_max[2], places=3)
+
+    def test_pilot_footprints_clear_approved_static_world_collisions(self):
+        world = generator.ROOT / generator.WORLD_REL
+        obstacles = generator.validate_pilot_clearance(world)
+        self.assertEqual(88, len(obstacles))
+
+    def test_identity_camera_projection_and_yolo_normalization(self):
+        camera_points = np.array([
+            [-0.5, -0.25, 2.0],
+            [0.5, 0.25, 2.0],
+            [0.0, 0.0, 2.0],
+        ])
+        bbox = generator.projected_bbox(camera_points, (100.0, 100.0, 100.0, 50.0), 200, 100)
+        self.assertEqual((75.0, 37.5, 125.0, 62.5), bbox)
+        normalized = generator.yolo_bbox(bbox, 200, 100)
+        np.testing.assert_allclose((0.5, 0.5, 0.25, 0.25), normalized)
+
+    def test_pose_transform_respects_ros_xyzw_quaternion(self):
+        points_camera = generator.pose_points_to_camera(
+            np.array([[1.0, 0.0, 0.0]]),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+        np.testing.assert_allclose([[1.0, 0.0, 0.0]], points_camera)
+
+    def test_distorted_projection_uses_camera_calibration(self):
+        points = np.array([[1.0, 0.0, 2.0]])
+        u, v, _ = generator.project_camera_points(
+            points, (100.0, 100.0, 100.0, 50.0), (0.2, 0.0, 0.0, 0.0, 0.0)
+        )
+        self.assertGreater(u[0], 150.0)
+        self.assertAlmostEqual(50.0, v[0])
+
+    def test_edge_clipped_geometry_is_rejected(self):
+        camera_points = np.array([
+            [-2.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+            [0.5, 0.5, 2.0],
+        ])
+        with self.assertRaisesRegex(generator.CaptureRejected, "CLIPPED"):
+            generator.projected_bbox(camera_points, (100.0, 100.0, 100.0, 50.0), 200, 100)
+
+    def test_aligned_depth_confirms_visible_geometry_and_detects_occlusion(self):
+        intrinsics = (100.0, 100.0, 20.0, 20.0)
+        pixels = np.array([(x, y) for y in range(5, 15) for x in range(5, 15)], dtype=np.float64)
+        z = np.full((pixels.shape[0], 1), 2.0)
+        points = np.column_stack(((pixels[:, 0] - 20) * z[:, 0] / 100,
+                                  (pixels[:, 1] - 20) * z[:, 0] / 100,
+                                  z[:, 0]))
+        visible_depth = np.full((40, 40), 2.0, dtype=np.float32)
+        visible = generator.depth_visibility(points, intrinsics, visible_depth)
+        self.assertEqual(1.0, visible["visible_fraction"])
+
+        occluding_depth = visible_depth.copy()
+        occluding_depth[5:15, 5:15] = 1.0
+        occluded = generator.depth_visibility(points, intrinsics, occluding_depth)
+        self.assertEqual(0.0, occluded["visible_fraction"])
+
+
+if __name__ == "__main__":
+    unittest.main()
