@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -54,6 +55,15 @@ def _package_share(package_name: str) -> Path | None:
         return None
 
 
+def robot_description_xacro_path() -> Path:
+    if SOURCE_ROOT is not None:
+        return SOURCE_ROOT / ROBOT_DESCRIPTION_XACRO_REL
+    share = _package_share("robot_description")
+    if share is None:
+        raise FileNotFoundError("robot_description package is unavailable for the camera transform chain")
+    return share / "urdf/piracer.urdf.xacro"
+
+
 SIMULATION_SHARE = (
     SOURCE_ROOT / "src/robot_simulation" if SOURCE_ROOT is not None
     else _package_share("robot_simulation") or (ROOT / "src/robot_simulation")
@@ -71,7 +81,10 @@ FURNITURE_SHA256 = {
     "wooden_chair_blue_gray/model.sdf": "6c0d4d2219af49b9b5737e0a25b36ebe5b69349640d4509eff1f21fe3027b28f",
 }
 TARGET_ENTITY = "suitcase_target"
-CAMERA_ENTITY = "piracer::sim_camera_optical_frame"
+BASE_LINK_NAME = "piracer::base_link"
+LINK_STATES_TOPIC = "/gazebo/link_states"
+OPTICAL_FRAME_NAME = "sim_camera_optical_frame"
+ROBOT_DESCRIPTION_XACRO_REL = Path("src/robot_description/urdf/piracer.urdf.xacro")
 IMAGE_TOPIC = "/piracer/sim_camera/color/image_raw"
 DEPTH_TOPIC = "/piracer/sim_camera/depth/image_raw"
 CAMERA_INFO_TOPIC = "/piracer/sim_camera/color/camera_info"
@@ -87,6 +100,7 @@ MIN_DEPTH_MATCHES = 100
 MIN_VISIBLE_FRACTION = 0.80
 CAPTURE_POSE_MAX_POSITION_DELTA_M = 0.02
 CAPTURE_POSE_MAX_ORIENTATION_DELTA_RAD = math.radians(2.0)
+DEFAULT_MAX_POSE_AGE_S = 0.5
 
 COLLADA_NS = "http://www.collada.org/2005/11/COLLADASchema"
 NS = {"c": COLLADA_NS}
@@ -247,14 +261,190 @@ def quaternion_matrix_xyzw(quaternion: tuple[float, float, float, float]) -> np.
     """Return a 3x3 rotation matrix from a ROS-order x,y,z,w quaternion."""
     x, y, z, w = (float(value) for value in quaternion)
     norm = math.sqrt(x * x + y * y + z * z + w * w)
-    if norm < 1e-12:
-        raise ValueError("Quaternion has zero length")
+    if not math.isfinite(norm) or norm < 1e-12:
+        raise ValueError("Quaternion is invalid or has zero length")
     x, y, z, w = x / norm, y / norm, z / norm, w / norm
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
     ], dtype=np.float64)
+
+
+def _matrix_from_xyz_rpy(
+    xyz: tuple[float, float, float], rpy: tuple[float, float, float],
+) -> np.ndarray:
+    values = np.asarray((*xyz, *rpy), dtype=np.float64)
+    if values.shape != (6,) or not np.all(np.isfinite(values)):
+        raise ValueError("URDF fixed-joint origin must contain six finite values")
+    x, y, z = xyz
+    roll, pitch, yaw = rpy
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    rotation = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ], dtype=np.float64)
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = (x, y, z)
+    return transform
+
+
+def _matrix_from_pose(
+    position: tuple[float, float, float], quaternion_xyzw: tuple[float, float, float, float],
+) -> np.ndarray:
+    values = np.asarray(position, dtype=np.float64)
+    if values.shape != (3,) or not np.all(np.isfinite(values)):
+        raise ValueError("Pose position must contain three finite values")
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = quaternion_matrix_xyzw(quaternion_xyzw)
+    transform[:3, 3] = values
+    return transform
+
+
+def _quaternion_xyzw_from_matrix(rotation: np.ndarray) -> tuple[float, float, float, float]:
+    matrix = np.asarray(rotation, dtype=np.float64)
+    if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+        raise ValueError("Rotation matrix must be finite and 3x3")
+    if (not np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-6)
+            or not math.isclose(float(np.linalg.det(matrix)), 1.0, abs_tol=1e-6)):
+        raise ValueError("Rotation matrix is not a valid rigid transform")
+    trace = float(np.trace(matrix))
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * scale
+        x = (matrix[2, 1] - matrix[1, 2]) / scale
+        y = (matrix[0, 2] - matrix[2, 0]) / scale
+        z = (matrix[1, 0] - matrix[0, 1]) / scale
+    elif matrix[0, 0] > matrix[1, 1] and matrix[0, 0] > matrix[2, 2]:
+        scale = math.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
+        w = (matrix[2, 1] - matrix[1, 2]) / scale
+        x = 0.25 * scale
+        y = (matrix[0, 1] + matrix[1, 0]) / scale
+        z = (matrix[0, 2] + matrix[2, 0]) / scale
+    elif matrix[1, 1] > matrix[2, 2]:
+        scale = math.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
+        w = (matrix[0, 2] - matrix[2, 0]) / scale
+        x = (matrix[0, 1] + matrix[1, 0]) / scale
+        y = 0.25 * scale
+        z = (matrix[1, 2] + matrix[2, 1]) / scale
+    else:
+        scale = math.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
+        w = (matrix[1, 0] - matrix[0, 1]) / scale
+        x = (matrix[0, 2] + matrix[2, 0]) / scale
+        y = (matrix[1, 2] + matrix[2, 1]) / scale
+        z = 0.25 * scale
+    quaternion = np.asarray((x, y, z, w), dtype=np.float64)
+    norm = float(np.linalg.norm(quaternion))
+    if not math.isfinite(norm) or norm < 1e-12:
+        raise ValueError("Rotation matrix produced an invalid quaternion")
+    return tuple(float(value) for value in quaternion / norm)
+
+
+def _origin_values(
+    origin: ET.Element | None, defaults: dict[str, str],
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    def parse(attribute: str) -> tuple[float, float, float]:
+        raw = origin.get(attribute, "0 0 0") if origin is not None else "0 0 0"
+        raw = re.sub(
+            r"\$\(arg\s+([A-Za-z0-9_]+)\)",
+            lambda match: defaults.get(match.group(1), ""),
+            raw,
+        )
+        values = raw.split()
+        if len(values) != 3 or any(not value for value in values):
+            raise ValueError(f"URDF fixed-joint {attribute} must contain three resolved values")
+        parsed = tuple(float(value) for value in values)
+        if not all(math.isfinite(value) for value in parsed):
+            raise ValueError(f"URDF fixed-joint {attribute} must be finite")
+        return parsed
+    return parse("xyz"), parse("rpy")
+
+
+def fixed_transform_between_links(
+    description_path: Path,
+    parent_frame: str,
+    child_frame: str,
+) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Compose a unique directed fixed-joint path, resolving Xacro argument defaults."""
+    root = ET.parse(description_path).getroot()
+    defaults = {
+        element.get("name"): element.get("default")
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "arg" and element.get("name") and element.get("default") is not None
+    }
+    graph: dict[str, list[tuple[str, np.ndarray]]] = {}
+    for joint in root.iter("joint"):
+        if joint.get("type") != "fixed":
+            continue
+        parent = joint.find("parent")
+        child = joint.find("child")
+        if parent is None or child is None or not parent.get("link") or not child.get("link"):
+            raise ValueError("URDF fixed joint is missing its parent or child frame")
+        xyz, rpy = _origin_values(joint.find("origin"), defaults)
+        transform = _matrix_from_xyz_rpy(xyz, rpy)
+        parent_name, child_name = parent.get("link"), child.get("link")
+        graph.setdefault(parent_name, []).append((child_name, transform))
+        graph.setdefault(child_name, []).append((parent_name, np.linalg.inv(transform)))
+
+    queue: list[tuple[str, np.ndarray, tuple[str, ...]]] = [(parent_frame, np.eye(4), (parent_frame,))]
+    paths: list[tuple[np.ndarray, tuple[str, ...]]] = []
+    while queue:
+        frame, transform, path = queue.pop(0)
+        if frame == child_frame:
+            paths.append((transform, path))
+            continue
+        for next_frame, edge_transform in graph.get(frame, []):
+            if next_frame not in path:
+                queue.append((next_frame, transform @ edge_transform, path + (next_frame,)))
+    if len(paths) != 1:
+        raise ValueError(f"URDF does not define a unique fixed transform from {parent_frame} to {child_frame}")
+    transform = paths[0][0]
+    if not np.all(np.isfinite(transform)):
+        raise ValueError("URDF transform contains non-finite values")
+    _quaternion_xyzw_from_matrix(transform[:3, :3])
+    return transform, paths[0][1]
+
+
+def camera_pose_from_link_states(
+    link_states,
+    base_link_name: str,
+    base_to_optical: np.ndarray,
+    *,
+    received_at_monotonic: float,
+    now_monotonic: float,
+    max_age_s: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Return world optical pose from a fresh exact LinkStates entry."""
+    age = now_monotonic - received_at_monotonic
+    if (not math.isfinite(age) or not math.isfinite(max_age_s)
+            or max_age_s <= 0.0 or age < 0.0 or age > max_age_s):
+        raise ValueError("Gazebo base_link pose is stale or has an invalid freshness limit")
+    names = list(link_states.name)
+    poses = list(link_states.pose)
+    if len(names) != len(poses):
+        raise ValueError("Gazebo LinkStates names and poses have different lengths")
+    matching = [index for index, name in enumerate(names) if name == base_link_name]
+    if len(matching) != 1:
+        raise ValueError(f"Gazebo LinkStates must contain exactly one {base_link_name}")
+    pose = poses[matching[0]]
+    position = (pose.position.x, pose.position.y, pose.position.z)
+    quaternion = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
+    world_to_base = _matrix_from_pose(position, quaternion)
+    transform = np.asarray(base_to_optical, dtype=np.float64)
+    if (transform.shape != (4, 4) or not np.all(np.isfinite(transform))
+            or not np.allclose(transform[3], (0.0, 0.0, 0.0, 1.0), atol=1e-9)):
+        raise ValueError("URDF camera transform is invalid")
+    if (not np.allclose(transform[:3, :3].T @ transform[:3, :3], np.eye(3), atol=1e-6)
+            or not math.isclose(float(np.linalg.det(transform[:3, :3])), 1.0, abs_tol=1e-6)):
+        raise ValueError("URDF camera rotation is invalid")
+    camera_world = world_to_base @ transform
+    camera_position = tuple(float(value) for value in camera_world[:3, 3])
+    camera_quaternion = _quaternion_xyzw_from_matrix(camera_world[:3, :3])
+    return camera_position, camera_quaternion
 
 
 def pose_points_to_camera(
@@ -589,12 +779,32 @@ def run_capture(
     try:
         import rclpy
         from cv_bridge import CvBridge
+        from gazebo_msgs.msg import LinkStates
         from gazebo_msgs.srv import GetEntityState, SetEntityState
         from rclpy.node import Node
         from rclpy.qos import qos_profile_sensor_data
         from sensor_msgs.msg import CameraInfo, Image
     except ImportError as error:
         raise RuntimeError("ROS 2 Humble, gazebo_msgs, cv_bridge, and sensor_msgs must be sourced") from error
+
+    if not math.isfinite(args.max_pose_age_s) or args.max_pose_age_s <= 0.0:
+        raise ValueError("--max-pose-age-s must be a positive finite number")
+
+    xacro_path = robot_description_xacro_path()
+    if not xacro_path.is_file():
+        raise FileNotFoundError(f"Camera transform source is missing: {xacro_path}")
+    base_to_sensor, sensor_chain = fixed_transform_between_links(
+        xacro_path, "base_link", "sim_camera_link",
+    )
+    base_to_optical, optical_chain = fixed_transform_between_links(
+        xacro_path, "base_link", OPTICAL_FRAME_NAME,
+    )
+    # The converted production SDF records this physical camera sensor origin.
+    expected_sensor_transform = np.eye(4, dtype=np.float64)
+    expected_sensor_transform[:3, 3] = (0.18, 0.0, 0.12)
+    if not np.allclose(base_to_sensor, expected_sensor_transform, atol=1e-9):
+        raise ValueError("URDF camera sensor transform differs from the verified production pose")
+    transform_source_sha256 = sha256_file(xacro_path)
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -613,24 +823,36 @@ def run_capture(
             self.latest_depth = None
             self.latest_color_info = None
             self.latest_depth_info = None
+            self.latest_color_received_at = None
+            self.latest_depth_received_at = None
+            self.latest_link_states = None
+            self.latest_link_states_received_at = None
             self.create_subscription(Image, args.image_topic, self._on_color, qos_profile_sensor_data)
             self.create_subscription(Image, args.depth_topic, self._on_depth, qos_profile_sensor_data)
             self.create_subscription(CameraInfo, args.camera_info_topic, self._on_color_info, qos_profile_sensor_data)
             self.create_subscription(CameraInfo, args.depth_camera_info_topic, self._on_depth_info, qos_profile_sensor_data)
+            self.create_subscription(LinkStates, LINK_STATES_TOPIC, self._on_link_states, qos_profile_sensor_data)
             self.set_state = self.create_client(SetEntityState, args.set_state_service)
             self.get_state = self.create_client(GetEntityState, args.get_state_service)
 
         def _on_color(self, message: Image) -> None:
             self.latest_color = message
+            self.latest_color_received_at = time.monotonic()
 
         def _on_depth(self, message: Image) -> None:
             self.latest_depth = message
+            self.latest_depth_received_at = time.monotonic()
 
         def _on_color_info(self, message: CameraInfo) -> None:
             self.latest_color_info = message
 
         def _on_depth_info(self, message: CameraInfo) -> None:
             self.latest_depth_info = message
+
+        def _on_link_states(self, message: LinkStates) -> None:
+            # LinkStates has no header timestamp; freshness uses local monotonic receipt time.
+            self.latest_link_states = message
+            self.latest_link_states_received_at = time.monotonic()
 
         def spin_future(self, future, timeout_s: float = 10.0):
             deadline = time.monotonic() + timeout_s
@@ -652,6 +874,24 @@ def run_capture(
                 raise RuntimeError(f"GetEntityState failed for {entity_name}")
             return response
 
+        def camera_pose_from_link_states(self, not_before_monotonic: float):
+            deadline = time.monotonic() + args.service_timeout_s
+            while rclpy.ok() and time.monotonic() < deadline:
+                received_at = self.latest_link_states_received_at
+                if (self.latest_link_states is not None and received_at is not None
+                        and received_at >= not_before_monotonic):
+                    position, quaternion = camera_pose_from_link_states(
+                        self.latest_link_states, BASE_LINK_NAME, base_to_optical,
+                        received_at_monotonic=received_at,
+                        now_monotonic=time.monotonic(),
+                        max_age_s=args.max_pose_age_s,
+                    )
+                    return position, quaternion, received_at
+                rclpy.spin_once(self, timeout_sec=0.05)
+            raise TimeoutError(
+                f"No fresh {BASE_LINK_NAME} sample arrived on {LINK_STATES_TOPIC}"
+            )
+
         def set_target(self, sample: PilotSample) -> None:
             request = SetEntityState.Request()
             populate_set_entity_state_request(request, args.target_entity, sample)
@@ -659,7 +899,7 @@ def run_capture(
             if not response.success:
                 raise RuntimeError(f"SetEntityState failed for {args.target_entity}")
 
-        def snapshot(self, timeout_s: float, pose_stamp_s: float):
+        def snapshot(self, timeout_s: float, target_pose_stamp_s: float, camera_pose_received_at: float):
             deadline = time.monotonic() + timeout_s
             while rclpy.ok() and time.monotonic() < deadline:
                 rclpy.spin_once(self, timeout_sec=0.05)
@@ -667,6 +907,15 @@ def run_capture(
                 color_info, depth_info = self.latest_color_info, self.latest_depth_info
                 if color is None or depth is None or color_info is None or depth_info is None:
                     continue
+                color_received_at = self.latest_color_received_at
+                depth_received_at = self.latest_depth_received_at
+                if (color_received_at is None or depth_received_at is None
+                        or color_received_at <= camera_pose_received_at
+                        or depth_received_at <= camera_pose_received_at):
+                    continue
+                frame_pose_age_s = max(color_received_at, depth_received_at) - camera_pose_received_at
+                if frame_pose_age_s > args.max_pose_age_s:
+                    raise RuntimeError("Gazebo base_link pose became stale before the RGB-D frame arrived")
                 if any(frame != color.header.frame_id for frame in (
                     depth.header.frame_id, color_info.header.frame_id, depth_info.header.frame_id
                 )):
@@ -674,12 +923,15 @@ def run_capture(
                 color_stamp = color.header.stamp.sec + color.header.stamp.nanosec * 1e-9
                 depth_stamp = depth.header.stamp.sec + depth.header.stamp.nanosec * 1e-9
                 if not rgbd_timestamps_are_fresh(
-                    color_stamp, depth_stamp, pose_stamp_s, args.max_sync_delta_s
+                    color_stamp, depth_stamp, target_pose_stamp_s, args.max_sync_delta_s
                 ):
                     continue
                 color_bgr = self.bridge.imgmsg_to_cv2(color, desired_encoding="bgr8")
                 depth_raw = self.bridge.imgmsg_to_cv2(depth, desired_encoding="passthrough")
-                return color_bgr.copy(), depth_raw.copy(), color, depth, color_info, depth_info
+                return (
+                    color_bgr.copy(), depth_raw.copy(), color, depth, color_info, depth_info,
+                    frame_pose_age_s,
+                )
             raise TimeoutError("No synchronized RGB-D frame and CameraInfo received before timeout")
 
     rclpy.init(args=None)
@@ -698,7 +950,16 @@ def run_capture(
         "static_world_collision_boxes_checked": obstacle_count,
         "static_clearance_margin_m": 0.05,
         "target_entity": args.target_entity,
-        "camera_entity": args.camera_entity,
+        "camera_pose_source": {
+            "topic": LINK_STATES_TOPIC,
+            "base_link": BASE_LINK_NAME,
+            "output_frame": OPTICAL_FRAME_NAME,
+            "fixed_sensor_chain": sensor_chain,
+            "fixed_optical_chain": optical_chain,
+            "xacro_path": str(xacro_path),
+            "xacro_sha256": transform_source_sha256,
+            "max_link_state_age_s": args.max_pose_age_s,
+        },
         "topics": {
             "rgb": args.image_topic,
             "depth": args.depth_topic,
@@ -771,14 +1032,9 @@ def run_capture(
                 })
                 continue
 
-            camera_state = node.entity_state_response(args.camera_entity).state
-            camera_pose = camera_state.pose
-            camera_position = (
-                camera_pose.position.x, camera_pose.position.y, camera_pose.position.z
-            )
-            camera_q = (
-                camera_pose.orientation.x, camera_pose.orientation.y,
-                camera_pose.orientation.z, camera_pose.orientation.w,
+            camera_pose_min_time = time.monotonic()
+            camera_position, camera_q, camera_pose_received_at = node.camera_pose_from_link_states(
+                camera_pose_min_time,
             )
             camera_forward = quaternion_matrix_xyzw(camera_q)[:, 2]
             camera_to_target = np.asarray((sample.x_m, sample.y_m, sample.z_m)) - np.asarray(camera_position)
@@ -802,9 +1058,23 @@ def run_capture(
             ):
                 raise RuntimeError("Camera moved during pilot; fixed-camera requirement was violated")
 
-            color, depth_raw, color_message, depth_message, info, depth_info = node.snapshot(
-                args.frame_timeout_s, target_pose_stamp_s
+            (
+                color, depth_raw, color_message, depth_message, info, depth_info,
+                camera_pose_age_s,
+            ) = node.snapshot(
+                args.frame_timeout_s, target_pose_stamp_s, camera_pose_received_at,
             )
+            camera_after_position, camera_after_q, camera_after_received_at = node.camera_pose_from_link_states(
+                time.monotonic(),
+            )
+            camera_position_delta, camera_orientation_delta = capture_pose_delta(
+                camera_position, camera_q, camera_after_position, camera_after_q,
+            )
+            if (camera_position_delta > CAPTURE_POSE_MAX_POSITION_DELTA_M
+                    or camera_orientation_delta > CAPTURE_POSE_MAX_ORIENTATION_DELTA_RAD):
+                raise RuntimeError(
+                    "Camera moved during the RGB-D frame; refusing labels based on a stale pose"
+                )
             target_after_capture = node.entity_state_response(args.target_entity).state.pose
             target_after_position = (
                 target_after_capture.position.x,
@@ -928,6 +1198,13 @@ def run_capture(
                 "rgb_stamp_s": rgb_stamp,
                 "depth_stamp_s": depth_stamp,
                 "rgb_depth_delta_s": abs(rgb_stamp - depth_stamp),
+                "camera_pose_source": "fresh /gazebo/link_states piracer::base_link plus URDF fixed transforms",
+                "camera_pose_age_at_frame_s": camera_pose_age_s,
+                "camera_pose_age_after_frame_s": time.monotonic() - camera_after_received_at,
+                "camera_position_world_m": camera_position,
+                "camera_orientation_world_xyzw": camera_q,
+                "camera_post_frame_delta_m": camera_position_delta,
+                "camera_post_frame_delta_rad": camera_orientation_delta,
                 "image_encoding": color_message.encoding,
                 "depth_encoding": depth_message.encoding,
                 "frame_id": color_message.header.frame_id,
@@ -1029,7 +1306,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mesh", default=str(DEFAULT_MESH))
     parser.add_argument("--output-dir", default=str(_default_output()))
     parser.add_argument("--target-entity", default=TARGET_ENTITY)
-    parser.add_argument("--camera-entity", default=CAMERA_ENTITY)
     parser.add_argument("--image-topic", default=IMAGE_TOPIC)
     parser.add_argument("--depth-topic", default=DEPTH_TOPIC)
     parser.add_argument("--camera-info-topic", default=CAMERA_INFO_TOPIC)
@@ -1040,6 +1316,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-timeout-s", type=float, default=5.0)
     parser.add_argument("--settle-s", type=float, default=0.5)
     parser.add_argument("--max-sync-delta-s", type=float, default=0.05)
+    parser.add_argument("--max-pose-age-s", type=float, default=DEFAULT_MAX_POSE_AGE_S)
     return parser
 
 
@@ -1047,6 +1324,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     world_path, mesh_path = Path(args.world).resolve(), Path(args.mesh).resolve()
     try:
+        if args.capture and (not math.isfinite(args.max_pose_age_s) or args.max_pose_age_s <= 0.0):
+            raise ValueError("--max-pose-age-s must be a positive finite number")
         world_hash, mesh_hash = check_scene_files(world_path, mesh_path)
         mesh = load_collada_geometry(mesh_path)
         obstacles = validate_pilot_clearance(world_path)

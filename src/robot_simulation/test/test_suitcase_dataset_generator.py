@@ -77,6 +77,81 @@ class CaptureSafeguardTests(unittest.TestCase):
         self.assertAlmostEqual(np.deg2rad(12.0), yaw_delta)
 
 
+class CameraPoseSourceTests(unittest.TestCase):
+    def test_fixed_transform_chain_comes_from_the_canonical_xacro(self):
+        xacro = generator.ROOT / generator.ROBOT_DESCRIPTION_XACRO_REL
+        sensor_transform, sensor_frames = generator.fixed_transform_between_links(
+            xacro, "base_link", "sim_camera_link"
+        )
+        optical_transform, optical_frames = generator.fixed_transform_between_links(
+            xacro, "base_link", "sim_camera_optical_frame"
+        )
+        self.assertEqual(("base_link", "chassis", "sim_camera_link"), sensor_frames)
+        self.assertEqual(("base_link", "chassis", "sim_camera_link", "sim_camera_optical_frame"), optical_frames)
+        np.testing.assert_allclose((0.18, 0.0, 0.12), sensor_transform[:3, 3], atol=1e-9)
+        np.testing.assert_allclose(np.eye(3), sensor_transform[:3, :3], atol=1e-9)
+        np.testing.assert_allclose((0.18, 0.0, 0.12), optical_transform[:3, 3], atol=1e-9)
+        np.testing.assert_allclose(
+            [[3.267948965e-7, 3.267948965e-7, 1.0],
+             [-1.0, 1.067949044e-13, 3.267948965e-7],
+             [0.0, -1.0, 3.267948965e-7]],
+            optical_transform[:3, :3], atol=1e-9,
+        )
+
+    def test_camera_pose_uses_exact_base_link_and_composes_rotation_and_translation(self):
+        pose = SimpleNamespace(
+            position=SimpleNamespace(x=1.0, y=2.0, z=3.0),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=np.sqrt(0.5), w=np.sqrt(0.5)),
+        )
+        states = SimpleNamespace(name=["other::base_link", "piracer::base_link"], pose=[pose, pose])
+        xacro = generator.ROOT / generator.ROBOT_DESCRIPTION_XACRO_REL
+        base_to_optical, _ = generator.fixed_transform_between_links(
+            xacro, "base_link", "sim_camera_optical_frame"
+        )
+        position, quaternion = generator.camera_pose_from_link_states(
+            states, "piracer::base_link", base_to_optical,
+            received_at_monotonic=10.0, now_monotonic=10.1, max_age_s=0.5,
+        )
+        np.testing.assert_allclose((1.0, 2.18, 3.12), position, atol=1e-9)
+        self.assertAlmostEqual(1.0, np.linalg.norm(quaternion))
+
+    def test_missing_stale_duplicate_and_invalid_base_link_states_fail_safe(self):
+        pose = SimpleNamespace(
+            position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+        )
+        transform = np.eye(4)
+        fresh = SimpleNamespace(name=["piracer::base_link"], pose=[pose])
+        arguments = dict(
+            base_to_optical=transform, received_at_monotonic=1.0,
+            now_monotonic=1.1, max_age_s=0.5,
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            generator.camera_pose_from_link_states(
+                SimpleNamespace(name=["other::base_link"], pose=[pose]),
+                "piracer::base_link", **arguments,
+            )
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            generator.camera_pose_from_link_states(
+                SimpleNamespace(name=["piracer::base_link", "piracer::base_link"], pose=[pose, pose]),
+                "piracer::base_link", **arguments,
+            )
+        with self.assertRaisesRegex(ValueError, "stale"):
+            generator.camera_pose_from_link_states(
+                fresh, "piracer::base_link", base_to_optical=transform,
+                received_at_monotonic=1.0, now_monotonic=1.6, max_age_s=0.5,
+            )
+        invalid = SimpleNamespace(
+            position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=0.0),
+        )
+        with self.assertRaisesRegex(ValueError, "Quaternion"):
+            generator.camera_pose_from_link_states(
+                SimpleNamespace(name=["piracer::base_link"], pose=[invalid]),
+                "piracer::base_link", **arguments,
+            )
+
+
 class GeometryTests(unittest.TestCase):
     def test_approved_dae_geometry_is_read_from_the_real_mesh(self):
         mesh = generator.load_collada_geometry(generator.ROOT / generator.MESH_REL)
