@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""Record selected simulation signals as metadata-only JSON Lines."""
+
+import json
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import rclpy
+from diagnostic_msgs.msg import DiagnosticArray
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import CameraInfo, Image
+
+
+def stamp_seconds(stamp):
+    return stamp.sec + stamp.nanosec * 1e-9
+
+
+class SimulationTelemetry(Node):
+    def __init__(self):
+        super().__init__("simulation_telemetry")
+        self.declare_parameter("output_file", "")
+        self.declare_parameter("sample_period_sec", 1.0)
+        self.declare_parameter("clock_topic", "/clock")
+        self.declare_parameter("robot_odom_topic", "/odom")
+        self.declare_parameter("target_odom_topic", "/sim012_target/odom")
+        self.declare_parameter("robot_cmd_vel_topic", "/piracer/cmd_vel")
+        self.declare_parameter("target_cmd_vel_topic", "/sim012_target/cmd_vel")
+        self.declare_parameter(
+            "rgb_image_topic", "/piracer/sim_camera/color/image_raw"
+        )
+        self.declare_parameter(
+            "depth_image_topic", "/piracer/sim_camera/depth/image_raw"
+        )
+        self.declare_parameter(
+            "rgb_camera_info_topic", "/piracer/sim_camera/color/camera_info"
+        )
+        self.declare_parameter(
+            "depth_camera_info_topic", "/piracer/sim_camera/depth/camera_info"
+        )
+        self.declare_parameter("diagnostics_topic", "/diagnostics")
+
+        period = float(self.get_parameter("sample_period_sec").value)
+        if period <= 0:
+            raise ValueError("sample_period_sec must be greater than zero")
+
+        output_file = self.get_parameter("output_file").value
+        self._owns_stream = bool(output_file)
+        if output_file:
+            path = Path(output_file).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._stream = path.open("a", encoding="utf-8")
+        else:
+            self._stream = sys.stdout
+
+        self._run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        parameter_names = {
+            "clock": "clock_topic",
+            "robot_odom": "robot_odom_topic",
+            "target_odom": "target_odom_topic",
+            "robot_cmd_vel": "robot_cmd_vel_topic",
+            "target_cmd_vel": "target_cmd_vel_topic",
+            "rgb_image": "rgb_image_topic",
+            "depth_image": "depth_image_topic",
+            "rgb_camera_info": "rgb_camera_info_topic",
+            "depth_camera_info": "depth_camera_info_topic",
+            "diagnostics": "diagnostics_topic",
+        }
+        self._topic_names = {
+            key: str(self.get_parameter(parameter).value)
+            for key, parameter in parameter_names.items()
+        }
+        self._counts = {key: 0 for key in self._topic_names}
+        self._latest = {
+            "simulation_time_sec": None,
+            "robot_odom": None,
+            "target_odom": None,
+            "robot_cmd_vel": None,
+            "target_cmd_vel": None,
+            "rgb_image": None,
+            "depth_image": None,
+            "rgb_camera_info": None,
+            "depth_camera_info": None,
+            "diagnostics": [],
+        }
+        self._last_wall = time.monotonic()
+        self._last_simulation_time = None
+
+        self._subscriptions = [
+            self.create_subscription(
+                Clock, self._topic_names["clock"], self._on_clock, 10
+            ),
+            self.create_subscription(
+                Odometry,
+                self._topic_names["robot_odom"],
+                lambda message: self._on_odom("robot_odom", message),
+                10,
+            ),
+            self.create_subscription(
+                Odometry,
+                self._topic_names["target_odom"],
+                lambda message: self._on_odom("target_odom", message),
+                10,
+            ),
+            self.create_subscription(
+                Twist,
+                self._topic_names["robot_cmd_vel"],
+                lambda message: self._on_twist("robot_cmd_vel", message),
+                10,
+            ),
+            self.create_subscription(
+                Twist,
+                self._topic_names["target_cmd_vel"],
+                lambda message: self._on_twist("target_cmd_vel", message),
+                10,
+            ),
+            self.create_subscription(
+                Image,
+                self._topic_names["rgb_image"],
+                lambda message: self._on_image("rgb_image", message),
+                qos_profile_sensor_data,
+            ),
+            self.create_subscription(
+                Image,
+                self._topic_names["depth_image"],
+                lambda message: self._on_image("depth_image", message),
+                qos_profile_sensor_data,
+            ),
+            self.create_subscription(
+                CameraInfo,
+                self._topic_names["rgb_camera_info"],
+                lambda message: self._on_camera_info("rgb_camera_info", message),
+                qos_profile_sensor_data,
+            ),
+            self.create_subscription(
+                CameraInfo,
+                self._topic_names["depth_camera_info"],
+                lambda message: self._on_camera_info("depth_camera_info", message),
+                qos_profile_sensor_data,
+            ),
+            self.create_subscription(
+                DiagnosticArray,
+                self._topic_names["diagnostics"],
+                self._on_diagnostics,
+                10,
+            ),
+        ]
+        self._timer = self.create_timer(period, self._write_sample)
+        self.get_logger().info(
+            f"Recording simulation telemetry every {period:g} s to "
+            f"{output_file or 'stdout'}"
+        )
+
+    def _count(self, key):
+        self._counts[key] += 1
+
+    def _on_clock(self, message):
+        self._count("clock")
+        self._latest["simulation_time_sec"] = stamp_seconds(message.clock)
+
+    def _on_odom(self, key, message):
+        self._count(key)
+        position = message.pose.pose.position
+        linear = message.twist.twist.linear
+        angular = message.twist.twist.angular
+        self._latest[key] = {
+            "stamp_sec": stamp_seconds(message.header.stamp),
+            "frame_id": message.header.frame_id,
+            "child_frame_id": message.child_frame_id,
+            "position_m": {"x": position.x, "y": position.y, "z": position.z},
+            "linear_velocity_mps": {"x": linear.x, "y": linear.y},
+            "angular_velocity_radps": {"z": angular.z},
+        }
+
+    def _on_twist(self, key, message):
+        self._count(key)
+        self._latest[key] = {
+            "linear_mps": {
+                "x": message.linear.x,
+                "y": message.linear.y,
+                "z": message.linear.z,
+            },
+            "angular_radps": {
+                "x": message.angular.x,
+                "y": message.angular.y,
+                "z": message.angular.z,
+            },
+        }
+
+    def _on_image(self, key, message):
+        self._count(key)
+        self._latest[key] = {
+            "stamp_sec": stamp_seconds(message.header.stamp),
+            "frame_id": message.header.frame_id,
+            "width": message.width,
+            "height": message.height,
+            "encoding": message.encoding,
+        }
+
+    def _on_camera_info(self, key, message):
+        self._count(key)
+        self._latest[key] = {
+            "stamp_sec": stamp_seconds(message.header.stamp),
+            "frame_id": message.header.frame_id,
+            "width": message.width,
+            "height": message.height,
+            "distortion_model": message.distortion_model,
+        }
+
+    def _on_diagnostics(self, message):
+        self._count("diagnostics")
+        self._latest["diagnostics"] = [
+            {"name": item.name, "level": item.level, "message": item.message}
+            for item in message.status
+        ]
+
+    def _write_sample(self):
+        now = time.monotonic()
+        elapsed = now - self._last_wall
+        simulation_time = self._latest["simulation_time_sec"]
+        realtime_factor = None
+        if simulation_time is not None and self._last_simulation_time is not None:
+            delta_simulation = simulation_time - self._last_simulation_time
+            if elapsed > 0 and delta_simulation >= 0:
+                realtime_factor = delta_simulation / elapsed
+
+        sample = {
+            "schema_version": 1,
+            "run_id": self._run_id,
+            "wall_time_utc": datetime.now(timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "elapsed_wall_sec": elapsed,
+            "simulation_time_sec": simulation_time,
+            "real_time_factor": realtime_factor,
+            "topic_rates_hz": {
+                key: {
+                    "topic": self._topic_names[key],
+                    "messages": count,
+                    "rate_hz": count / elapsed if elapsed > 0 else 0.0,
+                }
+                for key, count in self._counts.items()
+            },
+            "robot_odom": self._latest["robot_odom"],
+            "target_odom": self._latest["target_odom"],
+            "robot_cmd_vel": self._latest["robot_cmd_vel"],
+            "target_cmd_vel": self._latest["target_cmd_vel"],
+            "rgb_image": self._latest["rgb_image"],
+            "depth_image": self._latest["depth_image"],
+            "rgb_camera_info": self._latest["rgb_camera_info"],
+            "depth_camera_info": self._latest["depth_camera_info"],
+            "diagnostics": self._latest["diagnostics"],
+        }
+        self._stream.write(json.dumps(sample, ensure_ascii=False) + "\n")
+        self._stream.flush()
+        self._counts = {key: 0 for key in self._counts}
+        self._last_wall = now
+        self._last_simulation_time = simulation_time
+
+    def destroy_node(self):
+        self._stream.flush()
+        if self._owns_stream:
+            self._stream.close()
+        super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = SimulationTelemetry()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
