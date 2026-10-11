@@ -24,7 +24,9 @@ def _build_simulation(context):
     gazebo_share = get_package_share_directory("gazebo_ros")
 
     xacro_path = os.path.join(description_share, "urdf", "piracer.urdf.xacro")
-    default_world_path = os.path.join(simulation_share, "worlds", "sala_laboratoryjna.world")
+    default_world_path = os.path.join(
+        simulation_share, "worlds", "sala_laboratoryjna_production.world"
+    )
     world_path = LaunchConfiguration("world").perform(context) or default_world_path
     camera_enabled = LaunchConfiguration("camera_enabled").perform(context).lower()
     camera_update_rate = LaunchConfiguration("camera_update_rate").perform(context)
@@ -87,12 +89,12 @@ def _build_simulation(context):
         perception_prefix = get_package_prefix("robot_perception")
         workspace_root = os.path.dirname(os.path.dirname(perception_prefix))
         gpu_python = os.path.join(workspace_root, ".venv", "bin", "python")
-        if not os.path.isfile(gpu_python):
-            raise RuntimeError(
-                f"YOLO GPU Python environment was not found at {gpu_python}"
-            )
         model_path = LaunchConfiguration("yolo_model_path").perform(context).strip()
         if yolo_backend == "yolox":
+            if not os.path.isfile(gpu_python):
+                raise RuntimeError(
+                    f"YOLOX Python environment was not found at {gpu_python}"
+                )
             if not model_path:
                 model_path = os.path.join(
                     perception_share,
@@ -121,10 +123,15 @@ def _build_simulation(context):
             ))
         elif yolo_backend == "yolo11n_dnn":
             if not model_path:
-                raise RuntimeError(
-                    "yolo_model_path must name the YOLO11n ONNX file when "
-                    "yolo_backend:=yolo11n_dnn"
+                model_path = os.path.join(
+                    workspace_root,
+                    "verification",
+                    "yolo11n_same_frame_20261008",
+                    "weights",
+                    "yolo11n.onnx",
                 )
+            if not os.path.isfile(model_path):
+                raise RuntimeError(f"YOLO11n ONNX model was not found at {model_path}")
             yolo_nodes.append(Node(
                 package="robot_perception",
                 executable="yolo11n_node",
@@ -144,7 +151,6 @@ def _build_simulation(context):
                         LaunchConfiguration("yolo_torch_num_threads").perform(context)
                     ),
                 }],
-                prefix=gpu_python,
                 additional_env={
                     "OMP_NUM_THREADS": "1",
                     "MKL_NUM_THREADS": "1",

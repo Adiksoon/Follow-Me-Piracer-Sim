@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="hard_trolley_red">
+    <!-- STATIC PREVIEW model. For the existing moving SIM-012 suitcase, replace visual only. -->
+    <static>true</static>
+    <link name="suitcase_link">
+      <visual name="suitcase_visual">
+        <geometry>
+          <mesh>
+            <uri>model://hard_trolley_red/meshes/suitcase.dae</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+      </visual>
+      <!-- Simple 0.72 m-high lower suitcase-body collision (not the extended handle). -->
+      <collision name="suitcase_collision">
+        <pose>0 0 0.36 0 0 0</pose>
+        <geometry><box><size>0.56 0.32 0.72</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

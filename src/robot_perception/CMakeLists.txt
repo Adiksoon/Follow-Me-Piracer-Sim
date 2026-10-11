@@ -23,6 +23,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_detection_pipeline test/test_detection_pipeline.py)
   ament_add_pytest_test(test_ros_messages test/test_ros_messages.py)
+  ament_add_pytest_test(test_opencv_dnn test/test_opencv_dnn.py)
 endif()
 
 ament_package()

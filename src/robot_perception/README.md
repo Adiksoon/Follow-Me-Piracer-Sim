@@ -1,61 +1,49 @@
-# `robot_perception` — CP-00D offline skeleton
+# `robot_perception` — CP-00D.1 YOLO11n ONNX
 
-This package is an independent implementation in the canonical `symulacja/`
-workspace. It does not copy or adapt code from `ros2_ws/`.
+This is an independent detector package in the canonical `symulacja/`
+workspace. Its source was written there and does not copy or adapt code from
+the historical `ros2_ws/` workspace.
 
-## Current boundary
+## Runtime path
 
-- `detection_pipeline.py` handles explicit RGB/BGR input order, square
-  letterboxing, normalized NCHW input preparation, inverse box mapping,
-  synthetic YOLO11-shaped output decoding, confidence/class filtering,
-  classwise NMS, and RGB diagnostic overlays.
-- `ros_messages.py` converts `sensor_msgs/Image` (`rgb8` or `bgr8`) through
-  `cv_bridge`, maps source-image pixel boxes to `Detection2DArray`, and provides
-  a helper to publish detections plus a same-header RGB diagnostic image.
-- `scripts/yolo11n_node` declares parameters expected by the canonical launch,
-  then exits with an explicit licensing-gate error. It does not open a model
-  path, subscribe to images, or publish detections/debug images. During its
-  brief initialization, standard `rclpy.Node` administration and rosout
-  entities are created.
-- `config/detector.yaml` is a replaceable model/backend parameter profile; its
-  values do not activate inference.
-- No ONNX runtime/backend loader, model weights, Ultralytics package, or
-  Ultralytics-derived source is included.
+- `opencv_dnn.py` loads ONNX with OpenCV DNN and selects its CPU backend.
+- `detection_pipeline.py` converts explicit RGB input to float32 NCHW, scales
+  values to `[0, 1]`, letterboxes to a square with padding value 114, reverses
+  box scaling/padding, filters confidence and class, then applies classwise
+  NMS.
+- `scripts/yolo11n_node` subscribes to `sensor_msgs/Image` using sensor-data
+  QoS and accepts `rgb8`/`bgr8` via `cv_bridge`. It publishes
+  `vision_msgs/Detection2DArray` on `/piracer/yolo/detections` and the
+  same-header RGB overlay on `/piracer/yolo/debug_image`.
+- The approved filter is COCO `suitcase`, class ID 28. An empty
+  `class_filter`, `suitcase`, or `28` selects that class.
+- `piracer_sim.launch.py` defaults this backend to the retained model under
+  `verification/yolo11n_same_frame_20261008/weights/yolo11n.onnx` when no
+  explicit `yolo_model_path` is supplied. YOLO remains disabled by default in
+  the launch.
 
-The decoder's synthetic contract is `[1, 84, N]`: four `cx, cy, width, height`
-channels and 80 class-score channels, with no objectness. This comes from the
-local export record and is **not confirmed against the model in this checkpoint**.
-Synthetic unit tests establish only the behavior of these pure functions and
-ROS message conversion. They do not establish model compatibility, inference
-quality, live ROS topic transport, or runtime performance.
+The selected ONNX has static input `images`: float32 `[1, 3, 640, 640]`, and
+one float32 output `output0`: `[1, 84, 8400]`. The output contains `cx, cy, w,
+h` followed by 80 COCO class scores, with no objectness channel. The runtime
+forward pass and decoded detections are recorded in the CP-00D.1 report.
 
-## Parameters reserved for the detector interface
+## Runtime compatibility
 
-The names match `piracer_sim.launch.py`: `image_topic`, `model_path`,
-`confidence`, `nms_iou`, `imgsz`, `class_filter`, `opencv_num_threads`, and
-`torch_num_threads`. `backend` is kept separate so a future approved model
-adapter can replace the YOLO11-specific path without changing the output
-message contract. The current node intentionally does not consume these values.
+On this host, OpenCV 4.13.0 loads and executes the selected model with DNN CPU.
+The system OpenCV 4.5.4 fails while importing its attention `Split` node, so
+the installed system package alone is insufficient for this ONNX artifact.
+The launch's YOLO11n branch uses the active `python3` environment; it must
+resolve an OpenCV DNN build that supports this model. No CUDA provider,
+Ultralytics runtime, or ONNX Runtime is used by the new node.
 
-## Model origin and licensing boundary
+## Model and licensing
 
-No model file is bundled, copied, opened, or tested by this package. The local
-Research Pack `research/packs/RQ-YOLO-SUITCASE-CHALLENGER-20261008-R3.md`
-records the publisher's statement that YOLO weights are AGPL-3.0 by default,
-that its free path requires the whole project to use AGPL-3.0, and that an
-Enterprise path is offered. The pack does not establish a separate exemption
-for this project's local academic use and is not legal advice. Therefore model
-integration remains disabled pending a resolved author licensing decision.
+The ONNX and its source checkpoint remain verification artifacts and are not
+copied into the ROS package. The model SHA-256 and local provenance are in the
+CP-00D.1 report and `verification/yolo11n_same_frame_20261008/weights/`.
+This package's new source remains MIT-licensed; the user-authorized academic
+model use does not change the repository-wide license.
 
-The newly written package source is MIT-licensed in its own `LICENSE` file;
-this does not change the license of the whole repository. The installed
-dependencies are system packages, not vendored copies: ROS 2 `rclpy`,
-`sensor_msgs`, `vision_msgs`, `cv_bridge`, Debian NumPy, and Debian OpenCV.
-Their local package metadata identifies Apache-2.0/BSD licenses for the ROS
-components and package/subcomponent licensing for OpenCV and NumPy; see the
-installed package XML and Debian copyright files recorded in the CP-00D report.
-
-## Local checks
-
-Tests use only generated arrays and in-memory ROS messages. Do not present them
-as an inference or simulator result.
+Unit tests use synthetic tensors and in-memory messages. They are separate
+from the recorded real-model offline inference. No live ROS or Gazebo result is
+claimed by this checkpoint.

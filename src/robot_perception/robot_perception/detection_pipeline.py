@@ -1,9 +1,4 @@
-"""Offline preprocessing and YOLO11-shaped output decoding utilities.
-
-This module deliberately does not load an ONNX model. Its output layout is a
-synthetic contract based on the locally recorded export metadata and must be
-confirmed against the exact model before any inference integration.
-"""
+"""Image preprocessing and output decoding for the YOLO11n ONNX adapter."""
 
 from __future__ import annotations
 
@@ -193,11 +188,11 @@ def decode_yolo11_output(
     class_filter: set[int] | None = None,
     class_names: dict[int, str] | None = None,
 ) -> list[Detection]:
-    """Decode synthetic ``[1, 84, N]`` center/size plus COCO-score output.
+    """Decode YOLO11 ``[1, 84, N]`` center/size plus COCO-score output.
 
     The current export metadata records four box channels and 80 class-score
-    channels with no objectness. This function intentionally rejects other
-    layouts rather than guessing; exact artifact semantics remain unverified.
+    channels with no objectness. This function rejects other layouts rather
+    than guessing; the selected ONNX artifact is validated by offline inference.
     """
     if not 0.0 <= confidence_threshold <= 1.0:
         raise ValueError("confidence_threshold must be in [0, 1]")
