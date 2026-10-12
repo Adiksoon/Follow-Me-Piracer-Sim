@@ -160,6 +160,9 @@ class GeometryAndCameraModelTests(unittest.TestCase):
         mesh = generator.load_collada_geometry(generator.ROOT / generator.MESH_REL)
         self.assertEqual(5, mesh.geometry_count)
         self.assertEqual(83104, mesh.vertices.shape[0])
+        self.assertEqual((124944, 3), mesh.triangles.shape)
+        self.assertGreaterEqual(int(mesh.triangles.min()), 0)
+        self.assertLess(int(mesh.triangles.max()), mesh.vertices.shape[0])
         self.assertEqual(124944, mesh.triangle_count)
         self.assertAlmostEqual(1.0065, mesh.local_bounds_max[2], places=3)
 
@@ -195,17 +198,50 @@ class GeometryAndCameraModelTests(unittest.TestCase):
 
     def test_aligned_depth_confirms_visible_geometry_and_detects_occlusion(self):
         intrinsics = (100.0, 100.0, 20.0, 20.0)
-        pixels = np.array([(x, y) for y in range(5, 15) for x in range(5, 15)], dtype=np.float64)
+        pixels = np.array(((5, 5), (14, 5), (14, 14), (5, 14)), dtype=np.float64)
         z = np.full(pixels.shape[0], 2.0)
         points = np.column_stack(((pixels[:, 0] - 20) * z / 100,
                                   (pixels[:, 1] - 20) * z / 100, z))
+        triangles = np.array(((0, 1, 2), (0, 2, 3)), dtype=np.int64)
         visible_depth = np.full((40, 40), 2.0, dtype=np.float32)
-        visible = generator.depth_visibility(points, intrinsics, visible_depth)
+        visible = generator.depth_visibility(points, triangles, intrinsics, visible_depth)
         self.assertEqual(1.0, visible["visible_fraction"])
+        self.assertEqual(100, visible["projected_mesh_pixels"])
         occluding_depth = visible_depth.copy()
         occluding_depth[5:15, 5:15] = 1.0
-        occluded = generator.depth_visibility(points, intrinsics, occluding_depth)
+        occluded = generator.depth_visibility(points, triangles, intrinsics, occluding_depth)
         self.assertEqual(0.0, occluded["visible_fraction"])
+
+    def test_surface_depth_rasterizer_uses_perspective_depth_and_nearest_surface(self):
+        intrinsics = (100.0, 100.0, 0.0, 0.0)
+        screen = np.array(((10.0, 10.0), (20.0, 10.0), (10.0, 20.0)))
+        depths = np.array((1.0, 2.0, 4.0))
+        slanted = np.column_stack((
+            screen[:, 0] * depths / intrinsics[0],
+            screen[:, 1] * depths / intrinsics[1],
+            depths,
+        ))
+        expected, _ = generator.rasterize_front_surface_depth(
+            slanted, np.array(((0, 1, 2),)), intrinsics, 32, 32,
+        )
+        self.assertAlmostEqual(1.0 / (0.6 / 1.0 + 0.2 / 2.0 + 0.2 / 4.0),
+                               float(expected[12, 12]), places=5)
+
+        near = np.column_stack((screen / 100.0, np.ones(3)))
+        far = np.column_stack((screen * 3.0 / 100.0, np.full(3, 3.0)))
+        overlapping, _ = generator.rasterize_front_surface_depth(
+            np.concatenate((far, near)), np.array(((0, 1, 2), (3, 4, 5))),
+            intrinsics, 32, 32,
+        )
+        self.assertAlmostEqual(1.0, float(overlapping[12, 12]), places=6)
+
+    def test_surface_depth_rasterizer_rejects_unsupported_distortion(self):
+        points = np.array(((-0.1, -0.1, 1.0), (0.1, -0.1, 1.0), (0.0, 0.1, 1.0)))
+        with self.assertRaisesRegex(generator.CaptureRejected, "NONZERO_CAMERA_DISTORTION"):
+            generator.rasterize_front_surface_depth(
+                points, np.array(((0, 1, 2),)), (100.0, 100.0, 16.0, 16.0),
+                32, 32, (0.01, 0.0, 0.0, 0.0, 0.0),
+            )
 
 
 if __name__ == "__main__":

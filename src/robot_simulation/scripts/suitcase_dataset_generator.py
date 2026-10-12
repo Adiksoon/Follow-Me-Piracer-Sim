@@ -89,7 +89,6 @@ CAMERA_LINK_TO_OPTICAL_ROTATION = np.array([
 ], dtype=np.float64)
 YOLO_CLASS_ID = 0
 YOLO_CLASS_NAME = "suitcase"
-MAX_OCCLUSION_SAMPLES = 12_000
 MIN_DEPTH_MATCHES = 100
 MIN_VISIBLE_FRACTION = 0.80
 CAPTURE_POSE_MAX_POSITION_DELTA_M = 0.02
@@ -117,7 +116,7 @@ class PilotSample:
 @dataclass(frozen=True)
 class MeshGeometry:
     vertices: np.ndarray
-    triangle_centers: np.ndarray
+    triangles: np.ndarray
     local_bounds_min: tuple[float, float, float]
     local_bounds_max: tuple[float, float, float]
     geometry_count: int
@@ -248,9 +247,10 @@ def load_collada_geometry(mesh_path: Path) -> MeshGeometry:
         )
     }
     vertices_out: list[np.ndarray] = []
-    centers_out: list[np.ndarray] = []
+    triangles_out: list[np.ndarray] = []
     geometry_count = 0
     triangle_count = 0
+    global_vertex_offset = 0
 
     for geometry in root.findall(".//c:library_geometries/c:geometry", NS):
         geometry_id = geometry.get("id", "")
@@ -289,29 +289,30 @@ def load_collada_geometry(mesh_path: Path) -> MeshGeometry:
             vertex_input = next((item for item in inputs if item.get("semantic") == "VERTEX"), None)
             if vertex_input is None:
                 raise ValueError(f"Triangles in {geometry_id} do not reference VERTEX")
-            vertex_offset = int(vertex_input.get("offset", "0"))
+            vertex_index_offset = int(vertex_input.get("offset", "0"))
             stride = 1 + max(int(item.get("offset", "0")) for item in inputs)
             index_text = triangles.findtext("c:p", default="", namespaces=NS)
             indices = np.fromstring(index_text, sep=" ", dtype=np.int64)
             if indices.size % (3 * stride):
                 raise ValueError(f"Malformed triangle indices in {geometry_id}")
-            position_indices = indices.reshape(-1, stride)[:, vertex_offset]
-            triangle_vertices = vertices[position_indices].reshape(-1, 3, 3)
-            centers_out.append(triangle_vertices.mean(axis=1))
-            triangle_count += triangle_vertices.shape[0]
+            position_indices = indices.reshape(-1, stride)[:, vertex_index_offset]
+            triangle_indices = position_indices.reshape(-1, 3)
+            triangles_out.append(triangle_indices + global_vertex_offset)
+            triangle_count += triangle_indices.shape[0]
 
         if mesh.find("c:polylist", NS) is not None or mesh.find("c:polygons", NS) is not None:
             raise ValueError("The approved suitcase mesh uses triangles; polygon lists are unsupported")
+        global_vertex_offset += vertices.shape[0]
 
-    if not vertices_out or not centers_out:
+    if not vertices_out or not triangles_out:
         raise ValueError("No rendered suitcase geometry was found in the COLLADA scene")
     vertices = np.concatenate(vertices_out, axis=0)
-    triangle_centers = np.concatenate(centers_out, axis=0)
+    triangles = np.concatenate(triangles_out, axis=0)
     bounds_min = tuple(float(value) for value in vertices.min(axis=0))
     bounds_max = tuple(float(value) for value in vertices.max(axis=0))
     return MeshGeometry(
         vertices=vertices,
-        triangle_centers=triangle_centers,
+        triangles=triangles,
         local_bounds_min=bounds_min,
         local_bounds_max=bounds_max,
         geometry_count=geometry_count,
@@ -491,41 +492,118 @@ def depth_to_meters(depth: np.ndarray, encoding: str) -> np.ndarray:
     raise ValueError(f"Unsupported depth image encoding: {encoding}")
 
 
+def rasterize_front_surface_depth(
+    vertices_camera: np.ndarray,
+    triangles: np.ndarray,
+    intrinsics: tuple[float, float, float, float],
+    width: int,
+    height: int,
+    distortion: tuple[float, ...] | None = None,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Rasterize mesh triangles into a nearest-surface perspective depth map."""
+    vertices_camera = np.asarray(vertices_camera, dtype=np.float64)
+    triangles = np.asarray(triangles, dtype=np.int64)
+    if vertices_camera.ndim != 2 or vertices_camera.shape[1] != 3:
+        raise ValueError("Camera-space mesh vertices must have shape (N, 3)")
+    if triangles.ndim != 2 or triangles.shape[1] != 3 or triangles.size == 0:
+        raise ValueError("Mesh triangle indices must have shape (N, 3)")
+    if (triangles.min() < 0 or triangles.max() >= vertices_camera.shape[0]
+            or width <= 0 or height <= 0):
+        raise ValueError("Mesh topology or image dimensions are invalid")
+    if not np.all(np.isfinite(vertices_camera)) or np.any(vertices_camera[:, 2] <= 0.0):
+        raise CaptureRejected("MESH_BEHIND_CAMERA")
+    if distortion and any(abs(value) > 1e-12 for value in distortion):
+        raise CaptureRejected("UNSUPPORTED_NONZERO_CAMERA_DISTORTION")
+
+    fx, fy, cx, cy = intrinsics
+    z = vertices_camera[:, 2]
+    u = fx * vertices_camera[:, 0] / z + cx
+    v = fy * vertices_camera[:, 1] / z + cy
+    if not np.all(np.isfinite(u)) or not np.all(np.isfinite(v)):
+        raise CaptureRejected("INVALID_PROJECTED_MESH_GEOMETRY")
+    inverse_z = 1.0 / z
+    expected = np.full((height, width), np.inf, dtype=np.float32)
+    triangle_u = u[triangles]
+    triangle_v = v[triangles]
+    denominators = (
+        (triangle_v[:, 1] - triangle_v[:, 2]) * (triangle_u[:, 0] - triangle_u[:, 2])
+        + (triangle_u[:, 2] - triangle_u[:, 1]) * (triangle_v[:, 0] - triangle_v[:, 2])
+    )
+    degenerate = np.abs(denominators) < 1e-10
+    xmin = np.maximum(0, np.ceil(triangle_u.min(axis=1)))
+    xmax = np.minimum(width - 1, np.floor(triangle_u.max(axis=1)))
+    ymin = np.maximum(0, np.ceil(triangle_v.min(axis=1)))
+    ymax = np.minimum(height - 1, np.floor(triangle_v.max(axis=1)))
+    candidates = np.flatnonzero(
+        ~degenerate & (xmin <= xmax) & (ymin <= ymax)
+    )
+    rasterized_triangles = 0
+    degenerate_triangles = int(np.count_nonzero(degenerate))
+
+    for triangle_index in candidates:
+        triangle = triangles[triangle_index]
+        x0, x1, x2 = triangle_u[triangle_index]
+        y0, y1, y2 = triangle_v[triangle_index]
+        z0i, z1i, z2i = inverse_z[triangle]
+        denominator = denominators[triangle_index]
+        x_min = int(xmin[triangle_index])
+        x_max = int(xmax[triangle_index])
+        y_min = int(ymin[triangle_index])
+        y_max = int(ymax[triangle_index])
+
+        grid_x = np.arange(x_min, x_max + 1, dtype=np.float64)[None, :]
+        grid_y = np.arange(y_min, y_max + 1, dtype=np.float64)[:, None]
+        a_x, a_y = (y1 - y2) / denominator, (x2 - x1) / denominator
+        b_x, b_y = (y2 - y0) / denominator, (x0 - x2) / denominator
+        a = a_x * grid_x + a_y * grid_y - (a_x * x2 + a_y * y2)
+        b = b_x * grid_x + b_y * grid_y - (b_x * x2 + b_y * y2)
+        c = 1.0 - a - b
+        inside = (a >= -1e-9) & (b >= -1e-9) & (c >= -1e-9)
+        if not np.any(inside):
+            continue
+
+        reciprocal_depth = a * z0i + b * z1i + c * z2i
+        triangle_depth = np.full(reciprocal_depth.shape, np.inf, dtype=np.float32)
+        triangle_depth[inside] = (1.0 / reciprocal_depth[inside]).astype(np.float32)
+        image_region = expected[y_min:y_max + 1, x_min:x_max + 1]
+        np.minimum(image_region, triangle_depth, out=image_region)
+        rasterized_triangles += 1
+
+    if not np.isfinite(expected).any():
+        raise CaptureRejected("NO_RASTERIZED_MESH_PIXELS")
+    return expected, {
+        "rasterized_triangles": rasterized_triangles,
+        "degenerate_triangles": degenerate_triangles,
+    }
+
+
 def depth_visibility(
-    sample_points_camera: np.ndarray,
+    vertices_camera: np.ndarray,
+    triangles: np.ndarray,
     intrinsics: tuple[float, float, float, float],
     depth_m: np.ndarray,
     distortion: tuple[float, ...] | None = None,
 ) -> dict[str, float | int]:
-    """Compare projected mesh surface samples with aligned measured depth."""
-    height, width = depth_m.shape[:2]
-    u, v, z = project_camera_points(sample_points_camera, intrinsics, distortion)
-    px = np.rint(u).astype(np.int64)
-    py = np.rint(v).astype(np.int64)
-    in_frame = (px >= 0) & (px < width) & (py >= 0) & (py < height)
-    px, py, z = px[in_frame], py[in_frame], z[in_frame]
-    if px.size == 0:
-        raise CaptureRejected("NO_PROJECTED_DEPTH_SAMPLES")
-
-    # Point-sample z-buffer: where multiple mesh triangles project to the same
-    # pixel, retain the nearest surface to avoid counting the suitcase's own
-    # back faces as external occlusion.
-    flat_indices = py * width + px
-    nearest = np.full(height * width, np.inf, dtype=np.float32)
-    np.minimum.at(nearest, flat_indices, z.astype(np.float32))
-    expected = nearest.reshape(height, width)
+    """Compare the rasterized nearest mesh surface with aligned measured depth."""
+    depth_m = np.asarray(depth_m, dtype=np.float32)
+    if depth_m.ndim != 2:
+        raise ValueError("Measured depth must be a two-dimensional image")
+    height, width = depth_m.shape
+    expected, raster_stats = rasterize_front_surface_depth(
+        vertices_camera, triangles, intrinsics, width, height, distortion,
+    )
     projected = np.isfinite(expected)
-    observed = depth_m.astype(np.float32, copy=False)
-    valid = projected & np.isfinite(observed) & (observed > 0.05)
+    valid = projected & np.isfinite(depth_m) & (depth_m > 0.05)
     valid_count = int(np.count_nonzero(valid))
     if valid_count < MIN_DEPTH_MATCHES:
         raise CaptureRejected(f"INSUFFICIENT_DEPTH_EVIDENCE_{valid_count}")
     tolerance = np.maximum(0.06, expected * 0.03)
-    matched = valid & (np.abs(observed - expected) <= tolerance)
+    matched = valid & (np.abs(depth_m - expected) <= tolerance)
     match_count = int(np.count_nonzero(matched))
     fraction = match_count / valid_count
     return {
         "projected_mesh_pixels": int(np.count_nonzero(projected)),
+        **raster_stats,
         "valid_depth_pixels": valid_count,
         "matching_depth_pixels": match_count,
         "visible_fraction": float(fraction),
@@ -1177,19 +1255,10 @@ def run_capture(
             )
             try:
                 bbox = projected_bbox(points_camera, intrinsics, width, height, distortion=distortion)
-                sample_indices = np.linspace(
-                    0, mesh.triangle_centers.shape[0] - 1,
-                    min(MAX_OCCLUSION_SAMPLES, mesh.triangle_centers.shape[0]),
-                    dtype=np.int64,
-                )
-                centers_local = mesh.triangle_centers[sample_indices].copy()
-                centers_local[:, 2] -= 0.05
-                center_camera = pose_points_to_camera(
-                    centers_local, target_position, target_q, (0.0, 0.0, 0.0),
-                    optical_position, optical_q,
-                )
                 depth_m = depth_to_meters(depth_raw, depth_message.encoding)
-                visibility = depth_visibility(center_camera, intrinsics, depth_m, distortion)
+                visibility = depth_visibility(
+                    points_camera, mesh.triangles, intrinsics, depth_m, distortion,
+                )
                 if visibility["visible_fraction"] < MIN_VISIBLE_FRACTION:
                     raise CaptureRejected(
                         f"OCCLUDED_OR_DEPTH_MISMATCH_{visibility['visible_fraction']:.3f}"
