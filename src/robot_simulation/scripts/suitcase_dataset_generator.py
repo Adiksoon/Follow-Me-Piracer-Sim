@@ -917,6 +917,49 @@ def rgbd_timestamps_are_fresh(
     )
 
 
+def stale_pose_diagnostic(
+    sample_id: str,
+    camera_state_received_at: float,
+    target_state_received_at: float,
+    color_received_at: float,
+    depth_received_at: float,
+    camera_pose_stamp_s: float,
+    color_stamp_s: float,
+    depth_stamp_s: float,
+    max_pose_age_s: float,
+    failure_detected_at: float,
+) -> dict:
+    frame_pose_age_s = max(color_received_at, depth_received_at) - camera_state_received_at
+    return {
+        "schema": "data01-stale-camera-pose-diagnostic-v1",
+        "sample_id": sample_id,
+        "monotonic_received_at_s": {
+            "camera_state_response": camera_state_received_at,
+            "target_state_response": target_state_received_at,
+            "rgb_frame": color_received_at,
+            "depth_frame": depth_received_at,
+            "failure_detected": failure_detected_at,
+        },
+        "intervals_s": {
+            "camera_state_to_target_state": target_state_received_at - camera_state_received_at,
+            "target_state_to_rgb": color_received_at - target_state_received_at,
+            "target_state_to_depth": depth_received_at - target_state_received_at,
+            "camera_state_to_rgb": color_received_at - camera_state_received_at,
+            "camera_state_to_depth": depth_received_at - camera_state_received_at,
+            "rgb_depth_receipt_delta": abs(color_received_at - depth_received_at),
+            "frame_pose_age_used_by_guard": frame_pose_age_s,
+            "camera_state_to_failure_detection": failure_detected_at - camera_state_received_at,
+        },
+        "ros_clock_stamps_s": {
+            "camera_pose": camera_pose_stamp_s,
+            "rgb_frame": color_stamp_s,
+            "depth_frame": depth_stamp_s,
+        },
+        "max_pose_age_s": max_pose_age_s,
+        "freshness_guard_exceeded": frame_pose_age_s > max_pose_age_s,
+    }
+
+
 def capture_pose_delta(
     before_position: tuple[float, float, float],
     before_orientation: tuple[float, float, float, float],
@@ -1028,6 +1071,8 @@ def run_capture(
             timeout_s: float,
             camera_pose_stamp_s: float,
             camera_state_received_at: float,
+            target_state_received_at: float,
+            sample: PilotSample,
         ):
             deadline = time.monotonic() + timeout_s
             while rclpy.ok() and time.monotonic() < deadline:
@@ -1044,6 +1089,27 @@ def run_capture(
                     continue
                 frame_pose_age_s = max(color_received_at, depth_received_at) - camera_state_received_at
                 if frame_pose_age_s > args.max_pose_age_s:
+                    diagnostic = stale_pose_diagnostic(
+                        sample.sample_id,
+                        camera_state_received_at,
+                        target_state_received_at,
+                        color_received_at,
+                        depth_received_at,
+                        camera_pose_stamp_s,
+                        stamp_seconds(color.header.stamp),
+                        stamp_seconds(depth.header.stamp),
+                        args.max_pose_age_s,
+                        time.monotonic(),
+                    )
+                    diagnostic_path = (
+                        output_dir / "metadata" / f"stale_pose_{sample.sample_id}.json"
+                    )
+                    temporary_path = diagnostic_path.with_suffix(".json.tmp")
+                    temporary_path.write_text(
+                        json.dumps(diagnostic, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    temporary_path.replace(diagnostic_path)
                     raise RuntimeError("Dataset-camera pose became stale before its RGB-D frame arrived")
                 if any(frame != color.header.frame_id for frame in (
                     depth.header.frame_id, color_info.header.frame_id, depth_info.header.frame_id,
@@ -1173,6 +1239,7 @@ def run_capture(
             camera_state_received_at = time.monotonic()
             camera_link_position, camera_link_q = entity_pose(camera_response)
             target_response = node.entity_state_response(args.target_entity)
+            target_state_received_at = time.monotonic()
             target_position, target_q = entity_pose(target_response)
             target_position_delta, target_orientation_delta = capture_pose_delta(
                 initial_target_position, initial_target_q, target_position, target_q,
@@ -1196,6 +1263,7 @@ def run_capture(
                 camera_pose_age_s,
             ) = node.snapshot(
                 args.frame_timeout_s, camera_state_stamp_s, camera_state_received_at,
+                target_state_received_at, sample,
             )
 
             camera_after_received_at = time.monotonic()

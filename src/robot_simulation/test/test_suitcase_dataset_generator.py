@@ -139,6 +139,27 @@ class CaptureSafeguardTests(unittest.TestCase):
         self.assertFalse(generator.rgbd_timestamps_are_fresh(10.03, 10.00, 10.01, 0.05))
         self.assertFalse(generator.rgbd_timestamps_are_fresh(10.02, 10.10, 10.01, 0.05))
 
+    def test_stale_pose_diagnostic_records_receipt_intervals_and_guard_limit(self):
+        record = generator.stale_pose_diagnostic(
+            "train_000",
+            camera_state_received_at=10.0,
+            target_state_received_at=10.1,
+            color_received_at=10.8,
+            depth_received_at=10.9,
+            camera_pose_stamp_s=5.0,
+            color_stamp_s=5.1,
+            depth_stamp_s=5.1,
+            max_pose_age_s=0.5,
+            failure_detected_at=11.0,
+        )
+        self.assertEqual("train_000", record["sample_id"])
+        self.assertAlmostEqual(0.1, record["intervals_s"]["camera_state_to_target_state"])
+        self.assertAlmostEqual(0.7, record["intervals_s"]["target_state_to_rgb"])
+        self.assertAlmostEqual(0.8, record["intervals_s"]["target_state_to_depth"])
+        self.assertAlmostEqual(0.9, record["intervals_s"]["frame_pose_age_used_by_guard"])
+        self.assertEqual(0.5, record["max_pose_age_s"])
+        self.assertTrue(record["freshness_guard_exceeded"])
+
     def test_capture_pose_check_compares_full_translation_and_orientation(self):
         position_delta, orientation_delta = generator.capture_pose_delta(
             (2.7, 0.0, 0.05), (0.0, 0.0, 0.0, 1.0),
