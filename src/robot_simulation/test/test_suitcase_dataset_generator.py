@@ -1,8 +1,10 @@
 import importlib.util
 from contextlib import redirect_stderr
 from io import StringIO
+import json
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 import xml.etree.ElementTree as ET
@@ -34,37 +36,115 @@ class IndependentCameraPlanTests(unittest.TestCase):
         self.assertEqual(20, len(self.samples))
         train = [sample for sample in self.samples if sample.split == "train"]
         val = [sample for sample in self.samples if sample.split == "val"]
-        self.assertEqual(12, len(train))
-        self.assertEqual(8, len(val))
-        self.assertEqual(set(range(0, 360, 30)), {sample.azimuth_deg for sample in train})
-        self.assertEqual(set(generator.PILOT_VAL_AZIMUTHS_DEG), {sample.azimuth_deg for sample in val})
-        self.assertEqual({2.4}, {sample.camera_distance_m for sample in train})
-        self.assertEqual({3.0}, {sample.camera_distance_m for sample in val})
+        self.assertEqual(16, len(train))
+        self.assertEqual(4, len(val))
+        self.assertTrue(all(
+            any(low <= sample.azimuth_deg < high
+                for low, high in generator.TRAIN_AZIMUTH_INTERVALS_DEG)
+            for sample in train
+        ))
+        self.assertTrue(all(
+            any(low <= sample.azimuth_deg < high
+                for low, high in generator.PILOT_VALIDATION_AZIMUTH_INTERVALS_DEG)
+            for sample in val
+        ))
+        self.assertTrue(all(
+            generator.CAMERA_DISTANCE_RANGE_M[0] <= sample.camera_distance_m
+            <= generator.CAMERA_DISTANCE_RANGE_M[1]
+            for sample in self.samples
+        ))
+        self.assertTrue(all(
+            generator.CAMERA_HEIGHT_ABOVE_TARGET_RANGE_M[0]
+            <= sample.camera_height_above_target_m
+            <= generator.CAMERA_HEIGHT_ABOVE_TARGET_RANGE_M[1]
+            for sample in self.samples
+        ))
         self.assertEqual(20, len({sample.sample_id for sample in self.samples}))
-        for sample in self.samples:
-            position = np.asarray((sample.camera_x_m, sample.camera_y_m, sample.camera_z_m))
-            center = np.asarray(self.target_center)
-            self.assertAlmostEqual(sample.camera_distance_m, np.linalg.norm((position - center)[:2]))
-            self.assertAlmostEqual(
-                generator.PILOT_CAMERA_HEIGHT_ABOVE_TARGET_M,
-                position[2] - center[2],
-            )
+        self.assertEqual(set(range(0, 20)), {int(sample.sample_id.rsplit("_", 1)[1]) for sample in self.samples})
 
-    def test_camera_link_positive_x_points_at_dae_visual_center(self):
+
+class IndependentCameraPlanAndDiagnosticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.world = generator.ROOT / generator.WORLD_REL
+        cls.mesh_path = generator.ROOT / generator.MESH_REL
+        cls.mesh = generator.load_collada_geometry(cls.mesh_path)
+        cls.target_position, cls.target_q = generator.target_model_pose(cls.world)
+        cls.target_center = generator.suitcase_visual_center(
+            cls.target_position, cls.target_q, cls.mesh,
+        )
+        cls.samples = generator.pilot_samples(cls.target_center)
+
+    def test_loads_exact_test_pose_and_binds_source_manifest(self):
+        sample = generator.PilotSample(
+            sample_id="seed20261012_view_0004", split="test",
+            scenario_id="test_azimuth_band_00_234_270",
+            camera_x_m=2.4, camera_y_m=-3.7, camera_z_m=1.3,
+            camera_yaw_deg=94.2, camera_pitch_deg=13.1,
+            azimuth_deg=261.5, camera_distance_m=3.82,
+            camera_height_above_target_m=0.81, random_seed=20261012,
+            image_target_x_fraction=0.67, image_target_y_fraction=0.46,
+            camera_link_quaternion_xyzw=(0.1, 0.2, 0.3, 0.9),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "capture_manifest.json"
+            source.write_text(json.dumps({
+                "world_sha256": "world-hash", "mesh_sha256": "mesh-hash",
+                "run_token": "source-run", "pilot_plan": [generator.asdict(sample)],
+            }), encoding="utf-8")
+            loaded, provenance = generator.diagnostic_sample_from_manifest(
+                source, sample.sample_id, "world-hash", "mesh-hash",
+            )
+            self.assertEqual(sample, loaded)
+            self.assertEqual(sample.sample_id, provenance["sample_id"])
+            self.assertEqual("source-run", provenance["source_run_token"])
+            self.assertEqual(generator.sha256_file(source), provenance["source_manifest_sha256"])
+
+    def test_rejects_manifest_for_different_scene(self):
+        sample = generator.PilotSample(
+            sample_id="view", split="test", scenario_id="test_azimuth_band_00_234_270",
+            camera_x_m=2.4, camera_y_m=-3.7, camera_z_m=1.3,
+            camera_yaw_deg=94.2, camera_pitch_deg=13.1,
+            azimuth_deg=261.5, camera_distance_m=3.82,
+            camera_height_above_target_m=0.81, random_seed=1,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "capture_manifest.json"
+            source.write_text(json.dumps({
+                "world_sha256": "different-world", "mesh_sha256": "mesh-hash",
+                "pilot_plan": [generator.asdict(sample)],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "different approved world"):
+                generator.diagnostic_sample_from_manifest(
+                    source, sample.sample_id, "world-hash", "mesh-hash",
+                )
+
+    def test_camera_maps_suitcase_center_to_planned_image_point(self):
         for sample in self.samples:
             position = (sample.camera_x_m, sample.camera_y_m, sample.camera_z_m)
-            quaternion = generator.camera_link_orientation(position, self.target_center)
-            forward = generator.quaternion_matrix_xyzw(quaternion)[:, 0]
-            target_direction = np.asarray(self.target_center) - np.asarray(position)
-            target_direction /= np.linalg.norm(target_direction)
-            self.assertAlmostEqual(1.0, float(np.dot(forward, target_direction)), places=7)
+            _, optical_q = generator.camera_optical_pose(
+                position, sample.camera_link_quaternion_xyzw,
+            )
+            target_camera = (
+                np.asarray(self.target_center) - np.asarray(position)
+            ) @ generator.quaternion_matrix_xyzw(optical_q)
+            focal = generator.CAMERA_WIDTH / (
+                2.0 * np.tan(generator.CAMERA_HORIZONTAL_FOV_RAD / 2.0)
+            )
+            projected_x = focal * target_camera[0] / target_camera[2] + generator.CAMERA_WIDTH / 2.0
+            projected_y = focal * target_camera[1] / target_camera[2] + generator.CAMERA_HEIGHT / 2.0
+            self.assertAlmostEqual(
+                sample.image_target_x_fraction * generator.CAMERA_WIDTH,
+                projected_x, delta=1e-6,
+            )
+            self.assertAlmostEqual(
+                sample.image_target_y_fraction * generator.CAMERA_HEIGHT,
+                projected_y, delta=1e-6,
+            )
 
     def test_optical_frame_forward_axis_matches_camera_link_forward_axis(self):
         sample = self.samples[3]
-        link_q = generator.camera_link_orientation(
-            (sample.camera_x_m, sample.camera_y_m, sample.camera_z_m),
-            self.target_center,
-        )
+        link_q = sample.camera_link_quaternion_xyzw
         _, optical_q = generator.camera_optical_pose(
             (sample.camera_x_m, sample.camera_y_m, sample.camera_z_m), link_q,
         )
@@ -75,14 +155,14 @@ class IndependentCameraPlanTests(unittest.TestCase):
     def test_actual_camera_pose_guard_checks_position_range_and_look_direction(self):
         sample = self.samples[0]
         position = (sample.camera_x_m, sample.camera_y_m, sample.camera_z_m)
-        quaternion = generator.camera_link_orientation(position, self.target_center)
+        quaternion = sample.camera_link_quaternion_xyzw
         distance, position_delta = generator.validate_camera_sample_pose(
             sample, position, quaternion, self.target_center,
         )
         self.assertAlmostEqual(sample.camera_distance_m, distance)
         self.assertAlmostEqual(0.0, position_delta)
         wrong_position = (position[0] + 0.2, position[1], position[2])
-        with self.assertRaisesRegex(ValueError, "range|look-at"):
+        with self.assertRaisesRegex(ValueError, "range|look-at|planned pose"):
             generator.validate_camera_sample_pose(
                 sample, wrong_position, quaternion, self.target_center,
             )
@@ -139,26 +219,72 @@ class CaptureSafeguardTests(unittest.TestCase):
         self.assertFalse(generator.rgbd_timestamps_are_fresh(10.03, 10.00, 10.01, 0.05))
         self.assertFalse(generator.rgbd_timestamps_are_fresh(10.02, 10.10, 10.01, 0.05))
 
-    def test_stale_pose_diagnostic_records_receipt_intervals_and_guard_limit(self):
-        record = generator.stale_pose_diagnostic(
-            "train_000",
-            camera_state_received_at=10.0,
-            target_state_received_at=10.1,
-            color_received_at=10.8,
-            depth_received_at=10.9,
-            camera_pose_stamp_s=5.0,
-            color_stamp_s=5.1,
-            depth_stamp_s=5.1,
-            max_pose_age_s=0.5,
-            failure_detected_at=11.0,
+    def test_full_dataset_and_candidate_pool_use_disjoint_azimuth_splits(self):
+        world = generator.ROOT / generator.WORLD_REL
+        mesh = generator.load_collada_geometry(generator.ROOT / generator.MESH_REL)
+        target_position, target_q = generator.target_model_pose(world)
+        target_center = generator.suitcase_visual_center(target_position, target_q, mesh)
+        final_plan = generator.pilot_samples(
+            target_center, generator.AUTHORIZED_FULL_DATASET_SAMPLES,
+            generator.DEFAULT_RANDOM_SEED, world,
         )
-        self.assertEqual("train_000", record["sample_id"])
-        self.assertAlmostEqual(0.1, record["intervals_s"]["camera_state_to_target_state"])
-        self.assertAlmostEqual(0.7, record["intervals_s"]["target_state_to_rgb"])
-        self.assertAlmostEqual(0.8, record["intervals_s"]["target_state_to_depth"])
-        self.assertAlmostEqual(0.9, record["intervals_s"]["frame_pose_age_used_by_guard"])
-        self.assertEqual(0.5, record["max_pose_age_s"])
-        self.assertTrue(record["freshness_guard_exceeded"])
+        candidate_plan = generator.pilot_samples(
+            target_center,
+            generator.AUTHORIZED_FULL_DATASET_SAMPLES * generator.CAPTURE_CANDIDATE_MULTIPLIER,
+            generator.DEFAULT_RANDOM_SEED, world,
+        )
+        self.assertEqual({"train": 320, "val": 40, "test": 40},
+                         generator.dataset_split_counts(len(final_plan)))
+        self.assertEqual({"train": 640, "val": 80, "test": 80},
+                         generator.dataset_split_counts(len(candidate_plan)))
+        self.assertEqual({"train": 240, "val": 30, "test": 30},
+                         generator.dataset_split_counts(300))
+        self.assertEqual({"train": 80, "val": 10, "test": 10},
+                         generator.dataset_split_counts(100))
+        self.assertEqual(600, generator.capture_candidate_count(300))
+        self.assertEqual(200, generator.capture_candidate_count(100))
+        self.assertEqual(20, generator.capture_candidate_count(20))
+        self.assertEqual(
+            ((150.0, 210.0),),
+            generator.split_azimuth_intervals(400)["test"],
+        )
+        for samples, expected_counts in (
+            (final_plan, {"train": 320, "val": 40, "test": 40}),
+            (candidate_plan, {"train": 640, "val": 80, "test": 80}),
+        ):
+            self.assertEqual(expected_counts, {
+                split: sum(sample.split == split for sample in samples)
+                for split in expected_counts
+            })
+            self.assertEqual(len(samples), len({sample.sample_id for sample in samples}))
+            summary = generator.pilot_coverage_summary(samples)
+            self.assertTrue(all(not values for values in summary["split_scenario_overlap"].values()))
+            for sample in samples:
+                intervals = generator.split_azimuth_intervals(len(samples))[sample.split]
+                self.assertTrue(any(low <= sample.azimuth_deg < high for low, high in intervals))
+                self.assertGreaterEqual(sample.image_target_x_fraction, generator.IMAGE_TARGET_X_FRACTION_RANGE[0])
+                self.assertLessEqual(sample.image_target_x_fraction, generator.IMAGE_TARGET_X_FRACTION_RANGE[1])
+                self.assertGreaterEqual(sample.image_target_y_fraction, generator.IMAGE_TARGET_Y_FRACTION_RANGE[0])
+                self.assertLessEqual(sample.image_target_y_fraction, generator.IMAGE_TARGET_Y_FRACTION_RANGE[1])
+        boxes = generator.projected_pilot_boxes(
+            candidate_plan, target_position, target_q, target_center, mesh,
+        )
+        self.assertEqual(len(candidate_plan), len(boxes))
+
+    def test_empty_scene_is_pinned_and_reuses_the_approved_target_pose(self):
+        empty_world = generator.ROOT / generator.EMPTY_WORLD_REL
+        self.assertEqual("empty", generator.scene_variant_for_world(empty_world))
+        self.assertEqual(generator.EMPTY_WORLD_SHA256, generator.sha256_file(empty_world))
+        self.assertEqual([], generator.production_collision_boxes(empty_world))
+        production_world = generator.ROOT / generator.WORLD_REL
+        self.assertEqual(
+            generator.target_model_pose(production_world),
+            generator.target_model_pose(empty_world),
+        )
+        mesh_path = generator.ROOT / generator.MESH_REL
+        world_hash, mesh_hash = generator.check_scene_files(empty_world, mesh_path)
+        self.assertEqual(generator.EMPTY_WORLD_SHA256, world_hash)
+        self.assertEqual(generator.MESH_SHA256, mesh_hash)
 
     def test_capture_pose_check_compares_full_translation_and_orientation(self):
         position_delta, orientation_delta = generator.capture_pose_delta(
@@ -202,6 +328,7 @@ class GeometryAndCameraModelTests(unittest.TestCase):
 
         launch_source = (PACKAGE / "launch" / "dataset_capture.launch.py").read_text()
         self.assertIn('DeclareLaunchArgument("gui", default_value="false")', launch_source)
+        self.assertIn('DeclareLaunchArgument("scene", default_value="production_room")', launch_source)
         self.assertNotIn("piracer_sim.launch.py", launch_source)
         self.assertNotIn("robot_state_publisher", launch_source)
         self.assertNotIn("yolo_node", launch_source)

@@ -4,6 +4,8 @@ import hashlib
 import os
 import shutil
 import tempfile
+import copy
+import xml.etree.ElementTree as ET
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -23,6 +25,7 @@ from launch_ros.actions import Node
 
 
 APPROVED_WORLD_SHA256 = "71111ed9cfd933117c3ac7013bed41c85d342eb5cc6b8e4e0eddbeeb5ae39c7e"
+APPROVED_EMPTY_WORLD_SHA256 = "00738c78deca99ea6d770451a1664237ac335894c8297f91a9426084c526c321"
 _runtime_world_directories = []
 
 
@@ -34,27 +37,48 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def _make_runtime_world(production_world):
-    actual_hash = _sha256(production_world)
-    if actual_hash != APPROVED_WORLD_SHA256:
-        raise RuntimeError(
-            f"Refusing dataset launch for unapproved world SHA-256 {actual_hash}"
-        )
-    with open(production_world, encoding="utf-8") as stream:
-        source = stream.read()
-    if source.count("</world>") != 1 or "libgazebo_ros_state.so" in source:
-        raise RuntimeError("Production world cannot be safely wrapped for dataset state services")
-    state_plugin = """
-    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
-      <ros><namespace>/gazebo</namespace></ros>
-      <update_rate>1.0</update_rate>
-    </plugin>
-"""
+def _make_runtime_world(source_world, production_world, scene):
+    expected_source_hash = {
+        "production_room": APPROVED_WORLD_SHA256,
+        "empty": APPROVED_EMPTY_WORLD_SHA256,
+    }.get(scene)
+    if expected_source_hash is None:
+        raise RuntimeError(f"Unknown DATA-01 scene variant: {scene!r}")
+    actual_hash = _sha256(source_world)
+    if actual_hash != expected_source_hash:
+        raise RuntimeError(f"Refusing dataset launch for unapproved {scene} world SHA-256 {actual_hash}")
+    if _sha256(production_world) != APPROVED_WORLD_SHA256:
+        raise RuntimeError("Refusing dataset launch: approved production target source changed")
+    root = ET.parse(source_world).getroot()
+    world = root.find("world")
+    if world is None or world.find("plugin[@name='gazebo_ros_state']") is not None:
+        raise RuntimeError("Selected world cannot be safely wrapped for dataset state services")
+    if scene == "empty":
+        production_root = ET.parse(production_world).getroot()
+        target = production_root.find(".//world/model[@name='suitcase_target']")
+        if target is None:
+            raise RuntimeError("Approved production world has no suitcase_target model")
+        target = copy.deepcopy(target)
+        target_static = target.find("static")
+        target_mesh = target.findtext(".//visual/geometry/mesh/uri", default="")
+        if target_static is None or "hard_trolley_red/meshes/suitcase.dae" not in target_mesh:
+            raise RuntimeError("Approved suitcase model is missing its static flag or expected mesh")
+        target_static.text = "true"
+        for plugin in target.findall("plugin"):
+            target.remove(plugin)
+        world.append(target)
+    state_plugin = ET.fromstring("""
+      <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+        <ros><namespace>/gazebo</namespace></ros>
+        <update_rate>1.0</update_rate>
+      </plugin>
+    """)
+    world.append(state_plugin)
     runtime_directory = tempfile.mkdtemp(prefix="data01-dataset-camera-")
     _runtime_world_directories.append(runtime_directory)
-    runtime_world = os.path.join(runtime_directory, "sala_laboratoryjna_dataset.world")
-    with open(runtime_world, "w", encoding="utf-8") as stream:
-        stream.write(source.replace("</world>", state_plugin + "</world>"))
+    runtime_world = os.path.join(runtime_directory, f"{scene}_dataset.world")
+    ET.indent(root, space="  ")
+    ET.ElementTree(root).write(runtime_world, encoding="utf-8", xml_declaration=True)
     return runtime_world
 
 
@@ -72,7 +96,15 @@ def _build_dataset_launch(context):
     production_world = os.path.join(
         simulation_share, "worlds", "sala_laboratoryjna_production.world"
     )
-    runtime_world = _make_runtime_world(production_world)
+    empty_world = os.path.join(simulation_share, "worlds", "empty_sky.world")
+    scene = LaunchConfiguration("scene").perform(context)
+    source_world = {
+        "production_room": production_world,
+        "empty": empty_world,
+    }.get(scene)
+    if source_world is None:
+        raise RuntimeError(f"Unknown DATA-01 scene variant: {scene!r}")
+    runtime_world = _make_runtime_world(source_world, production_world, scene)
     camera_model = os.path.join(
         simulation_share, "models", "dataset_camera", "model.sdf"
     )
@@ -125,5 +157,6 @@ def _build_dataset_launch(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("gui", default_value="false"),
+        DeclareLaunchArgument("scene", default_value="production_room"),
         OpaqueFunction(function=_build_dataset_launch),
     ])
