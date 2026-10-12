@@ -20,10 +20,62 @@ class PilotPlanTests(unittest.TestCase):
         self.assertEqual(20, len(samples))
         self.assertEqual(10, sum(sample.split == "train" for sample in samples))
         self.assertEqual(10, sum(sample.split == "val" for sample in samples))
-        self.assertEqual({2.7}, {sample.x_m for sample in samples if sample.split == "train"})
-        self.assertEqual({3.3}, {sample.x_m for sample in samples if sample.split == "val"})
-        self.assertEqual(set(generator.PILOT_YAWS_DEG), {sample.yaw_deg for sample in samples})
+        self.assertEqual({2.4}, {sample.camera_forward_m for sample in samples if sample.split == "train"})
+        self.assertEqual({3.0}, {sample.camera_forward_m for sample in samples if sample.split == "val"})
+        self.assertEqual(set(generator.PILOT_RELATIVE_YAWS_DEG), {sample.relative_yaw_deg for sample in samples})
         self.assertEqual(20, len({sample.sample_id for sample in samples}))
+
+    def test_camera_relative_plan_uses_measured_heading_and_preserves_clearance(self):
+        base_yaw = np.deg2rad(-5.043388934)
+        base_quaternion = (
+            0.0, 0.0, np.sin(base_yaw / 2.0), np.cos(base_yaw / 2.0)
+        )
+        base_to_optical, _ = generator.fixed_transform_between_links(
+            generator.robot_description_xacro_path(), "base_link", "sim_camera_optical_frame"
+        )
+        camera_world = generator._matrix_from_pose(
+            (0.10402347, 0.00283562, 0.01900026), base_quaternion,
+        ) @ base_to_optical
+        camera_position = tuple(float(value) for value in camera_world[:3, 3])
+        camera_quaternion = generator._quaternion_xyzw_from_matrix(camera_world[:3, :3])
+        camera_forward = generator.quaternion_matrix_xyzw(camera_quaternion)[:, 2]
+        self.assertGreater(abs(camera_forward[1]), 0.05)
+
+        samples = generator.pilot_samples((camera_position, camera_quaternion))
+        first = samples[0]
+        forward_distance, lateral_distance = generator.validate_camera_relative_target(
+            camera_position,
+            camera_quaternion,
+            (first.x_m, first.y_m, first.z_m),
+            first.camera_forward_m,
+        )
+        self.assertAlmostEqual(2.4, forward_distance, places=6)
+        self.assertLessEqual(lateral_distance, 0.25)
+        heading_deg = np.rad2deg(np.arctan2(camera_forward[1], camera_forward[0]))
+        self.assertAlmostEqual(
+            (heading_deg + first.relative_yaw_deg) % 360.0,
+            first.yaw_deg,
+            places=6,
+        )
+        obstacles = generator.validate_pilot_clearance(
+            generator.ROOT / generator.WORLD_REL, samples,
+        )
+        self.assertEqual(88, len(obstacles))
+
+    def test_camera_relative_guard_rejects_short_or_lateral_target(self):
+        camera_position, camera_quaternion = generator.nominal_camera_pose()
+        forward = generator.quaternion_matrix_xyzw(camera_quaternion)[:, 2]
+        right = generator.quaternion_matrix_xyzw(camera_quaternion)[:, 0]
+        too_close = np.asarray(camera_position) + 1.0 * forward
+        outside_lateral_clearance = np.asarray(camera_position) + 2.4 * forward + 0.30 * right
+        with self.assertRaisesRegex(ValueError, "forward distance"):
+            generator.validate_camera_relative_target(
+                camera_position, camera_quaternion, tuple(too_close), 1.0,
+            )
+        with self.assertRaisesRegex(ValueError, "lateral clearance"):
+            generator.validate_camera_relative_target(
+                camera_position, camera_quaternion, tuple(outside_lateral_clearance), 2.4,
+            )
 
 
 class CaptureSafeguardTests(unittest.TestCase):
@@ -41,7 +93,9 @@ class CaptureSafeguardTests(unittest.TestCase):
                     ),
                 )
 
-        sample = generator.PilotSample("sample", "train", "scenario", 2.7, 0.0, 0.05, 90)
+        sample = generator.PilotSample(
+            "sample", "train", "scenario", 2.7, 0.0, 0.05, 90.0, 2.7, 90,
+        )
         request = generator.populate_set_entity_state_request(SetRequest(), "suitcase_target", sample)
         self.assertEqual("suitcase_target", request.state.name)
         self.assertEqual("world", request.state.reference_frame)

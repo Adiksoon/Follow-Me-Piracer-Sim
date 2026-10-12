@@ -90,9 +90,9 @@ DEPTH_TOPIC = "/piracer/sim_camera/depth/image_raw"
 CAMERA_INFO_TOPIC = "/piracer/sim_camera/color/camera_info"
 DEPTH_CAMERA_INFO_TOPIC = "/piracer/sim_camera/depth/camera_info"
 TARGET_Z = 0.05
-SAFE_LANE_Y = 0.0
-PILOT_TARGET_X_M = (2.7, 3.3)
-PILOT_YAWS_DEG = (0, 45, 60, 90, 120, 180, 240, 270, 300, 315)
+PILOT_CAMERA_FORWARD_M = (2.4, 3.0)
+PILOT_RELATIVE_YAWS_DEG = (0, 45, 60, 90, 120, 180, 240, 270, 300, 315)
+DEFAULT_BASE_SPAWN_Z_M = 0.019
 YOLO_CLASS_ID = 0
 YOLO_CLASS_NAME = "suitcase"
 MAX_OCCLUSION_SAMPLES = 12_000
@@ -114,7 +114,9 @@ class PilotSample:
     x_m: float
     y_m: float
     z_m: float
-    yaw_deg: int
+    yaw_deg: float
+    camera_forward_m: float
+    relative_yaw_deg: int
 
 
 @dataclass(frozen=True)
@@ -139,21 +141,53 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def pilot_samples() -> list[PilotSample]:
-    """Return 20 deterministic poses, grouped by distance to prevent frame leakage."""
+def nominal_camera_pose() -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Return the camera pose for the launch's default zero base pose, for offline planning only."""
+    transform, _ = fixed_transform_between_links(
+        robot_description_xacro_path(), "base_link", OPTICAL_FRAME_NAME,
+    )
+    return (
+        tuple(float(value) for value in transform[:3, 3] + np.asarray((0.0, 0.0, DEFAULT_BASE_SPAWN_Z_M))),
+        _quaternion_xyzw_from_matrix(transform[:3, :3]),
+    )
+
+
+def pilot_samples(
+    camera_pose: tuple[
+        tuple[float, float, float], tuple[float, float, float, float]
+    ] | None = None,
+) -> list[PilotSample]:
+    """Place 20 poses along the supplied optical camera heading; default is offline nominal pose."""
+    if camera_pose is None:
+        camera_pose = nominal_camera_pose()
+    camera_position, camera_quaternion = camera_pose
+    camera_position_array = np.asarray(camera_position, dtype=np.float64)
+    if camera_position_array.shape != (3,) or not np.all(np.isfinite(camera_position_array)):
+        raise ValueError("Camera position must contain three finite values")
+    camera_forward = quaternion_matrix_xyzw(camera_quaternion)[:, 2]
+    horizontal_forward = camera_forward[:2]
+    horizontal_norm = float(np.linalg.norm(horizontal_forward))
+    if not math.isfinite(horizontal_norm) or horizontal_norm < 1e-6:
+        raise ValueError("Camera optical axis has no valid horizontal heading")
+    heading = math.atan2(float(horizontal_forward[1]), float(horizontal_forward[0]))
+    forward_x, forward_y = math.cos(heading), math.sin(heading)
+
     samples: list[PilotSample] = []
-    for distance_index, target_x in enumerate(PILOT_TARGET_X_M):
+    for distance_index, camera_forward_m in enumerate(PILOT_CAMERA_FORWARD_M):
         split = "train" if distance_index == 0 else "val"
-        scenario_id = f"target_x_{target_x:.1f}m"
-        for yaw in PILOT_YAWS_DEG:
+        scenario_id = f"camera_forward_{camera_forward_m:.1f}m"
+        for yaw in PILOT_RELATIVE_YAWS_DEG:
+            world_yaw_deg = (math.degrees(heading) + yaw) % 360.0
             samples.append(PilotSample(
-                sample_id=f"{scenario_id}_yaw_{yaw:03d}",
+                sample_id=f"{scenario_id}_relative_yaw_{yaw:03d}",
                 split=split,
                 scenario_id=scenario_id,
-                x_m=target_x,
-                y_m=SAFE_LANE_Y,
+                x_m=float(camera_position_array[0] + camera_forward_m * forward_x),
+                y_m=float(camera_position_array[1] + camera_forward_m * forward_y),
                 z_m=TARGET_Z,
-                yaw_deg=yaw,
+                yaw_deg=world_yaw_deg,
+                camera_forward_m=camera_forward_m,
+                relative_yaw_deg=yaw,
             ))
     return samples
 
@@ -447,6 +481,39 @@ def camera_pose_from_link_states(
     return camera_position, camera_quaternion
 
 
+def validate_camera_relative_target(
+    camera_position: tuple[float, float, float],
+    camera_quaternion_xyzw: tuple[float, float, float, float],
+    target_position: tuple[float, float, float],
+    planned_forward_m: float,
+) -> tuple[float, float]:
+    """Check positive/planned camera-forward distance and lateral target clearance."""
+    camera_position_array = np.asarray(camera_position, dtype=np.float64)
+    target_position_array = np.asarray(target_position, dtype=np.float64)
+    if (camera_position_array.shape != (3,) or target_position_array.shape != (3,)
+            or not np.all(np.isfinite(camera_position_array))
+            or not np.all(np.isfinite(target_position_array))
+            or not math.isfinite(planned_forward_m)):
+        raise ValueError("Camera-relative target geometry must contain finite 3D positions and distance")
+    camera_forward = quaternion_matrix_xyzw(camera_quaternion_xyzw)[:, 2]
+    if not np.all(np.isfinite(camera_forward)):
+        raise ValueError("Camera optical forward vector is invalid")
+    camera_to_target = target_position_array - camera_position_array
+    forward_distance = float(np.dot(camera_to_target, camera_forward))
+    lateral_distance = float(np.linalg.norm(camera_to_target - forward_distance * camera_forward))
+    if not math.isfinite(forward_distance) or not math.isfinite(lateral_distance):
+        raise ValueError("Camera-relative target distance is invalid")
+    if (forward_distance < 1.5
+            or abs(forward_distance - planned_forward_m) > 0.10
+            or lateral_distance > 0.25):
+        raise ValueError(
+            "Camera-relative sample violates forward distance or lateral clearance; "
+            f"forward_distance={forward_distance:.3f} m, planned={planned_forward_m:.3f} m, "
+            f"lateral_error={lateral_distance:.3f} m"
+        )
+    return forward_distance, lateral_distance
+
+
 def pose_points_to_camera(
     local_points: np.ndarray,
     object_position: tuple[float, float, float],
@@ -663,7 +730,10 @@ def _asset_model_sdf(model_name: str) -> Path:
     raise ValueError(f"Cannot resolve approved-world model {model_name!r} to a local SDF")
 
 
-def validate_pilot_clearance(world_path: Path) -> list[dict]:
+def validate_pilot_clearance(
+    world_path: Path,
+    samples: list[PilotSample] | None = None,
+) -> list[dict]:
     """Check every planned suitcase footprint against production-world collisions."""
     world_root = ET.parse(world_path).getroot()
     world = world_root.find("world")
@@ -703,7 +773,8 @@ def validate_pilot_clearance(world_path: Path) -> list[dict]:
     if not obstacles:
         raise ValueError("No static world obstacles were checked")
 
-    for sample in pilot_samples():
+    planned_samples = pilot_samples() if samples is None else samples
+    for sample in planned_samples:
         for obstacle in obstacles:
             nearest_x = min(max(sample.x_m, obstacle["center_x"] - obstacle["half_x"]),
                             obstacle["center_x"] + obstacle["half_x"])
@@ -977,8 +1048,14 @@ def run_capture(
             "visual_offset_m": [0.0, 0.0, -0.05],
         },
         "label": {"format": "YOLO", "class_id": YOLO_CLASS_ID, "class_name": YOLO_CLASS_NAME},
-        "pilot_plan": [asdict(sample) for sample in pilot_samples()],
-        "split_policy": "World-x scenarios are kept intact: target x=2.7 m=train, target x=3.3 m=val. Pilot split is for review only.",
+        "pilot_plan": [],
+        "camera_relative_placement": {
+            "reference_camera_pose": "fresh piracer::base_link state composed with the verified fixed URDF chain",
+            "forward_distances_m": PILOT_CAMERA_FORWARD_M,
+            "relative_yaw_offsets_deg": PILOT_RELATIVE_YAWS_DEG,
+            "offline_plan_pose": "launch defaults: base x=0, y=0, z=0.019 m, yaw=0",
+        },
+        "split_policy": "Camera-forward distance scenarios are kept intact: 2.4 m=train, 3.0 m=val. Pilot split is for review only.",
         "kulunuos_reference": {
             "repository": "https://github.com/KulunuOS/gazebo_dataset_generation",
             "revision": "928c0be3d1366adf3ce3a82e4c432fc1b0171b46",
@@ -999,7 +1076,17 @@ def run_capture(
             if not client.wait_for_service(timeout_sec=args.service_timeout_s):
                 raise TimeoutError(f"Required Gazebo service is unavailable: {service_name}")
 
-        for sample in pilot_samples():
+        camera_pose_min_time = time.monotonic()
+        reference_position, reference_q, _ = node.camera_pose_from_link_states(camera_pose_min_time)
+        camera_reference = (reference_position, reference_q)
+        samples = pilot_samples(camera_reference)
+        capture_obstacles = validate_pilot_clearance(Path(args.world).resolve(), samples)
+        base_metadata["static_world_collision_boxes_checked"] = len(capture_obstacles)
+        base_metadata["camera_relative_placement"]["reference_camera_position_m"] = reference_position
+        base_metadata["camera_relative_placement"]["reference_camera_quaternion_xyzw"] = reference_q
+        base_metadata["pilot_plan"] = [asdict(sample) for sample in samples]
+
+        for sample in samples:
             node.set_target(sample)
             settle_deadline = time.monotonic() + args.settle_s
             while rclpy.ok() and time.monotonic() < settle_deadline:
@@ -1036,20 +1123,13 @@ def run_capture(
             camera_position, camera_q, camera_pose_received_at = node.camera_pose_from_link_states(
                 camera_pose_min_time,
             )
-            camera_forward = quaternion_matrix_xyzw(camera_q)[:, 2]
-            camera_to_target = np.asarray((sample.x_m, sample.y_m, sample.z_m)) - np.asarray(camera_position)
-            forward_distance = float(np.dot(camera_to_target, camera_forward))
-            lateral_distance = float(np.linalg.norm(camera_to_target - forward_distance * camera_forward))
-            if (
-                camera_forward[0] < 0.98
-                or abs(camera_forward[1]) > 0.05
-                or forward_distance < 1.5
-                or lateral_distance > 0.25
-            ):
-                raise RuntimeError(
-                    "Fixed camera is not aimed down the approved clear aisle; "
-                    f"forward={camera_forward.tolist()}, lateral_error={lateral_distance:.3f} m"
+            try:
+                forward_distance, lateral_distance = validate_camera_relative_target(
+                    camera_position, camera_q,
+                    (sample.x_m, sample.y_m, sample.z_m), sample.camera_forward_m,
                 )
+            except ValueError as error:
+                raise RuntimeError(str(error)) from error
             if camera_reference is None:
                 camera_reference = (camera_position, camera_q)
             elif (
@@ -1336,9 +1416,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Mesh: {mesh.geometry_count} geometries, {mesh.vertices.shape[0]} vertices, {mesh.triangle_count} triangles")
             print(f"Static world collision boxes checked: {len(obstacles)}; suitcase clearance margin: 0.05 m")
             print(f"Planned samples: {len(pilot_samples())}")
-            print("Target world-x positions: " + ", ".join(f"{x:.1f} m" for x in PILOT_TARGET_X_M))
-            print("Yaw angles (deg): " + ", ".join(str(yaw) for yaw in PILOT_YAWS_DEG))
-            print("Split: target x=2.7 m -> train; target x=3.3 m -> val (pilot review only).")
+            print("Target camera-forward distances: " + ", ".join(f"{distance:.1f} m" for distance in PILOT_CAMERA_FORWARD_M))
+            print("Yaw offsets relative to camera heading (deg): " + ", ".join(str(yaw) for yaw in PILOT_RELATIVE_YAWS_DEG))
+            print("Split: camera-forward distance 2.4 m -> train; 3.0 m -> val (pilot review only).")
             return 0
         run_capture(args, mesh, world_hash, mesh_hash, len(obstacles))
         return 0
