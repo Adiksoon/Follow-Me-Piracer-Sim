@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""Prepare a small, geometry-labelled suitcase pilot for the approved world.
+"""Prepare a geometry-labelled suitcase pilot with an independent dataset camera.
 
-The capture path is deliberately explicit: this script never launches Gazebo.
-Run it without ``--capture`` to inspect the deterministic pilot plan.  With
-``--capture``, it connects to an already-running production simulation and
-moves only ``suitcase_target`` along the clear centre aisle.
-
-The workflow is informed by KulunuOS/gazebo_dataset_generation
-(revision 928c0be3d1366adf3ce3a82e4c432fc1b0171b46, render.py).  Its ROS 1
-camera-sweep/mask implementation was not copied verbatim; this focused ROS 2
-implementation uses the production DAE, camera intrinsics, Gazebo entity state,
-and the aligned depth stream to create suitcase bounding boxes.
+The capture path is explicit: this script never launches Gazebo. Run it
+without ``--capture`` to inspect the camera-orbit plan. With ``--capture``, it
+connects to a dataset-camera launch, moves only ``dataset_camera``, and leaves
+the approved suitcase in place. The workflow is informed by the
+KulunuOS/gazebo_dataset_generation render and camera-sweep concept; labels use
+the production DAE, CameraInfo and aligned depth.
 """
 
 from __future__ import annotations
@@ -22,7 +18,6 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import re
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -55,15 +50,6 @@ def _package_share(package_name: str) -> Path | None:
         return None
 
 
-def robot_description_xacro_path() -> Path:
-    if SOURCE_ROOT is not None:
-        return SOURCE_ROOT / ROBOT_DESCRIPTION_XACRO_REL
-    share = _package_share("robot_description")
-    if share is None:
-        raise FileNotFoundError("robot_description package is unavailable for the camera transform chain")
-    return share / "urdf/piracer.urdf.xacro"
-
-
 SIMULATION_SHARE = (
     SOURCE_ROOT / "src/robot_simulation" if SOURCE_ROOT is not None
     else _package_share("robot_simulation") or (ROOT / "src/robot_simulation")
@@ -81,18 +67,26 @@ FURNITURE_SHA256 = {
     "wooden_chair_blue_gray/model.sdf": "6c0d4d2219af49b9b5737e0a25b36ebe5b69349640d4509eff1f21fe3027b28f",
 }
 TARGET_ENTITY = "suitcase_target"
-BASE_LINK_NAME = "piracer::base_link"
-LINK_STATES_TOPIC = "/gazebo/link_states"
-OPTICAL_FRAME_NAME = "sim_camera_optical_frame"
-ROBOT_DESCRIPTION_XACRO_REL = Path("src/robot_description/urdf/piracer.urdf.xacro")
-IMAGE_TOPIC = "/piracer/sim_camera/color/image_raw"
-DEPTH_TOPIC = "/piracer/sim_camera/depth/image_raw"
-CAMERA_INFO_TOPIC = "/piracer/sim_camera/color/camera_info"
-DEPTH_CAMERA_INFO_TOPIC = "/piracer/sim_camera/depth/camera_info"
-TARGET_Z = 0.05
-PILOT_CAMERA_FORWARD_M = (2.4, 3.0)
-PILOT_RELATIVE_YAWS_DEG = (0, 45, 60, 90, 120, 180, 240, 270, 300, 315)
-DEFAULT_BASE_SPAWN_Z_M = 0.019
+CAMERA_ENTITY = "dataset_camera"
+OPTICAL_FRAME_NAME = "dataset_camera_optical_frame"
+IMAGE_TOPIC = "/dataset_camera/color/image_raw"
+DEPTH_TOPIC = "/dataset_camera/depth/image_raw"
+CAMERA_INFO_TOPIC = "/dataset_camera/color/camera_info"
+DEPTH_CAMERA_INFO_TOPIC = "/dataset_camera/depth/camera_info"
+PILOT_CAMERA_DISTANCES_M = (2.4, 3.0)
+PILOT_TRAIN_AZIMUTHS_DEG = tuple(range(0, 360, 30))
+PILOT_VAL_AZIMUTHS_DEG = (15, 60, 105, 150, 195, 240, 285, 330)
+PILOT_CAMERA_HEIGHT_ABOVE_TARGET_M = 0.75
+CAMERA_CLEARANCE_RADIUS_M = 0.15
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 360
+CAMERA_UPDATE_RATE_HZ = 5.0
+CAMERA_HORIZONTAL_FOV_RAD = 1.14075
+CAMERA_LINK_TO_OPTICAL_ROTATION = np.array([
+    [0.0, 0.0, 1.0],
+    [-1.0, 0.0, 0.0],
+    [0.0, -1.0, 0.0],
+], dtype=np.float64)
 YOLO_CLASS_ID = 0
 YOLO_CLASS_NAME = "suitcase"
 MAX_OCCLUSION_SAMPLES = 12_000
@@ -111,12 +105,13 @@ class PilotSample:
     sample_id: str
     split: str
     scenario_id: str
-    x_m: float
-    y_m: float
-    z_m: float
-    yaw_deg: float
-    camera_forward_m: float
-    relative_yaw_deg: int
+    camera_x_m: float
+    camera_y_m: float
+    camera_z_m: float
+    camera_yaw_deg: float
+    camera_pitch_deg: float
+    azimuth_deg: int
+    camera_distance_m: float
 
 
 @dataclass(frozen=True)
@@ -141,53 +136,86 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def nominal_camera_pose() -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
-    """Return the camera pose for the launch's default zero base pose, for offline planning only."""
-    transform, _ = fixed_transform_between_links(
-        robot_description_xacro_path(), "base_link", OPTICAL_FRAME_NAME,
+def target_model_pose(world_path: Path) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Read the approved suitcase model pose from the selected production world."""
+    root = ET.parse(world_path).getroot()
+    model = root.find(f".//world/model[@name='{TARGET_ENTITY}']")
+    if model is None:
+        raise ValueError("Production-world target model is missing")
+    xyzrpy = _pose6(model.find("pose"))
+    position = tuple(float(value) for value in xyzrpy[:3])
+    rotation = _matrix_from_xyz_rpy(position, xyzrpy[3:])[:3, :3]
+    return position, _quaternion_xyzw_from_matrix(rotation)
+
+
+def suitcase_visual_center(
+    target_position: tuple[float, float, float],
+    target_quaternion_xyzw: tuple[float, float, float, float],
+    mesh: MeshGeometry,
+) -> tuple[float, float, float]:
+    local_center = (
+        np.asarray(mesh.local_bounds_min, dtype=np.float64)
+        + np.asarray(mesh.local_bounds_max, dtype=np.float64)
+    ) * 0.5
+    local_center[2] -= 0.05  # suitcase_visual pose in the approved production SDF
+    world_center = (
+        quaternion_matrix_xyzw(target_quaternion_xyzw) @ local_center
+        + np.asarray(target_position, dtype=np.float64)
     )
-    return (
-        tuple(float(value) for value in transform[:3, 3] + np.asarray((0.0, 0.0, DEFAULT_BASE_SPAWN_Z_M))),
-        _quaternion_xyzw_from_matrix(transform[:3, :3]),
-    )
+    return tuple(float(value) for value in world_center)
 
 
-def pilot_samples(
-    camera_pose: tuple[
-        tuple[float, float, float], tuple[float, float, float, float]
-    ] | None = None,
-) -> list[PilotSample]:
-    """Place 20 poses along the supplied optical camera heading; default is offline nominal pose."""
-    if camera_pose is None:
-        camera_pose = nominal_camera_pose()
-    camera_position, camera_quaternion = camera_pose
-    camera_position_array = np.asarray(camera_position, dtype=np.float64)
-    if camera_position_array.shape != (3,) or not np.all(np.isfinite(camera_position_array)):
-        raise ValueError("Camera position must contain three finite values")
-    camera_forward = quaternion_matrix_xyzw(camera_quaternion)[:, 2]
-    horizontal_forward = camera_forward[:2]
-    horizontal_norm = float(np.linalg.norm(horizontal_forward))
-    if not math.isfinite(horizontal_norm) or horizontal_norm < 1e-6:
-        raise ValueError("Camera optical axis has no valid horizontal heading")
-    heading = math.atan2(float(horizontal_forward[1]), float(horizontal_forward[0]))
-    forward_x, forward_y = math.cos(heading), math.sin(heading)
+def camera_link_orientation(
+    camera_position: tuple[float, float, float],
+    target_position: tuple[float, float, float],
+) -> tuple[float, float, float, float]:
+    """Orient the Gazebo camera link's +X axis toward the target."""
+    direction = np.asarray(target_position, dtype=np.float64) - np.asarray(camera_position, dtype=np.float64)
+    if direction.shape != (3,) or not np.all(np.isfinite(direction)):
+        raise ValueError("Camera and target positions must be finite XYZ values")
+    horizontal = math.hypot(float(direction[0]), float(direction[1]))
+    if horizontal < 1e-6 or np.linalg.norm(direction) < 1e-6:
+        raise ValueError("Camera cannot look at a target at the same horizontal position")
+    yaw = math.atan2(float(direction[1]), float(direction[0]))
+    pitch = math.atan2(-float(direction[2]), horizontal)
+    rotation = _matrix_from_xyz_rpy((0.0, 0.0, 0.0), (0.0, pitch, yaw))[:3, :3]
+    return _quaternion_xyzw_from_matrix(rotation)
 
+
+def pilot_samples(target_center: tuple[float, float, float]) -> list[PilotSample]:
+    """Plan 12 near and 8 far views on a full azimuth orbit around the suitcase."""
+    center = np.asarray(target_center, dtype=np.float64)
+    if center.shape != (3,) or not np.all(np.isfinite(center)):
+        raise ValueError("Suitcase visual center must contain three finite values")
     samples: list[PilotSample] = []
-    for distance_index, camera_forward_m in enumerate(PILOT_CAMERA_FORWARD_M):
-        split = "train" if distance_index == 0 else "val"
-        scenario_id = f"camera_forward_{camera_forward_m:.1f}m"
-        for yaw in PILOT_RELATIVE_YAWS_DEG:
-            world_yaw_deg = (math.degrees(heading) + yaw) % 360.0
+    view_groups = (
+        ("train", PILOT_CAMERA_DISTANCES_M[0], PILOT_TRAIN_AZIMUTHS_DEG),
+        ("val", PILOT_CAMERA_DISTANCES_M[1], PILOT_VAL_AZIMUTHS_DEG),
+    )
+    for split, distance, azimuths in view_groups:
+        scenario_id = f"camera_orbit_{distance:.1f}m"
+        for azimuth in azimuths:
+            angle = math.radians(azimuth)
+            camera_position = (
+                float(center[0] + distance * math.cos(angle)),
+                float(center[1] + distance * math.sin(angle)),
+                float(center[2] + PILOT_CAMERA_HEIGHT_ABOVE_TARGET_M),
+            )
+            orientation = camera_link_orientation(camera_position, tuple(center))
+            rotation = quaternion_matrix_xyzw(orientation)
+            yaw = math.degrees(math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))) % 360.0
+            pitch = math.degrees(math.asin(float(np.clip(-rotation[2, 0], -1.0, 1.0))))
             samples.append(PilotSample(
-                sample_id=f"{scenario_id}_relative_yaw_{yaw:03d}",
+                sample_id=f"{scenario_id}_azimuth_{azimuth:03d}",
                 split=split,
                 scenario_id=scenario_id,
-                x_m=float(camera_position_array[0] + camera_forward_m * forward_x),
-                y_m=float(camera_position_array[1] + camera_forward_m * forward_y),
-                z_m=TARGET_Z,
-                yaw_deg=world_yaw_deg,
-                camera_forward_m=camera_forward_m,
-                relative_yaw_deg=yaw,
+                camera_x_m=camera_position[0],
+                camera_y_m=camera_position[1],
+                camera_z_m=camera_position[2],
+                camera_yaw_deg=yaw,
+                camera_pitch_deg=pitch,
+                azimuth_deg=azimuth,
+                camera_distance_m=distance,
             ))
     return samples
 
@@ -310,7 +338,7 @@ def _matrix_from_xyz_rpy(
 ) -> np.ndarray:
     values = np.asarray((*xyz, *rpy), dtype=np.float64)
     if values.shape != (6,) or not np.all(np.isfinite(values)):
-        raise ValueError("URDF fixed-joint origin must contain six finite values")
+        raise ValueError("Pose must contain six finite values")
     x, y, z = xyz
     roll, pitch, yaw = rpy
     cr, sr = math.cos(roll), math.sin(roll)
@@ -378,140 +406,12 @@ def _quaternion_xyzw_from_matrix(rotation: np.ndarray) -> tuple[float, float, fl
     return tuple(float(value) for value in quaternion / norm)
 
 
-def _origin_values(
-    origin: ET.Element | None, defaults: dict[str, str],
-) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    def parse(attribute: str) -> tuple[float, float, float]:
-        raw = origin.get(attribute, "0 0 0") if origin is not None else "0 0 0"
-        raw = re.sub(
-            r"\$\(arg\s+([A-Za-z0-9_]+)\)",
-            lambda match: defaults.get(match.group(1), ""),
-            raw,
-        )
-        values = raw.split()
-        if len(values) != 3 or any(not value for value in values):
-            raise ValueError(f"URDF fixed-joint {attribute} must contain three resolved values")
-        parsed = tuple(float(value) for value in values)
-        if not all(math.isfinite(value) for value in parsed):
-            raise ValueError(f"URDF fixed-joint {attribute} must be finite")
-        return parsed
-    return parse("xyz"), parse("rpy")
 
 
-def fixed_transform_between_links(
-    description_path: Path,
-    parent_frame: str,
-    child_frame: str,
-) -> tuple[np.ndarray, tuple[str, ...]]:
-    """Compose a unique directed fixed-joint path, resolving Xacro argument defaults."""
-    root = ET.parse(description_path).getroot()
-    defaults = {
-        element.get("name"): element.get("default")
-        for element in root.iter()
-        if element.tag.rsplit("}", 1)[-1] == "arg" and element.get("name") and element.get("default") is not None
-    }
-    graph: dict[str, list[tuple[str, np.ndarray]]] = {}
-    for joint in root.iter("joint"):
-        if joint.get("type") != "fixed":
-            continue
-        parent = joint.find("parent")
-        child = joint.find("child")
-        if parent is None or child is None or not parent.get("link") or not child.get("link"):
-            raise ValueError("URDF fixed joint is missing its parent or child frame")
-        xyz, rpy = _origin_values(joint.find("origin"), defaults)
-        transform = _matrix_from_xyz_rpy(xyz, rpy)
-        parent_name, child_name = parent.get("link"), child.get("link")
-        graph.setdefault(parent_name, []).append((child_name, transform))
-        graph.setdefault(child_name, []).append((parent_name, np.linalg.inv(transform)))
-
-    queue: list[tuple[str, np.ndarray, tuple[str, ...]]] = [(parent_frame, np.eye(4), (parent_frame,))]
-    paths: list[tuple[np.ndarray, tuple[str, ...]]] = []
-    while queue:
-        frame, transform, path = queue.pop(0)
-        if frame == child_frame:
-            paths.append((transform, path))
-            continue
-        for next_frame, edge_transform in graph.get(frame, []):
-            if next_frame not in path:
-                queue.append((next_frame, transform @ edge_transform, path + (next_frame,)))
-    if len(paths) != 1:
-        raise ValueError(f"URDF does not define a unique fixed transform from {parent_frame} to {child_frame}")
-    transform = paths[0][0]
-    if not np.all(np.isfinite(transform)):
-        raise ValueError("URDF transform contains non-finite values")
-    _quaternion_xyzw_from_matrix(transform[:3, :3])
-    return transform, paths[0][1]
 
 
-def camera_pose_from_link_states(
-    link_states,
-    base_link_name: str,
-    base_to_optical: np.ndarray,
-    *,
-    received_at_monotonic: float,
-    now_monotonic: float,
-    max_age_s: float,
-) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
-    """Return world optical pose from a fresh exact LinkStates entry."""
-    age = now_monotonic - received_at_monotonic
-    if (not math.isfinite(age) or not math.isfinite(max_age_s)
-            or max_age_s <= 0.0 or age < 0.0 or age > max_age_s):
-        raise ValueError("Gazebo base_link pose is stale or has an invalid freshness limit")
-    names = list(link_states.name)
-    poses = list(link_states.pose)
-    if len(names) != len(poses):
-        raise ValueError("Gazebo LinkStates names and poses have different lengths")
-    matching = [index for index, name in enumerate(names) if name == base_link_name]
-    if len(matching) != 1:
-        raise ValueError(f"Gazebo LinkStates must contain exactly one {base_link_name}")
-    pose = poses[matching[0]]
-    position = (pose.position.x, pose.position.y, pose.position.z)
-    quaternion = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
-    world_to_base = _matrix_from_pose(position, quaternion)
-    transform = np.asarray(base_to_optical, dtype=np.float64)
-    if (transform.shape != (4, 4) or not np.all(np.isfinite(transform))
-            or not np.allclose(transform[3], (0.0, 0.0, 0.0, 1.0), atol=1e-9)):
-        raise ValueError("URDF camera transform is invalid")
-    if (not np.allclose(transform[:3, :3].T @ transform[:3, :3], np.eye(3), atol=1e-6)
-            or not math.isclose(float(np.linalg.det(transform[:3, :3])), 1.0, abs_tol=1e-6)):
-        raise ValueError("URDF camera rotation is invalid")
-    camera_world = world_to_base @ transform
-    camera_position = tuple(float(value) for value in camera_world[:3, 3])
-    camera_quaternion = _quaternion_xyzw_from_matrix(camera_world[:3, :3])
-    return camera_position, camera_quaternion
 
 
-def validate_camera_relative_target(
-    camera_position: tuple[float, float, float],
-    camera_quaternion_xyzw: tuple[float, float, float, float],
-    target_position: tuple[float, float, float],
-    planned_forward_m: float,
-) -> tuple[float, float]:
-    """Check positive/planned camera-forward distance and lateral target clearance."""
-    camera_position_array = np.asarray(camera_position, dtype=np.float64)
-    target_position_array = np.asarray(target_position, dtype=np.float64)
-    if (camera_position_array.shape != (3,) or target_position_array.shape != (3,)
-            or not np.all(np.isfinite(camera_position_array))
-            or not np.all(np.isfinite(target_position_array))
-            or not math.isfinite(planned_forward_m)):
-        raise ValueError("Camera-relative target geometry must contain finite 3D positions and distance")
-    camera_forward = quaternion_matrix_xyzw(camera_quaternion_xyzw)[:, 2]
-    if not np.all(np.isfinite(camera_forward)):
-        raise ValueError("Camera optical forward vector is invalid")
-    camera_to_target = target_position_array - camera_position_array
-    forward_distance = float(np.dot(camera_to_target, camera_forward))
-    lateral_distance = float(np.linalg.norm(camera_to_target - forward_distance * camera_forward))
-    if not math.isfinite(forward_distance) or not math.isfinite(lateral_distance):
-        raise ValueError("Camera-relative target distance is invalid")
-    if (forward_distance < 1.5
-            or abs(forward_distance - planned_forward_m) > 0.10
-            or lateral_distance > 0.25):
-        raise ValueError(
-            "Camera-relative sample violates forward distance or lateral clearance; "
-            f"forward_distance={forward_distance:.3f} m, planned={planned_forward_m:.3f} m, "
-            f"lateral_error={lateral_distance:.3f} m"
-        )
-    return forward_distance, lateral_distance
 
 
 def pose_points_to_camera(
@@ -713,8 +613,10 @@ def _collision_boxes(model_element: ET.Element, base_pose=(0.0, 0.0, 0.0, 0.0, 0
                 "name": collision.get("name", "unnamed_collision"),
                 "center_x": cx,
                 "center_y": cy,
+                "center_z": cz,
                 "half_x": half_x,
                 "half_y": half_y,
+                "half_z": half_z,
             })
     return boxes
 
@@ -730,13 +632,10 @@ def _asset_model_sdf(model_name: str) -> Path:
     raise ValueError(f"Cannot resolve approved-world model {model_name!r} to a local SDF")
 
 
-def validate_pilot_clearance(
-    world_path: Path,
-    samples: list[PilotSample] | None = None,
-) -> list[dict]:
-    """Check every planned suitcase footprint against production-world collisions."""
-    world_root = ET.parse(world_path).getroot()
-    world = world_root.find("world")
+def production_collision_boxes(world_path: Path) -> list[dict]:
+    """Resolve production-world collision bounds used for camera-position checks."""
+    root = ET.parse(world_path).getroot()
+    world = root.find("world")
     if world is None:
         raise ValueError("SDF has no world element")
     obstacles: list[dict] = []
@@ -754,46 +653,57 @@ def validate_pilot_clearance(
             raise ValueError(f"Included asset {model_name!r} has no SDF model")
         include_name = include.findtext("name", default=model_name)
         include_pose = _pose6(include.find("pose"))
-        obstacles.extend({**box, "model": include_name} for box in _collision_boxes(model, include_pose))
-
-    target_model = world.find(f"model[@name='{TARGET_ENTITY}']")
-    if target_model is None:
-        raise ValueError("Production-world target model is missing")
-    # Collision radii are measured around the model origin, so remove the
-    # target's initial world pose before reading its local collision geometry.
-    target_world_pose = target_model.find("pose")
-    if target_world_pose is not None:
-        target_model.remove(target_world_pose)
-    target_radius = max(
-        math.hypot(box["half_x"], box["half_y"])
-        + math.hypot(box["center_x"], box["center_y"])
-        for box in _collision_boxes(target_model)
-    )
-    clearance_radius = target_radius + 0.05
+        obstacles.extend(
+            {**box, "model": include_name}
+            for box in _collision_boxes(model, include_pose)
+        )
     if not obstacles:
-        raise ValueError("No static world obstacles were checked")
+        raise ValueError("No production-world collision geometry was checked")
+    return obstacles
 
-    planned_samples = pilot_samples() if samples is None else samples
-    for sample in planned_samples:
+
+def validate_camera_clearance(
+    world_path: Path,
+    samples: list[PilotSample],
+    clearance_radius_m: float = CAMERA_CLEARANCE_RADIUS_M,
+) -> list[dict]:
+    """Reject camera poses that overlap a production-world collision AABB."""
+    if not math.isfinite(clearance_radius_m) or clearance_radius_m <= 0.0:
+        raise ValueError("Camera clearance radius must be positive and finite")
+    obstacles = production_collision_boxes(world_path)
+    for sample in samples:
+        point = np.asarray(
+            (sample.camera_x_m, sample.camera_y_m, sample.camera_z_m), dtype=np.float64
+        )
         for obstacle in obstacles:
-            nearest_x = min(max(sample.x_m, obstacle["center_x"] - obstacle["half_x"]),
-                            obstacle["center_x"] + obstacle["half_x"])
-            nearest_y = min(max(sample.y_m, obstacle["center_y"] - obstacle["half_y"]),
-                            obstacle["center_y"] + obstacle["half_y"])
-            distance = math.hypot(sample.x_m - nearest_x, sample.y_m - nearest_y)
-            if distance <= clearance_radius:
+            center = np.asarray(
+                (obstacle["center_x"], obstacle["center_y"], obstacle["center_z"]),
+                dtype=np.float64,
+            )
+            half = np.asarray(
+                (obstacle["half_x"], obstacle["half_y"], obstacle["half_z"]),
+                dtype=np.float64,
+            )
+            outside = np.maximum(np.abs(point - center) - half, 0.0)
+            if float(np.linalg.norm(outside)) <= clearance_radius_m:
                 raise ValueError(
-                    f"Pilot pose {sample.sample_id} intersects the conservative footprint "
-                    f"of {obstacle.get('model', 'world')}::{obstacle['name']}"
+                    f"Camera pose {sample.sample_id} is within {clearance_radius_m:.2f} m of "
+                    f"{obstacle.get('model', 'world')}::{obstacle['name']}"
                 )
     return obstacles
+
+
 
 
 def _unit_quaternion_difference(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
     qa = np.asarray(a, dtype=np.float64)
     qb = np.asarray(b, dtype=np.float64)
-    qa /= np.linalg.norm(qa)
-    qb /= np.linalg.norm(qb)
+    norm_a, norm_b = float(np.linalg.norm(qa)), float(np.linalg.norm(qb))
+    if (not math.isfinite(norm_a) or not math.isfinite(norm_b)
+            or norm_a < 1e-12 or norm_b < 1e-12):
+        raise ValueError("Cannot compare invalid or zero-length quaternions")
+    qa /= norm_a
+    qb /= norm_b
     dot = min(1.0, abs(float(np.dot(qa, qb))))
     return 2.0 * math.acos(dot)
 
@@ -802,16 +712,117 @@ def stamp_seconds(stamp) -> float:
     return stamp.sec + stamp.nanosec * 1e-9
 
 
+def entity_pose(response) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    pose = response.state.pose
+    position = (pose.position.x, pose.position.y, pose.position.z)
+    orientation = (
+        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
+    )
+    _matrix_from_pose(position, orientation)
+    return position, orientation
+
+
+def camera_optical_pose(
+    camera_link_position: tuple[float, float, float],
+    camera_link_quaternion_xyzw: tuple[float, float, float, float],
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Convert the Gazebo camera link pose to its ROS optical frame pose."""
+    link_rotation = quaternion_matrix_xyzw(camera_link_quaternion_xyzw)
+    optical_rotation = link_rotation @ CAMERA_LINK_TO_OPTICAL_ROTATION
+    optical_quaternion = _quaternion_xyzw_from_matrix(optical_rotation)
+    return camera_link_position, optical_quaternion
+
+
+def validate_camera_sample_pose(
+    sample: PilotSample,
+    camera_position: tuple[float, float, float],
+    camera_quaternion_xyzw: tuple[float, float, float, float],
+    target_center: tuple[float, float, float],
+) -> tuple[float, float]:
+    """Check actual camera range and look direction against its requested orbit sample."""
+    expected_position = np.asarray(
+        (sample.camera_x_m, sample.camera_y_m, sample.camera_z_m), dtype=np.float64
+    )
+    actual_position = np.asarray(camera_position, dtype=np.float64)
+    if actual_position.shape != (3,) or not np.all(np.isfinite(actual_position)):
+        raise ValueError("Gazebo returned an invalid dataset-camera position")
+    position_delta = float(np.linalg.norm(actual_position - expected_position))
+    target = np.asarray(target_center, dtype=np.float64)
+    horizontal_distance = float(np.linalg.norm((actual_position - target)[:2]))
+    if abs(horizontal_distance - sample.camera_distance_m) > 0.05:
+        raise ValueError(
+            f"Dataset camera range differs from the planned {sample.camera_distance_m:.2f} m"
+        )
+    expected_orientation = camera_link_orientation(tuple(actual_position), tuple(target))
+    orientation_delta = _unit_quaternion_difference(
+        camera_quaternion_xyzw, expected_orientation,
+    )
+    if position_delta > 0.03 or orientation_delta > math.radians(2.0):
+        raise ValueError(
+            f"Dataset camera did not reach the planned look-at pose "
+            f"(position delta {position_delta:.3f} m, orientation delta "
+            f"{math.degrees(orientation_delta):.2f} deg)"
+        )
+    forward = quaternion_matrix_xyzw(camera_quaternion_xyzw)[:, 0]
+    target_direction = target - actual_position
+    target_direction /= np.linalg.norm(target_direction)
+    if float(np.dot(forward, target_direction)) < math.cos(math.radians(2.0)):
+        raise ValueError("Dataset camera optical axis is not aimed at the suitcase")
+    return horizontal_distance, position_delta
+
+
+def projected_pilot_boxes(
+    samples: list[PilotSample],
+    target_position: tuple[float, float, float],
+    target_quaternion_xyzw: tuple[float, float, float, float],
+    target_center: tuple[float, float, float],
+    mesh: MeshGeometry,
+) -> dict[str, tuple[float, float, float, float]]:
+    """Check planned views fit the 640x360 camera using its approved FOV."""
+    focal = CAMERA_WIDTH / (2.0 * math.tan(CAMERA_HORIZONTAL_FOV_RAD / 2.0))
+    intrinsics = (focal, focal, CAMERA_WIDTH / 2.0, CAMERA_HEIGHT / 2.0)
+    boxes: dict[str, tuple[float, float, float, float]] = {}
+    vertices = mesh.vertices.copy()
+    vertices[:, 2] -= 0.05
+    for sample in samples:
+        camera_position = (sample.camera_x_m, sample.camera_y_m, sample.camera_z_m)
+        link_quaternion = camera_link_orientation(camera_position, target_center)
+        optical_position, optical_quaternion = camera_optical_pose(
+            camera_position, link_quaternion,
+        )
+        points_camera = pose_points_to_camera(
+            vertices,
+            target_position,
+            target_quaternion_xyzw,
+            (0.0, 0.0, 0.0),
+            optical_position,
+            optical_quaternion,
+        )
+        boxes[sample.sample_id] = projected_bbox(
+            points_camera, intrinsics, CAMERA_WIDTH, CAMERA_HEIGHT,
+        )
+    return boxes
+
+
 def populate_set_entity_state_request(request, entity_name: str, sample: PilotSample):
-    """Populate the fields actually declared by gazebo_msgs/SetEntityState."""
+    """Move the independent dataset camera in the world frame."""
     request.state.name = entity_name
     request.state.reference_frame = "world"
-    request.state.pose.position.x = sample.x_m
-    request.state.pose.position.y = sample.y_m
-    request.state.pose.position.z = sample.z_m
-    half_yaw = math.radians(sample.yaw_deg) / 2.0
-    request.state.pose.orientation.z = math.sin(half_yaw)
-    request.state.pose.orientation.w = math.cos(half_yaw)
+    request.state.pose.position.x = sample.camera_x_m
+    request.state.pose.position.y = sample.camera_y_m
+    request.state.pose.position.z = sample.camera_z_m
+    quaternion = camera_link_orientation(
+        (sample.camera_x_m, sample.camera_y_m, sample.camera_z_m),
+        (
+            sample.camera_x_m - sample.camera_distance_m * math.cos(math.radians(sample.azimuth_deg)),
+            sample.camera_y_m - sample.camera_distance_m * math.sin(math.radians(sample.azimuth_deg)),
+            sample.camera_z_m - PILOT_CAMERA_HEIGHT_ABOVE_TARGET_M,
+        ),
+    )
+    (request.state.pose.orientation.x, request.state.pose.orientation.y,
+     request.state.pose.orientation.z, request.state.pose.orientation.w) = quaternion
+    for vector in (request.state.twist.linear, request.state.twist.angular):
+        vector.x = vector.y = vector.z = 0.0
     return request
 
 
@@ -844,38 +855,22 @@ def run_capture(
     mesh: MeshGeometry,
     world_hash: str,
     mesh_hash: str,
-    obstacle_count: int,
 ) -> Path:
-    """Capture the pilot from an already-running ROS 2 / Gazebo session."""
+    """Capture a pilot by moving only the independent dataset camera."""
     try:
         import rclpy
         from cv_bridge import CvBridge
-        from gazebo_msgs.msg import LinkStates
         from gazebo_msgs.srv import GetEntityState, SetEntityState
         from rclpy.node import Node
         from rclpy.qos import qos_profile_sensor_data
         from sensor_msgs.msg import CameraInfo, Image
     except ImportError as error:
-        raise RuntimeError("ROS 2 Humble, gazebo_msgs, cv_bridge, and sensor_msgs must be sourced") from error
+        raise RuntimeError(
+            "ROS 2 Humble, gazebo_msgs, cv_bridge, and sensor_msgs must be sourced"
+        ) from error
 
     if not math.isfinite(args.max_pose_age_s) or args.max_pose_age_s <= 0.0:
         raise ValueError("--max-pose-age-s must be a positive finite number")
-
-    xacro_path = robot_description_xacro_path()
-    if not xacro_path.is_file():
-        raise FileNotFoundError(f"Camera transform source is missing: {xacro_path}")
-    base_to_sensor, sensor_chain = fixed_transform_between_links(
-        xacro_path, "base_link", "sim_camera_link",
-    )
-    base_to_optical, optical_chain = fixed_transform_between_links(
-        xacro_path, "base_link", OPTICAL_FRAME_NAME,
-    )
-    # The converted production SDF records this physical camera sensor origin.
-    expected_sensor_transform = np.eye(4, dtype=np.float64)
-    expected_sensor_transform[:3, 3] = (0.18, 0.0, 0.12)
-    if not np.allclose(base_to_sensor, expected_sensor_transform, atol=1e-9):
-        raise ValueError("URDF camera sensor transform differs from the verified production pose")
-    transform_source_sha256 = sha256_file(xacro_path)
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -885,6 +880,8 @@ def run_capture(
         "depth/train", "depth/val", "preview/samples", "metadata",
     ):
         (output_dir / relative).mkdir(parents=True, exist_ok=True)
+
+    camera_model_path = SIMULATION_SHARE / "models/dataset_camera/model.sdf"
 
     class DatasetCaptureNode(Node):
         def __init__(self) -> None:
@@ -896,13 +893,14 @@ def run_capture(
             self.latest_depth_info = None
             self.latest_color_received_at = None
             self.latest_depth_received_at = None
-            self.latest_link_states = None
-            self.latest_link_states_received_at = None
             self.create_subscription(Image, args.image_topic, self._on_color, qos_profile_sensor_data)
             self.create_subscription(Image, args.depth_topic, self._on_depth, qos_profile_sensor_data)
-            self.create_subscription(CameraInfo, args.camera_info_topic, self._on_color_info, qos_profile_sensor_data)
-            self.create_subscription(CameraInfo, args.depth_camera_info_topic, self._on_depth_info, qos_profile_sensor_data)
-            self.create_subscription(LinkStates, LINK_STATES_TOPIC, self._on_link_states, qos_profile_sensor_data)
+            self.create_subscription(
+                CameraInfo, args.camera_info_topic, self._on_color_info, qos_profile_sensor_data,
+            )
+            self.create_subscription(
+                CameraInfo, args.depth_camera_info_topic, self._on_depth_info, qos_profile_sensor_data,
+            )
             self.set_state = self.create_client(SetEntityState, args.set_state_service)
             self.get_state = self.create_client(GetEntityState, args.get_state_service)
 
@@ -919,11 +917,6 @@ def run_capture(
 
         def _on_depth_info(self, message: CameraInfo) -> None:
             self.latest_depth_info = message
-
-        def _on_link_states(self, message: LinkStates) -> None:
-            # LinkStates has no header timestamp; freshness uses local monotonic receipt time.
-            self.latest_link_states = message
-            self.latest_link_states_received_at = time.monotonic()
 
         def spin_future(self, future, timeout_s: float = 10.0):
             deadline = time.monotonic() + timeout_s
@@ -945,32 +938,19 @@ def run_capture(
                 raise RuntimeError(f"GetEntityState failed for {entity_name}")
             return response
 
-        def camera_pose_from_link_states(self, not_before_monotonic: float):
-            deadline = time.monotonic() + args.service_timeout_s
-            while rclpy.ok() and time.monotonic() < deadline:
-                received_at = self.latest_link_states_received_at
-                if (self.latest_link_states is not None and received_at is not None
-                        and received_at >= not_before_monotonic):
-                    position, quaternion = camera_pose_from_link_states(
-                        self.latest_link_states, BASE_LINK_NAME, base_to_optical,
-                        received_at_monotonic=received_at,
-                        now_monotonic=time.monotonic(),
-                        max_age_s=args.max_pose_age_s,
-                    )
-                    return position, quaternion, received_at
-                rclpy.spin_once(self, timeout_sec=0.05)
-            raise TimeoutError(
-                f"No fresh {BASE_LINK_NAME} sample arrived on {LINK_STATES_TOPIC}"
-            )
-
-        def set_target(self, sample: PilotSample) -> None:
+        def set_camera(self, sample: PilotSample) -> None:
             request = SetEntityState.Request()
-            populate_set_entity_state_request(request, args.target_entity, sample)
+            populate_set_entity_state_request(request, CAMERA_ENTITY, sample)
             response = self.spin_future(self.set_state.call_async(request))
             if not response.success:
-                raise RuntimeError(f"SetEntityState failed for {args.target_entity}")
+                raise RuntimeError(f"SetEntityState failed for {CAMERA_ENTITY}")
 
-        def snapshot(self, timeout_s: float, target_pose_stamp_s: float, camera_pose_received_at: float):
+        def snapshot(
+            self,
+            timeout_s: float,
+            camera_pose_stamp_s: float,
+            camera_state_received_at: float,
+        ):
             deadline = time.monotonic() + timeout_s
             while rclpy.ok() and time.monotonic() < deadline:
                 rclpy.spin_once(self, timeout_sec=0.05)
@@ -981,20 +961,20 @@ def run_capture(
                 color_received_at = self.latest_color_received_at
                 depth_received_at = self.latest_depth_received_at
                 if (color_received_at is None or depth_received_at is None
-                        or color_received_at <= camera_pose_received_at
-                        or depth_received_at <= camera_pose_received_at):
+                        or color_received_at <= camera_state_received_at
+                        or depth_received_at <= camera_state_received_at):
                     continue
-                frame_pose_age_s = max(color_received_at, depth_received_at) - camera_pose_received_at
+                frame_pose_age_s = max(color_received_at, depth_received_at) - camera_state_received_at
                 if frame_pose_age_s > args.max_pose_age_s:
-                    raise RuntimeError("Gazebo base_link pose became stale before the RGB-D frame arrived")
+                    raise RuntimeError("Dataset-camera pose became stale before its RGB-D frame arrived")
                 if any(frame != color.header.frame_id for frame in (
-                    depth.header.frame_id, color_info.header.frame_id, depth_info.header.frame_id
+                    depth.header.frame_id, color_info.header.frame_id, depth_info.header.frame_id,
                 )):
                     continue
-                color_stamp = color.header.stamp.sec + color.header.stamp.nanosec * 1e-9
-                depth_stamp = depth.header.stamp.sec + depth.header.stamp.nanosec * 1e-9
+                color_stamp = stamp_seconds(color.header.stamp)
+                depth_stamp = stamp_seconds(depth.header.stamp)
                 if not rgbd_timestamps_are_fresh(
-                    color_stamp, depth_stamp, target_pose_stamp_s, args.max_sync_delta_s
+                    color_stamp, depth_stamp, camera_pose_stamp_s, args.max_sync_delta_s,
                 ):
                     continue
                 color_bgr = self.bridge.imgmsg_to_cv2(color, desired_encoding="bgr8")
@@ -1003,71 +983,14 @@ def run_capture(
                     color_bgr.copy(), depth_raw.copy(), color, depth, color_info, depth_info,
                     frame_pose_age_s,
                 )
-            raise TimeoutError("No synchronized RGB-D frame and CameraInfo received before timeout")
+            raise TimeoutError(
+                "No synchronized dataset-camera RGB-D frame and CameraInfo arrived before timeout"
+            )
 
     rclpy.init(args=None)
     node = DatasetCaptureNode()
     manifest_samples: list[dict] = []
     rejected: list[dict] = []
-    camera_reference = None
-    base_metadata = {
-        "schema": "suitcase-pilot-v1",
-        "created_utc": datetime.now(timezone.utc).isoformat(),
-        "world_path": str(Path(args.world).resolve()),
-        "world_sha256": world_hash,
-        "mesh_path": str(Path(args.mesh).resolve()),
-        "mesh_sha256": mesh_hash,
-        "furniture_sha256": FURNITURE_SHA256,
-        "static_world_collision_boxes_checked": obstacle_count,
-        "static_clearance_margin_m": 0.05,
-        "target_entity": args.target_entity,
-        "camera_pose_source": {
-            "topic": LINK_STATES_TOPIC,
-            "base_link": BASE_LINK_NAME,
-            "output_frame": OPTICAL_FRAME_NAME,
-            "fixed_sensor_chain": sensor_chain,
-            "fixed_optical_chain": optical_chain,
-            "xacro_path": str(xacro_path),
-            "xacro_sha256": transform_source_sha256,
-            "max_link_state_age_s": args.max_pose_age_s,
-        },
-        "topics": {
-            "rgb": args.image_topic,
-            "depth": args.depth_topic,
-            "camera_info": args.camera_info_topic,
-            "depth_camera_info": args.depth_camera_info_topic,
-        },
-        "geometry": {
-            "source": "hard_trolley_red DAE vertices and triangle centroids",
-            "vertices": int(mesh.vertices.shape[0]),
-            "triangles": mesh.triangle_count,
-            "local_bounds_before_visual_offset_m": {
-                "min": mesh.local_bounds_min,
-                "max": mesh.local_bounds_max,
-            },
-            "visual_offset_m": [0.0, 0.0, -0.05],
-        },
-        "label": {"format": "YOLO", "class_id": YOLO_CLASS_ID, "class_name": YOLO_CLASS_NAME},
-        "pilot_plan": [],
-        "camera_relative_placement": {
-            "reference_camera_pose": "fresh piracer::base_link state composed with the verified fixed URDF chain",
-            "forward_distances_m": PILOT_CAMERA_FORWARD_M,
-            "relative_yaw_offsets_deg": PILOT_RELATIVE_YAWS_DEG,
-            "offline_plan_pose": "launch defaults: base x=0, y=0, z=0.019 m, yaw=0",
-        },
-        "split_policy": "Camera-forward distance scenarios are kept intact: 2.4 m=train, 3.0 m=val. Pilot split is for review only.",
-        "kulunuos_reference": {
-            "repository": "https://github.com/KulunuOS/gazebo_dataset_generation",
-            "revision": "928c0be3d1366adf3ce3a82e4c432fc1b0171b46",
-            "file": "render.py",
-        },
-        "asset_attribution": (
-            'Based on “Hard Trolley Bag With Adjustable Handle” by Adrian Saputra, '
-            'Sketchfab UID 1758ad5207d943d597db8ff2b21bf827, CC BY 4.0; '
-            'red shell variant. Source credit retained in simulation_assets.'
-        ),
-    }
-
     try:
         for client, service_name in (
             (node.set_state, args.set_state_service),
@@ -1076,126 +999,166 @@ def run_capture(
             if not client.wait_for_service(timeout_sec=args.service_timeout_s):
                 raise TimeoutError(f"Required Gazebo service is unavailable: {service_name}")
 
-        camera_pose_min_time = time.monotonic()
-        reference_position, reference_q, _ = node.camera_pose_from_link_states(camera_pose_min_time)
-        camera_reference = (reference_position, reference_q)
-        samples = pilot_samples(camera_reference)
-        capture_obstacles = validate_pilot_clearance(Path(args.world).resolve(), samples)
-        base_metadata["static_world_collision_boxes_checked"] = len(capture_obstacles)
-        base_metadata["camera_relative_placement"]["reference_camera_position_m"] = reference_position
-        base_metadata["camera_relative_placement"]["reference_camera_quaternion_xyzw"] = reference_q
-        base_metadata["pilot_plan"] = [asdict(sample) for sample in samples]
+        target_initial_response = node.entity_state_response(TARGET_ENTITY)
+        initial_target_position, initial_target_q = entity_pose(target_initial_response)
+        target_center_initial = suitcase_visual_center(
+            initial_target_position, initial_target_q, mesh,
+        )
+        samples = pilot_samples(target_center_initial)
+        capture_obstacles = validate_camera_clearance(Path(args.world).resolve(), samples)
+        pilot_boxes = projected_pilot_boxes(
+            samples, initial_target_position, initial_target_q, target_center_initial, mesh,
+        )
+
+        base_metadata = {
+            "schema": "suitcase-pilot-v2-independent-camera",
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "world_path": str(Path(args.world).resolve()),
+            "world_sha256": world_hash,
+            "mesh_path": str(Path(args.mesh).resolve()),
+            "mesh_sha256": mesh_hash,
+            "camera_model_path": str(camera_model_path),
+            "camera_model_sha256": sha256_file(camera_model_path),
+            "furniture_sha256": FURNITURE_SHA256,
+            "static_world_collision_boxes_checked": len(capture_obstacles),
+            "camera_clearance_radius_m": CAMERA_CLEARANCE_RADIUS_M,
+            "target_entity": args.target_entity,
+            "target_pose_source": f"GetEntityState({args.target_entity})",
+            "camera_pose_source": {
+                "service": args.get_state_service,
+                "entity": CAMERA_ENTITY,
+                "link_frame": "dataset_camera_link",
+                "optical_frame": OPTICAL_FRAME_NAME,
+                "link_to_optical_rotation_xyzw": CAMERA_LINK_TO_OPTICAL_ROTATION.tolist(),
+                "max_state_age_s": args.max_pose_age_s,
+            },
+            "topics": {
+                "rgb": args.image_topic,
+                "depth": args.depth_topic,
+                "camera_info": args.camera_info_topic,
+                "depth_camera_info": args.depth_camera_info_topic,
+            },
+            "camera": {
+                "width": CAMERA_WIDTH,
+                "height": CAMERA_HEIGHT,
+                "update_rate_hz": CAMERA_UPDATE_RATE_HZ,
+                "horizontal_fov_rad": CAMERA_HORIZONTAL_FOV_RAD,
+                "height_above_target_center_m": PILOT_CAMERA_HEIGHT_ABOVE_TARGET_M,
+            },
+            "geometry": {
+                "source": "hard_trolley_red DAE vertices and triangle centroids",
+                "vertices": int(mesh.vertices.shape[0]),
+                "triangles": mesh.triangle_count,
+                "local_bounds_before_visual_offset_m": {
+                    "min": mesh.local_bounds_min,
+                    "max": mesh.local_bounds_max,
+                },
+                "visual_offset_m": [0.0, 0.0, -0.05],
+            },
+            "label": {"format": "YOLO", "class_id": YOLO_CLASS_ID, "class_name": YOLO_CLASS_NAME},
+            "target_initial_position_world_m": initial_target_position,
+            "target_initial_orientation_world_xyzw": initial_target_q,
+            "target_visual_center_world_m": target_center_initial,
+            "pilot_plan": [asdict(sample) for sample in samples],
+            "planned_projected_boxes_xyxy_px": pilot_boxes,
+            "camera_orbit": {
+                "target_is_moved": False,
+                "camera_horizontal_distances_m": PILOT_CAMERA_DISTANCES_M,
+                "train_azimuths_deg": PILOT_TRAIN_AZIMUTHS_DEG,
+                "validation_azimuths_deg": PILOT_VAL_AZIMUTHS_DEG,
+                "orientation": "camera link +X points toward the DAE visual center",
+            },
+            "split_policy": (
+                "Pilot-only review split by camera range; final dataset must split "
+                "whole capture scenarios, not adjacent frames."
+            ),
+            "kulunuos_reference": {
+                "repository": "https://github.com/KulunuOS/gazebo_dataset_generation",
+                "revision": "928c0be3d1366adf3ce3a82e4c432fc1b0171b46",
+                "reused_concept": "independent camera orbit and RGB/depth/mask-aligned capture",
+                "code_copied": False,
+            },
+            "asset_attribution": (
+                'Based on “Hard Trolley Bag With Adjustable Handle” by Adrian Saputra, '
+                'Sketchfab UID 1758ad5207d943d597db8ff2b21bf827, CC BY 4.0; '
+                'red shell variant. Source credit retained in simulation_assets.'
+            ),
+        }
 
         for sample in samples:
-            node.set_target(sample)
+            node.set_camera(sample)
             settle_deadline = time.monotonic() + args.settle_s
             while rclpy.ok() and time.monotonic() < settle_deadline:
                 rclpy.spin_once(node, timeout_sec=0.05)
 
+            camera_response = node.entity_state_response(CAMERA_ENTITY)
+            camera_state_received_at = time.monotonic()
+            camera_link_position, camera_link_q = entity_pose(camera_response)
             target_response = node.entity_state_response(args.target_entity)
-            target_state = target_response.state
-            target_pose_stamp_s = stamp_seconds(target_response.header.stamp)
-            target_pose = target_state.pose
-            actual_position = (
-                target_pose.position.x, target_pose.position.y, target_pose.position.z
+            target_position, target_q = entity_pose(target_response)
+            target_position_delta, target_orientation_delta = capture_pose_delta(
+                initial_target_position, initial_target_q, target_position, target_q,
             )
-            actual_q = (
-                target_pose.orientation.x, target_pose.orientation.y,
-                target_pose.orientation.z, target_pose.orientation.w,
-            )
-            yaw_error = _unit_quaternion_difference(
-                actual_q,
-                (0.0, 0.0, math.sin(math.radians(sample.yaw_deg) / 2.0), math.cos(math.radians(sample.yaw_deg) / 2.0)),
-            )
-            xy_error = math.hypot(actual_position[0] - sample.x_m, actual_position[1] - sample.y_m)
-            z_error = abs(actual_position[2] - sample.z_m)
-            if xy_error > 0.08 or z_error > 0.05 or yaw_error > math.radians(6.0):
-                rejected.append({
-                    "sample_id": sample.sample_id,
-                    "reason": "TARGET_POSE_DRIFT_OR_GROUND_HEIGHT",
-                    "xy_error_m": xy_error,
-                    "z_error_m": z_error,
-                    "yaw_error_rad": yaw_error,
-                })
-                continue
-
-            camera_pose_min_time = time.monotonic()
-            camera_position, camera_q, camera_pose_received_at = node.camera_pose_from_link_states(
-                camera_pose_min_time,
-            )
-            try:
-                forward_distance, lateral_distance = validate_camera_relative_target(
-                    camera_position, camera_q,
-                    (sample.x_m, sample.y_m, sample.z_m), sample.camera_forward_m,
+            if (target_position_delta > CAPTURE_POSE_MAX_POSITION_DELTA_M
+                    or target_orientation_delta > CAPTURE_POSE_MAX_ORIENTATION_DELTA_RAD):
+                raise RuntimeError(
+                    "Approved suitcase moved during camera orbit; refusing geometry labels"
                 )
-            except ValueError as error:
-                raise RuntimeError(str(error)) from error
-            if camera_reference is None:
-                camera_reference = (camera_position, camera_q)
-            elif (
-                np.linalg.norm(np.asarray(camera_position) - np.asarray(camera_reference[0])) > 0.01
-                or _unit_quaternion_difference(camera_q, camera_reference[1]) > math.radians(1.0)
-            ):
-                raise RuntimeError("Camera moved during pilot; fixed-camera requirement was violated")
+            target_center = suitcase_visual_center(target_position, target_q, mesh)
+            camera_distance, _ = validate_camera_sample_pose(
+                sample, camera_link_position, camera_link_q, target_center,
+            )
+            optical_position, optical_q = camera_optical_pose(
+                camera_link_position, camera_link_q,
+            )
+            camera_state_stamp_s = stamp_seconds(camera_response.header.stamp)
 
             (
                 color, depth_raw, color_message, depth_message, info, depth_info,
                 camera_pose_age_s,
             ) = node.snapshot(
-                args.frame_timeout_s, target_pose_stamp_s, camera_pose_received_at,
+                args.frame_timeout_s, camera_state_stamp_s, camera_state_received_at,
             )
-            camera_after_position, camera_after_q, camera_after_received_at = node.camera_pose_from_link_states(
-                time.monotonic(),
-            )
+
+            camera_after_received_at = time.monotonic()
+            camera_after_response = node.entity_state_response(CAMERA_ENTITY)
+            camera_after_position, camera_after_q = entity_pose(camera_after_response)
             camera_position_delta, camera_orientation_delta = capture_pose_delta(
-                camera_position, camera_q, camera_after_position, camera_after_q,
+                camera_link_position, camera_link_q, camera_after_position, camera_after_q,
             )
             if (camera_position_delta > CAPTURE_POSE_MAX_POSITION_DELTA_M
                     or camera_orientation_delta > CAPTURE_POSE_MAX_ORIENTATION_DELTA_RAD):
                 raise RuntimeError(
-                    "Camera moved during the RGB-D frame; refusing labels based on a stale pose"
+                    "Dataset camera moved during RGB-D capture; refusing labels from a stale pose"
                 )
-            target_after_capture = node.entity_state_response(args.target_entity).state.pose
-            target_after_position = (
-                target_after_capture.position.x,
-                target_after_capture.position.y,
-                target_after_capture.position.z,
-            )
-            target_after_yaw = (
-                target_after_capture.orientation.x,
-                target_after_capture.orientation.y,
-                target_after_capture.orientation.z,
-                target_after_capture.orientation.w,
-            )
+
+            target_after_response = node.entity_state_response(args.target_entity)
+            target_after_position, target_after_q = entity_pose(target_after_response)
             target_position_delta, target_orientation_delta = capture_pose_delta(
-                actual_position, actual_q, target_after_position, target_after_yaw
+                target_position, target_q, target_after_position, target_after_q,
             )
-            if (
-                target_position_delta > CAPTURE_POSE_MAX_POSITION_DELTA_M
-                or target_orientation_delta > CAPTURE_POSE_MAX_ORIENTATION_DELTA_RAD
-            ):
-                rejected.append({
-                    "sample_id": sample.sample_id,
-                    "reason": "TARGET_MOVED_DURING_FRAME_CAPTURE",
-                    "position_delta_m": target_position_delta,
-                    "orientation_delta_rad": target_orientation_delta,
-                })
-                continue
+            if (target_position_delta > CAPTURE_POSE_MAX_POSITION_DELTA_M
+                    or target_orientation_delta > CAPTURE_POSE_MAX_ORIENTATION_DELTA_RAD):
+                raise RuntimeError(
+                    "Approved suitcase moved during RGB-D capture; refusing geometry labels"
+                )
+
             height, width = color.shape[:2]
             if (
-                depth_raw.shape[:2] != (height, width)
+                (width, height) != (CAMERA_WIDTH, CAMERA_HEIGHT)
+                or depth_raw.shape[:2] != (height, width)
                 or (info.height, info.width) != (height, width)
                 or (depth_info.height, depth_info.width) != (height, width)
             ):
                 rejected.append({"sample_id": sample.sample_id, "reason": "RGB_DEPTH_CAMERAINFO_SIZE_MISMATCH"})
                 continue
-            if (
-                not np.allclose(info.k, depth_info.k, atol=1e-6)
-                or not np.allclose(info.d, depth_info.d, atol=1e-6)
-            ):
+            if (not np.allclose(info.k, depth_info.k, atol=1e-6)
+                    or not np.allclose(info.d, depth_info.d, atol=1e-6)):
                 rejected.append({"sample_id": sample.sample_id, "reason": "RGB_DEPTH_CALIBRATION_MISMATCH"})
                 continue
-            fx, fy, cx, cy = (float(info.k[0]), float(info.k[4]), float(info.k[2]), float(info.k[5]))
+            fx, fy, cx, cy = (
+                float(info.k[0]), float(info.k[4]), float(info.k[2]), float(info.k[5]),
+            )
             if (
                 fx <= 0 or fy <= 0
                 or info.binning_x != 0 or info.binning_y != 0
@@ -1207,14 +1170,10 @@ def run_capture(
             distortion = tuple(float(value) for value in info.d)
 
             vertices_local = mesh.vertices.copy()
-            vertices_local[:, 2] -= 0.05  # suitcase_visual pose in the approved SDF
+            vertices_local[:, 2] -= 0.05
             points_camera = pose_points_to_camera(
-                vertices_local,
-                actual_position,
-                actual_q,
-                (0.0, 0.0, 0.0),
-                camera_position,
-                camera_q,
+                vertices_local, target_position, target_q, (0.0, 0.0, 0.0),
+                optical_position, optical_q,
             )
             try:
                 bbox = projected_bbox(points_camera, intrinsics, width, height, distortion=distortion)
@@ -1226,12 +1185,8 @@ def run_capture(
                 centers_local = mesh.triangle_centers[sample_indices].copy()
                 centers_local[:, 2] -= 0.05
                 center_camera = pose_points_to_camera(
-                    centers_local,
-                    actual_position,
-                    actual_q,
-                    (0.0, 0.0, 0.0),
-                    camera_position,
-                    camera_q,
+                    centers_local, target_position, target_q, (0.0, 0.0, 0.0),
+                    optical_position, optical_q,
                 )
                 depth_m = depth_to_meters(depth_raw, depth_message.encoding)
                 visibility = depth_visibility(center_camera, intrinsics, depth_m, distortion)
@@ -1244,8 +1199,7 @@ def run_capture(
                 continue
 
             normalized = yolo_bbox(bbox, width, height)
-            sample_dir = output_dir / "images" / sample.split
-            image_path = sample_dir / f"{sample.sample_id}.png"
+            image_path = output_dir / "images" / sample.split / f"{sample.sample_id}.png"
             if not cv2.imwrite(str(image_path), color):
                 raise IOError(f"Could not write RGB frame: {image_path}")
             depth_path = output_dir / "depth" / sample.split / f"{sample.sample_id}.npy"
@@ -1260,14 +1214,15 @@ def run_capture(
             preview = color.copy()
             cv2.rectangle(preview, (round(x1), round(y1)), (round(x2), round(y2)), (0, 255, 0), 2)
             cv2.putText(
-                preview, f"{sample.scenario_id} yaw={sample.yaw_deg}deg",
+                preview,
+                f"{sample.scenario_id} azimuth={sample.azimuth_deg}deg",
                 (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA,
             )
             preview_path = output_dir / "preview" / "samples" / f"{sample.sample_id}.jpg"
             cv2.imwrite(str(preview_path), preview, [cv2.IMWRITE_JPEG_QUALITY, 90])
 
-            rgb_stamp = color_message.header.stamp.sec + color_message.header.stamp.nanosec * 1e-9
-            depth_stamp = depth_message.header.stamp.sec + depth_message.header.stamp.nanosec * 1e-9
+            rgb_stamp = stamp_seconds(color_message.header.stamp)
+            depth_stamp = stamp_seconds(depth_message.header.stamp)
             manifest_samples.append({
                 **asdict(sample),
                 "accepted": True,
@@ -1278,13 +1233,16 @@ def run_capture(
                 "rgb_stamp_s": rgb_stamp,
                 "depth_stamp_s": depth_stamp,
                 "rgb_depth_delta_s": abs(rgb_stamp - depth_stamp),
-                "camera_pose_source": "fresh /gazebo/link_states piracer::base_link plus URDF fixed transforms",
+                "camera_pose_source": f"GetEntityState({CAMERA_ENTITY})",
                 "camera_pose_age_at_frame_s": camera_pose_age_s,
                 "camera_pose_age_after_frame_s": time.monotonic() - camera_after_received_at,
-                "camera_position_world_m": camera_position,
-                "camera_orientation_world_xyzw": camera_q,
+                "camera_link_position_world_m": camera_link_position,
+                "camera_link_orientation_world_xyzw": camera_link_q,
+                "camera_optical_position_world_m": optical_position,
+                "camera_optical_orientation_world_xyzw": optical_q,
                 "camera_post_frame_delta_m": camera_position_delta,
                 "camera_post_frame_delta_rad": camera_orientation_delta,
+                "camera_horizontal_distance_m": camera_distance,
                 "image_encoding": color_message.encoding,
                 "depth_encoding": depth_message.encoding,
                 "frame_id": color_message.header.frame_id,
@@ -1296,19 +1254,24 @@ def run_capture(
                 "depth_camera_intrinsics_K": list(depth_info.k),
                 "depth_camera_distortion_D": list(depth_info.d),
                 "depth_camera_projection_P": list(depth_info.p),
-                "camera_position_world_m": camera_position,
-                "camera_orientation_world_xyzw": camera_q,
-                "target_position_world_m": actual_position,
-                "target_orientation_world_xyzw": actual_q,
+                "target_position_world_m": target_position,
+                "target_orientation_world_xyzw": target_q,
                 "bbox_xyxy_px": [x1, y1, x2, y2],
                 "bbox_yolo_xywh_normalized": normalized,
                 "depth_visibility": visibility,
-                "label_origin": "projected vertices of the approved suitcase DAE; never a YOLO prediction",
+                "label_origin": (
+                    "projected vertices of the approved suitcase DAE; aligned depth verifies "
+                    "visibility; never a YOLO prediction"
+                ),
             })
 
         accepted_train = sum(sample["split"] == "train" for sample in manifest_samples)
         accepted_val = sum(sample["split"] == "val" for sample in manifest_samples)
-        status = "READY_FOR_AUTHOR_REVIEW" if len(manifest_samples) >= 12 and accepted_train and accepted_val else "INCOMPLETE"
+        status = (
+            "READY_FOR_AUTHOR_REVIEW"
+            if len(manifest_samples) >= 12 and accepted_train and accepted_val
+            else "INCOMPLETE"
+        )
         base_metadata.update({
             "status": status,
             "accepted_sample_count": len(manifest_samples),
@@ -1321,13 +1284,14 @@ def run_capture(
                 "minimum_visible_fraction": MIN_VISIBLE_FRACTION,
                 "depth_tolerance_m": "max(0.06, 0.03 * expected_z)",
                 "edge_clipping_policy": "reject any projected geometry outside a 2 px image margin",
+                "target_moved": False,
             },
         })
         (output_dir / "metadata" / "capture_manifest.json").write_text(
-            json.dumps(base_metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            json.dumps(base_metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
         )
         (output_dir / "metadata" / "rejected_samples.json").write_text(
-            json.dumps(rejected, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            json.dumps(rejected, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
         )
         (output_dir / "data.yaml").write_text(
             "path: .\ntrain: images/train\nval: images/val\nnames:\n  0: suitcase\n",
@@ -1339,16 +1303,21 @@ def run_capture(
             'Red shell variant. Original credit: https://sketchfab.com/3d-models/'
             'hard-trolley-bag-with-adjustable-handle-1758ad5207d943d597db8ff2b21bf827\n'
             'Dataset workflow reference: KulunuOS/gazebo_dataset_generation, '
-            'revision 928c0be3d1366adf3ce3a82e4c432fc1b0171b46, render.py.\n'
+            'revision 928c0be3d1366adf3ce3a82e4c432fc1b0171b46, render.py; '
+            'camera-sweep concept only, no source code copied.\n'
         )
         (output_dir / "ATTRIBUTION.txt").write_text(attribution, encoding="utf-8")
         create_contact_sheet(output_dir, manifest_samples)
-        print(f"Dataset status: {status}; accepted={len(manifest_samples)}; rejected={len(rejected)}")
+        print(
+            f"Dataset status: {status}; accepted={len(manifest_samples)}; "
+            f"rejected={len(rejected)}"
+        )
         print(f"Output: {output_dir}")
         return output_dir
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 def create_contact_sheet(output_dir: Path, samples: list[dict]) -> None:
@@ -1404,23 +1373,35 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     world_path, mesh_path = Path(args.world).resolve(), Path(args.mesh).resolve()
     try:
+        if args.target_entity != TARGET_ENTITY:
+            raise ValueError(f"Dataset generator only supports the approved {TARGET_ENTITY} model")
         if args.capture and (not math.isfinite(args.max_pose_age_s) or args.max_pose_age_s <= 0.0):
             raise ValueError("--max-pose-age-s must be a positive finite number")
         world_hash, mesh_hash = check_scene_files(world_path, mesh_path)
         mesh = load_collada_geometry(mesh_path)
-        obstacles = validate_pilot_clearance(world_path)
+        target_position, target_q = target_model_pose(world_path)
+        target_center = suitcase_visual_center(target_position, target_q, mesh)
+        samples = pilot_samples(target_center)
+        obstacles = validate_camera_clearance(world_path, samples)
+        projected_boxes = projected_pilot_boxes(
+            samples, target_position, target_q, target_center, mesh,
+        )
         if not args.capture:
             print("OFFLINE PILOT PLAN ONLY — Gazebo and ROS are not contacted.")
             print(f"Approved world SHA-256: {world_hash}")
             print(f"Approved suitcase mesh SHA-256: {mesh_hash}")
             print(f"Mesh: {mesh.geometry_count} geometries, {mesh.vertices.shape[0]} vertices, {mesh.triangle_count} triangles")
-            print(f"Static world collision boxes checked: {len(obstacles)}; suitcase clearance margin: 0.05 m")
-            print(f"Planned samples: {len(pilot_samples())}")
-            print("Target camera-forward distances: " + ", ".join(f"{distance:.1f} m" for distance in PILOT_CAMERA_FORWARD_M))
-            print("Yaw offsets relative to camera heading (deg): " + ", ".join(str(yaw) for yaw in PILOT_RELATIVE_YAWS_DEG))
-            print("Split: camera-forward distance 2.4 m -> train; 3.0 m -> val (pilot review only).")
+            print(f"Static world collision boxes checked: {len(obstacles)}; camera clearance radius: {CAMERA_CLEARANCE_RADIUS_M:.2f} m")
+            print(f"Planned camera samples: {len(samples)} ({sum(sample.split == 'train' for sample in samples)} train, {sum(sample.split == 'val' for sample in samples)} val)")
+            print("Target visual center (world m): " + ", ".join(f"{value:.3f}" for value in target_center))
+            print("Camera horizontal orbit distances (m): " + ", ".join(f"{distance:.1f}" for distance in PILOT_CAMERA_DISTANCES_M))
+            print("Train azimuths (deg): " + ", ".join(str(value) for value in PILOT_TRAIN_AZIMUTHS_DEG))
+            print("Validation azimuths (deg): " + ", ".join(str(value) for value in PILOT_VAL_AZIMUTHS_DEG))
+            print(f"Projected bounding boxes inside {CAMERA_WIDTH}x{CAMERA_HEIGHT}: {len(projected_boxes)}/{len(samples)}")
+            print("Camera moves; the approved suitcase remains at its production pose.")
+            print("Split is for pilot review only; final data must split by capture scenario.")
             return 0
-        run_capture(args, mesh, world_hash, mesh_hash, len(obstacles))
+        run_capture(args, mesh, world_hash, mesh_hash)
         return 0
     except (OSError, ValueError, RuntimeError, TimeoutError) as error:
         print(f"dataset generator: {error}", file=sys.stderr)
