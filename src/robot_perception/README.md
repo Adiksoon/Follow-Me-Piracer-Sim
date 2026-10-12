@@ -22,10 +22,14 @@ the historical `ros2_ws/` workspace.
   explicit `yolo_model_path` is supplied. YOLO remains disabled by default in
   the launch.
 
-The selected ONNX has static input `images`: float32 `[1, 3, 640, 640]`, and
-one float32 output `output0`: `[1, 84, 8400]`. The output contains `cx, cy, w,
-h` followed by 80 COCO class scores, with no objectness channel. The runtime
-forward pass and decoded detections are recorded in the CP-00D.1 report.
+The retained baseline ONNX has static input `images`: float32
+`[1, 3, 640, 640]`, and output `output0`: `[1, 84, 8400]` (`cx, cy, w, h`
+plus 80 COCO scores). The offline fine-tuned model uses the same input and
+output `output0`: `[1, 5, 8400]` (four box channels plus one suitcase score,
+class ID 0). Both layouts are decoded by the same pipeline. The isolated
+`config/detector_ft01_test.yaml` selects the fine-tuned ONNX and class 0; pass
+it as `yolo_params_file:=...` to `piracer_sim.launch.py` for a test run. The
+default launch configuration continues to select the retained COCO model.
 
 ## Runtime compatibility
 

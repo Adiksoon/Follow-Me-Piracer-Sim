@@ -13,10 +13,13 @@ from robot_perception.ros_messages import image_message_to_rgb, publish_outputs
 
 
 def parse_suitcase_filter(value: str) -> set[int]:
-    """The approved detector profile is the COCO suitcase class, ID 28."""
-    if value.strip().lower() in ("", "suitcase", "28"):
+    """Resolve suitcase in COCO or the single-class fine-tuned export."""
+    normalized = value.strip().lower()
+    if normalized in ("", "suitcase", "28"):
         return {28}
-    raise ValueError("class_filter must be empty, 'suitcase', or '28'")
+    if normalized == "0":
+        return {0}
+    raise ValueError("class_filter must be empty, 'suitcase', '28', or '0'")
 
 
 class Yolo11nNode(Node):
@@ -41,14 +44,15 @@ class Yolo11nNode(Node):
             raise ValueError(f"unsupported YOLO11n backend: {backend!r}")
 
         self._bridge = CvBridge()
+        class_filter = parse_suitcase_filter(
+            str(self.get_parameter("class_filter").value)
+        )
         self._detector = OpenCVDNNDetector(
             model_path=str(self.get_parameter("model_path").value),
             input_size=int(self.get_parameter("imgsz").value),
             confidence_threshold=float(self.get_parameter("confidence").value),
             nms_iou=float(self.get_parameter("nms_iou").value),
-            class_filter=parse_suitcase_filter(
-                str(self.get_parameter("class_filter").value)
-            ),
+            class_filter=class_filter,
             num_threads=int(self.get_parameter("opencv_num_threads").value),
         )
 
@@ -70,7 +74,7 @@ class Yolo11nNode(Node):
             f"input=1x3x{int(self.get_parameter('imgsz').value)}x"
             f"{int(self.get_parameter('imgsz').value)}, "
             f"confidence={float(self.get_parameter('confidence').value):.2f}, "
-            "class=suitcase(28)"
+            f"class=suitcase({','.join(str(class_id) for class_id in sorted(class_filter))})"
         )
 
     def _on_image(self, image_message: Image) -> None:

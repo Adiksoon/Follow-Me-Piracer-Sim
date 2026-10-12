@@ -67,5 +67,8 @@ class OpenCVDNNDetector:
             confidence_threshold=self._confidence_threshold,
             nms_iou=self._nms_iou,
             class_filter=self._class_filter,
-            class_names={28: "suitcase"},
+            class_names={
+                class_id: "suitcase"
+                for class_id in (self._class_filter or {28})
+            },
         )

@@ -1,0 +1,13 @@
+yolo11n_node:
+  ros__parameters:
+    backend: "opencv_dnn"
+    model_path: "/home/zygar/dev_praca_inz/symulacja/verification/yolo_ft01_20261012/runs/yolo11n_suitcase_ft01_final/weights/best.onnx"
+    image_topic: "/piracer/sim_camera/color/image_raw"
+    detection_topic: "/piracer/yolo/detections"
+    debug_image_topic: "/piracer/yolo/debug_image"
+    imgsz: 640
+    confidence: 0.35
+    nms_iou: 0.5
+    class_filter: "0"
+    opencv_num_threads: 1
+    torch_num_threads: 1

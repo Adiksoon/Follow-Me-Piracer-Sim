@@ -188,11 +188,11 @@ def decode_yolo11_output(
     class_filter: set[int] | None = None,
     class_names: dict[int, str] | None = None,
 ) -> list[Detection]:
-    """Decode YOLO11 ``[1, 84, N]`` center/size plus COCO-score output.
+    """Decode YOLO11 ``[1, 4 + classes, N]`` center/size plus class scores.
 
-    The current export metadata records four box channels and 80 class-score
-    channels with no objectness. This function rejects other layouts rather
-    than guessing; the selected ONNX artifact is validated by offline inference.
+    The selected ONNX artifacts use four box channels followed by class scores,
+    without an objectness channel. This supports both the 80-class COCO export
+    and the fine-tuned single-class export.
     """
     if not 0.0 <= confidence_threshold <= 1.0:
         raise ValueError("confidence_threshold must be in [0, 1]")
@@ -202,8 +202,10 @@ def decode_yolo11_output(
     values = np.asarray(output)
     if values.ndim == 3 and values.shape[0] == 1:
         values = values[0]
-    if values.ndim != 2 or values.shape[0] != 84:
-        raise ValueError("expected YOLO11-shaped output [1, 84, N] or [84, N]")
+    if values.ndim != 2 or values.shape[0] < 5:
+        raise ValueError(
+            "expected YOLO11 output [1, 4 + classes, N] or [4 + classes, N]"
+        )
     if not np.isfinite(values).all():
         raise ValueError("model output contains non-finite values")
     if values.shape[1] == 0:

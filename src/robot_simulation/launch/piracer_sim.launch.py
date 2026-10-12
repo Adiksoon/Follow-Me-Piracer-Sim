@@ -122,20 +122,23 @@ def _build_simulation(context):
                 output="screen",
             ))
         elif yolo_backend == "yolo11n_dnn":
-            if not model_path:
-                model_path = os.path.join(
-                    workspace_root,
-                    "verification",
-                    "yolo11n_same_frame_20261008",
-                    "weights",
-                    "yolo11n.onnx",
-                )
-            if not os.path.isfile(model_path):
-                raise RuntimeError(f"YOLO11n ONNX model was not found at {model_path}")
-            yolo_nodes.append(Node(
-                package="robot_perception",
-                executable="yolo11n_node",
-                parameters=[{
+            yolo_params_file = LaunchConfiguration("yolo_params_file").perform(context).strip()
+            if yolo_params_file:
+                if not os.path.isfile(yolo_params_file):
+                    raise RuntimeError(f"YOLO parameter file was not found at {yolo_params_file}")
+                yolo_node_parameters = [yolo_params_file]
+            else:
+                if not model_path:
+                    model_path = os.path.join(
+                        workspace_root,
+                        "verification",
+                        "yolo11n_same_frame_20261008",
+                        "weights",
+                        "yolo11n.onnx",
+                    )
+                if not os.path.isfile(model_path):
+                    raise RuntimeError(f"YOLO11n ONNX model was not found at {model_path}")
+                yolo_node_parameters = [{
                     "image_topic": LaunchConfiguration("yolo_image_topic").perform(context),
                     "model_path": model_path,
                     "confidence": float(
@@ -150,7 +153,11 @@ def _build_simulation(context):
                     "torch_num_threads": int(
                         LaunchConfiguration("yolo_torch_num_threads").perform(context)
                     ),
-                }],
+                }]
+            yolo_nodes.append(Node(
+                package="robot_perception",
+                executable="yolo11n_node",
+                parameters=yolo_node_parameters,
                 additional_env={
                     "OMP_NUM_THREADS": "1",
                     "MKL_NUM_THREADS": "1",
@@ -201,6 +208,7 @@ def generate_launch_description():
         DeclareLaunchArgument("yolo_enabled", default_value="false"),
         DeclareLaunchArgument("yolo_backend", default_value="yolox"),
         DeclareLaunchArgument("yolo_model_path", default_value=""),
+        DeclareLaunchArgument("yolo_params_file", default_value=""),
         DeclareLaunchArgument("yolo_image_topic", default_value="/piracer/sim_camera/color/image_raw"),
         DeclareLaunchArgument("yolo_confidence", default_value="0.35"),
         DeclareLaunchArgument("yolo_nms_iou", default_value="0.5"),

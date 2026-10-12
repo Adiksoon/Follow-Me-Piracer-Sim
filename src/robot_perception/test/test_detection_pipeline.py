@@ -76,12 +76,33 @@ def test_yolo_synthetic_output_uses_classwise_nms_and_filter():
     assert [item.class_id for item in filtered] == [28]
 
 
+def test_yolo_single_class_output_decodes_suitcase_as_class_zero():
+    _, transform = letterbox_rgb(np.zeros((360, 640, 3), dtype=np.uint8), 640)
+    output = np.zeros((1, 5, 1), dtype=np.float32)
+    output[0, :4, 0] = (320, 320, 200, 160)
+    output[0, 4, 0] = 0.91
+
+    detections = decode_yolo11_output(
+        output,
+        transform,
+        class_filter={0},
+        class_names={0: "suitcase"},
+    )
+
+    assert len(detections) == 1
+    assert detections[0].class_id == 0
+    assert detections[0].class_name == "suitcase"
+    assert detections[0].score == pytest.approx(0.91)
+    assert (detections[0].x_min, detections[0].y_min) == (220.0, 100.0)
+    assert (detections[0].x_max, detections[0].y_max) == (420.0, 260.0)
+
+
 def test_yolo_synthetic_empty_and_invalid_outputs():
     _, transform = letterbox_rgb(np.zeros((640, 640, 3), dtype=np.uint8), 640)
     assert decode_yolo11_output(np.zeros((1, 84, 0)), transform) == []
 
-    with pytest.raises(ValueError, match="expected YOLO11-shaped"):
-        decode_yolo11_output(np.zeros((1, 85, 3)), transform)
+    with pytest.raises(ValueError, match="4 \\+ classes"):
+        decode_yolo11_output(np.zeros((1, 4, 3)), transform)
 
     non_finite = np.zeros((1, 84, 1), dtype=np.float32)
     non_finite[0, 4, 0] = np.nan
