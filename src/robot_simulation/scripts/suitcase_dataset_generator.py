@@ -1124,7 +1124,7 @@ def run_capture(
                 "height_above_target_center_m": PILOT_CAMERA_HEIGHT_ABOVE_TARGET_M,
             },
             "geometry": {
-                "source": "hard_trolley_red DAE vertices and triangle centroids",
+                "source": "hard_trolley_red DAE vertices and triangle topology; visibility uses rasterized nearest front-surface depth",
                 "vertices": int(mesh.vertices.shape[0]),
                 "triangles": mesh.triangle_count,
                 "local_bounds_before_visual_offset_m": {
