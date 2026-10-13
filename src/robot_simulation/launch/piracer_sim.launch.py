@@ -22,6 +22,9 @@ def _build_simulation(context):
     simulation_share = get_package_share_directory("robot_simulation")
     assets_share = get_package_share_directory("simulation_assets")
     gazebo_share = get_package_share_directory("gazebo_ros")
+    piracer_plugin_lib = os.path.join(
+        get_package_prefix("piracer_gazebo_plugins"), "lib"
+    )
 
     xacro_path = os.path.join(description_share, "urdf", "piracer.urdf.xacro")
     default_world_path = os.path.join(
@@ -72,7 +75,7 @@ def _build_simulation(context):
     suitcase_control_gui = Node(
         package="rqt_robot_steering",
         executable="rqt_robot_steering",
-        remappings=[("/cmd_vel", "/sim012_target/cmd_vel")],
+        remappings=[("/cmd_vel", "/piracer/cmd_vel")],
         condition=IfCondition(LaunchConfiguration("suitcase_control_gui")),
         output="screen",
     )
@@ -80,7 +83,7 @@ def _build_simulation(context):
         package="rqt_image_view",
         executable="rqt_image_view",
         arguments=[LaunchConfiguration("camera_view_topic")],
-        condition=IfCondition(LaunchConfiguration("camera_enabled")),
+        condition=IfCondition(LaunchConfiguration("camera_viewer_enabled")),
         output="screen",
     )
     yolo_nodes = []
@@ -187,7 +190,11 @@ def _build_simulation(context):
         ),
         SetEnvironmentVariable(
             "GAZEBO_PLUGIN_PATH",
-            ["/opt/ros/humble/lib:", EnvironmentVariable("GAZEBO_PLUGIN_PATH", default_value="")],
+            [
+                piracer_plugin_lib,
+                ":/opt/ros/humble/lib:",
+                EnvironmentVariable("GAZEBO_PLUGIN_PATH", default_value=""),
+            ],
         ),
         gazebo_server,
         gazebo_client,
@@ -204,6 +211,7 @@ def generate_launch_description():
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("camera_enabled", default_value="true"),
         DeclareLaunchArgument("camera_update_rate", default_value="30.0"),
+        DeclareLaunchArgument("camera_viewer_enabled", default_value="true"),
         DeclareLaunchArgument("suitcase_control_gui", default_value="true"),
         DeclareLaunchArgument("yolo_enabled", default_value="false"),
         DeclareLaunchArgument("yolo_backend", default_value="yolox"),
