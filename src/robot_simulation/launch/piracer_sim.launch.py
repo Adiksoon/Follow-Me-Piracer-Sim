@@ -86,6 +86,16 @@ def _build_simulation(context):
         condition=IfCondition(LaunchConfiguration("camera_viewer_enabled")),
         output="screen",
     )
+    visual_odometry = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                simulation_share,
+                "launch",
+                "rgbd_visual_odometry.launch.py",
+            )
+        ),
+        condition=IfCondition(LaunchConfiguration("camera_enabled")),
+    )
     yolo_nodes = []
     if yolo_enabled in {"1", "true", "yes"}:
         perception_share = get_package_share_directory("robot_perception")
@@ -200,6 +210,7 @@ def _build_simulation(context):
         gazebo_client,
         state_publisher,
         spawn_model,
+        visual_odometry,
         suitcase_control_gui,
         *yolo_nodes,
         camera_viewer,

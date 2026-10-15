@@ -1,0 +1,42 @@
+/visual_vo/rgbd_odometry:
+  ros__parameters:
+    # ROS wrapper parameters. QoS value 0 means RMW system default; confirm
+    # offered publisher QoS with ros2 topic info --verbose before first launch.
+    frame_id: "base_link"
+    odom_frame_id: "vo_odom"
+    publish_tf: false
+    guess_frame_id: ""
+    ground_truth_frame_id: ""
+    initial_pose: ""
+    min_update_rate: 0.0
+    wait_imu_to_init: false
+    use_sim_time: true
+    publish_null_when_lost: true
+
+    # Direct RGB + Depth + RGB CameraInfo input with RTAB-Map internal sync.
+    subscribe_rgbd: false
+    rgbd_cameras: 1
+    approx_sync: true
+    # Provisional finite gate only. Replace/confirm from a captured full
+    # RGB/Depth/CameraInfo stamp-span distribution before launching VO.
+    approx_sync_max_interval: 0.020
+    topic_queue_size: 10
+    sync_queue_size: 5
+    qos: 0
+    qos_camera_info: 0
+    wait_for_transform: 0.1
+
+    # RTAB-Map core parameters are strings in this ROS wrapper's parameter map.
+    "Odom/Strategy": "0"          # F2M
+    "Odom/ResetCountdown": "0"    # do not auto-reset tracking
+    "Reg/Strategy": "0"            # visual registration
+    "Vis/EstimationType": "1"      # 3D-to-2D PnP
+    "Vis/FeatureType": "8"         # GFTT/ORB, explicit and non-SURF
+    "Vis/CorType": "0"
+    "Vis/CorNNType": "1"
+    "Vis/CorNNDR": "0.8"
+    "Vis/MinInliers": "20"
+    "Vis/Iterations": "300"
+    "Vis/PnPReprojError": "2.0"
+    "Vis/MaxFeatures": "1000"
+    "Vis/DepthAsMask": "true"

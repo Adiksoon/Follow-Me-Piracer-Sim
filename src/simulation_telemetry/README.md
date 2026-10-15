@@ -32,6 +32,6 @@ ros2 run simulation_telemetry telemetry_recorder --ros-args \
   -p robot_odom_topic:=/robot/odom -p sample_period_sec:=2.0
 ```
 
-The defaults match this workspace: `/odom`, `/sim012_target/odom`,
+The defaults match this workspace: `/visual_odom`, `/sim012_target/odom`,
 `/piracer/cmd_vel`, `/sim012_target/cmd_vel`, the four `/piracer/sim_camera/*`
 image and CameraInfo topics, `/diagnostics`, and `/clock`.

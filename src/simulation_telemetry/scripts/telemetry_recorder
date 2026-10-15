@@ -27,7 +27,7 @@ class SimulationTelemetry(Node):
         self.declare_parameter("output_file", "")
         self.declare_parameter("sample_period_sec", 1.0)
         self.declare_parameter("clock_topic", "/clock")
-        self.declare_parameter("robot_odom_topic", "/odom")
+        self.declare_parameter("robot_odom_topic", "/visual_odom")
         self.declare_parameter("target_odom_topic", "/sim012_target/odom")
         self.declare_parameter("robot_cmd_vel_topic", "/piracer/cmd_vel")
         self.declare_parameter("target_cmd_vel_topic", "/sim012_target/cmd_vel")
