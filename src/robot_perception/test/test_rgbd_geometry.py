@@ -38,6 +38,44 @@ def test_floor_center_projects_each_detection_and_preserves_source_order_and_sta
     assert estimates[0].point.header.stamp == array.header.stamp
 
 
+def test_static_ideal_target_metric_reference_round_trip():
+    expected_x, expected_y, expected_z = 0.45, 0.0, 2.25
+    width, height = 640, 480
+    fx = fy = 320.0
+    cx, cy = 320.0, 240.0
+    pixel_x = fx * expected_x / expected_z + cx
+    pixel_y = fy * expected_y / expected_z + cy
+
+    assert pixel_x.is_integer()
+    assert pixel_y.is_integer()
+    target_range = math.hypot(expected_x, expected_z)
+    assert 2.0 <= target_range <= 2.5
+
+    depth = np.zeros((height, width), dtype=np.float32)
+    depth[int(pixel_y), int(pixel_x)] = expected_z
+    detection = _detection(
+        pixel_x, pixel_y, size_x=32.0, size_y=48.0, header=_header()
+    )
+    array, image, color_info, depth_info = _bundle(depth, [detection])
+    for camera_info in (color_info, depth_info):
+        camera_info.k = [
+            fx, 0.0, cx,
+            0.0, fy, cy,
+            0.0, 0.0, 1.0,
+        ]
+
+    result = estimate_detection_points(array, image, color_info, depth_info)[0]
+
+    assert result.valid
+    assert pixel_x > cx
+    assert result.point.point.x > 0.0
+    assert result.point.point.x == pytest.approx(expected_x, abs=1e-6)
+    assert result.point.point.y == pytest.approx(expected_y, abs=1e-6)
+    assert result.point.point.z == pytest.approx(expected_z, abs=1e-6)
+    assert result.point.header.frame_id == CAMERA_FRAME_ID
+    assert result.point.header.stamp == array.header.stamp
+
+
 def test_last_image_pixel_is_valid():
     array, image, color_info, depth_info = _bundle(
         np.ones((4, 5), dtype=np.float32), [_detection(4.1, 3.9, header=_header())]
