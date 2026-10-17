@@ -11,6 +11,8 @@
     SIM_CAMERA_POSE != FINAL_PHYSICAL_OAKD_POSE.
   -->
   <xacro:arg name="include_camera" default="false"/>
+  <xacro:arg name="steering_trace_enabled" default="false"/>
+  <xacro:arg name="steering_trace_path" default=""/>
   <!-- SYMULACJA_RGBD_PROTOTYPE_V1: 16:9 raster scaled from the unit's factory RGB calibration raster. -->
   <xacro:arg name="camera_x" default="0.180"/>
   <xacro:arg name="camera_y" default="0.0"/>
@@ -699,6 +701,9 @@
       <front_track_m>0.148</front_track_m>
       <max_steering_angle_rad>0.04</max_steering_angle_rad>
       <max_steering_rate_radps>0.10</max_steering_rate_radps>
+      <xacro:if value="$(arg steering_trace_enabled)">
+        <trace_path>$(arg steering_trace_path)</trace_path>
+      </xacro:if>
     </plugin>
   </gazebo>
 

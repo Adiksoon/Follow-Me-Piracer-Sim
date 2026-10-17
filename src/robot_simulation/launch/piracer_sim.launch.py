@@ -33,6 +33,10 @@ def _build_simulation(context):
     world_path = LaunchConfiguration("world").perform(context) or default_world_path
     camera_enabled = LaunchConfiguration("camera_enabled").perform(context).lower()
     camera_update_rate = LaunchConfiguration("camera_update_rate").perform(context)
+    steering_trace_enabled = (
+        LaunchConfiguration("steering_trace_enabled").perform(context).lower()
+    )
+    steering_trace_path = LaunchConfiguration("steering_trace_path").perform(context)
     yolo_enabled = LaunchConfiguration("yolo_enabled").perform(context).lower()
     yolo_backend = LaunchConfiguration("yolo_backend").perform(context).strip().lower()
     robot_description = xacro.process_file(
@@ -40,6 +44,8 @@ def _build_simulation(context):
         mappings={
             "include_camera": camera_enabled,
             "camera_update_rate": camera_update_rate,
+            "steering_trace_enabled": steering_trace_enabled,
+            "steering_trace_path": steering_trace_path,
         },
     ).toxml()
 
@@ -222,6 +228,8 @@ def generate_launch_description():
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("camera_enabled", default_value="true"),
         DeclareLaunchArgument("camera_update_rate", default_value="30.0"),
+        DeclareLaunchArgument("steering_trace_enabled", default_value="false"),
+        DeclareLaunchArgument("steering_trace_path", default_value=""),
         DeclareLaunchArgument("camera_viewer_enabled", default_value="true"),
         DeclareLaunchArgument("suitcase_control_gui", default_value="true"),
         DeclareLaunchArgument("yolo_enabled", default_value="false"),
