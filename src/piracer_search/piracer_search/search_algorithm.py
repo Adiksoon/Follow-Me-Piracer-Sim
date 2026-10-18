@@ -1,15 +1,11 @@
-"""Small, ROS-independent adapter and frontier ranking core.
-
-Input grids use OccupancyGrid data order (row-major, bottom row first) and an
-origin [x, y, yaw]. Unknown and occupied cells are never traversed by paths.
-"""
+"""Pure-Python OccupancyGrid adapter and deterministic frontier ranking."""
 
 from collections import deque
 import math
 
 FREE, OCCUPIED, UNKNOWN = 0, 100, -1
 DIRECTIONS = ((1, 0, 0), (0, 1, 1), (-1, 0, 2), (0, -1, 3))
-_YAWS = (0.0, math.pi / 2, math.pi, -math.pi / 2)
+_DIRECTION_YAWS = (0.0, math.pi / 2, math.pi, -math.pi / 2)
 
 
 def _number(value):
@@ -17,26 +13,35 @@ def _number(value):
 
 
 def world_to_cell(grid, x, y):
-    """Convert a world point to a cell, accounting for rotated map origin."""
-    ox, oy, yaw = grid["origin"]
-    dx, dy = x - ox, y - oy
-    local_x = math.cos(yaw) * dx + math.sin(yaw) * dy
-    local_y = -math.sin(yaw) * dx + math.cos(yaw) * dy
+    """Convert a world point to a cell using the rotated map origin."""
+    origin_x, origin_y, origin_yaw = grid["origin"]
+    dx, dy = x - origin_x, y - origin_y
+    local_x = math.cos(origin_yaw) * dx + math.sin(origin_yaw) * dy
+    local_y = -math.sin(origin_yaw) * dx + math.cos(origin_yaw) * dy
     return math.floor(local_x / grid["resolution"]), math.floor(local_y / grid["resolution"])
 
 
 def _read_grid(grid):
     width, height = grid.get("width"), grid.get("height")
     resolution, origin, data = grid.get("resolution"), grid.get("origin"), grid.get("data")
-    if not isinstance(width, int) or isinstance(width, bool) or width <= 0 or not isinstance(height, int) or isinstance(height, bool) or height <= 0:
+    if (not isinstance(width, int) or isinstance(width, bool) or width <= 0
+            or not isinstance(height, int) or isinstance(height, bool) or height <= 0):
         raise ValueError("invalid map dimensions")
-    if not _number(resolution) or resolution <= 0 or not isinstance(origin, (list, tuple)) or len(origin) != 3 or not all(_number(v) for v in origin):
+    if (not _number(resolution) or resolution <= 0
+            or not isinstance(origin, (list, tuple)) or len(origin) != 3
+            or not all(_number(value) for value in origin)):
         raise ValueError("invalid map geometry")
     if not isinstance(data, (list, tuple)) or len(data) != width * height:
         raise ValueError("map data length mismatch")
-    if any(not isinstance(v, int) or isinstance(v, bool) or v not in (FREE, OCCUPIED, UNKNOWN) for v in data):
-        raise ValueError("occupancy values must be -1, 0, or 100")
-    cells = {(i % width, i // width): data[i] for i in range(len(data))}
+    if any(not isinstance(value, int) or isinstance(value, bool)
+           or not -1 <= value <= 100 for value in data):
+        raise ValueError("occupancy values must be in [-1, 100]")
+    cells = {
+        (index % width, index // width): (
+            FREE if value == FREE else OCCUPIED if value == OCCUPIED else UNKNOWN
+        )
+        for index, value in enumerate(data)
+    }
     return width, height, float(resolution), list(origin), cells
 
 
@@ -47,82 +52,97 @@ def _inside(cell, width, height):
 def _safe(cell, width, height, cells):
     for dy in (-1, 0, 1):
         for dx in (-1, 0, 1):
-            point = cell[0] + dx, cell[1] + dy
-            if not _inside(point, width, height) or cells[point] != FREE:
+            neighbor = cell[0] + dx, cell[1] + dy
+            if not _inside(neighbor, width, height) or cells[neighbor] != FREE:
                 return False
     return True
 
 
 def _path_cost(start, goal, width, height, resolution, cells):
-    """Cardinal shortest path over safe FREE cells; return meters or None."""
+    """Return cardinal path length over safe FREE cells, in meters."""
+    if not _safe(start, width, height, cells):
+        return None
     pending = deque([(start, 0)])
-    seen = {start}
+    visited = {start}
     while pending:
         cell, edges = pending.popleft()
         if cell == goal:
             return edges * resolution
         for dx, dy, _ in DIRECTIONS:
-            nxt = cell[0] + dx, cell[1] + dy
-            if nxt not in seen and _inside(nxt, width, height) and _safe(nxt, width, height, cells):
-                seen.add(nxt)
-                pending.append((nxt, edges + 1))
+            neighbor = cell[0] + dx, cell[1] + dy
+            if (neighbor not in visited and _inside(neighbor, width, height)
+                    and _safe(neighbor, width, height, cells)):
+                visited.add(neighbor)
+                pending.append((neighbor, edges + 1))
     return None
 
 
-def _ray(a, b):
-    x, y = a
-    end_x, end_y = b
-    dx, sx = abs(end_x - x), 1 if x < end_x else -1
-    dy, sy = -abs(end_y - y), 1 if y < end_y else -1
-    err, out = dx + dy, []
+def _ray(start, end):
+    """Return integer cells along a Bresenham line, including both ends."""
+    x, y = start
+    end_x, end_y = end
+    dx, step_x = abs(end_x - x), 1 if x < end_x else -1
+    dy, step_y = -abs(end_y - y), 1 if y < end_y else -1
+    error, points = dx + dy, []
     while True:
-        out.append((x, y))
+        points.append((x, y))
         if (x, y) == (end_x, end_y):
-            return out
-        twice = 2 * err
-        if twice >= dy:
-            err, x = err + dy, x + sx
-        if twice <= dx:
-            err, y = err + dx, y + sy
+            return points
+        twice_error = 2 * error
+        if twice_error >= dy:
+            error, x = error + dy, x + step_x
+        if twice_error <= dx:
+            error, y = error + dx, y + step_y
 
 
-def _visible_cells(observer, yaw, target, policy, fov_deg, range_m, width, height, resolution, origin_yaw, cells):
+def _visible_unknown(observer, yaw, camera, width, height, resolution, origin_yaw, cells):
+    """Count UNKNOWN cells under the frozen UNKNOWN_OPAQUE visibility rule."""
+    fov = camera["horizontal_fov_deg"]
+    max_range = camera["max_range_m"]
     heading = math.atan2(math.sin(yaw - origin_yaw), math.cos(yaw - origin_yaw))
     visible = []
     for y in range(height):
         for x in range(width):
-            if cells[(x, y)] != target:
+            if cells[(x, y)] != UNKNOWN:
                 continue
-            dx, dy = (x - observer[0]) * resolution, (y - observer[1]) * resolution
+            dx = (x - observer[0]) * resolution
+            dy = (y - observer[1]) * resolution
             distance = math.hypot(dx, dy)
-            if distance == 0 or distance > range_m + 1e-12:
+            if distance == 0 or distance > max_range + 1e-12:
                 continue
             angle = math.atan2(dy, dx)
-            delta = math.atan2(math.sin(angle - heading), math.cos(angle - heading))
-            if abs(delta) > math.radians(fov_deg) / 2 + 1e-12:
+            difference = math.atan2(math.sin(angle - heading), math.cos(angle - heading))
+            if abs(difference) > math.radians(fov) / 2 + 1e-12:
                 continue
             middle = _ray(observer, (x, y))[1:-1]
-            if any(cells[p] == OCCUPIED for p in middle):
-                continue
-            if policy == "UNKNOWN_OPAQUE" and any(cells[p] == UNKNOWN for p in middle):
+            if any(cells[cell] in (OCCUPIED, UNKNOWN) for cell in middle):
                 continue
             visible.append((x, y))
     return visible
 
 
-def evaluate_search(grid, robot_pose, *, camera=None, freshness=None, gain_weight=0.5):
-    """Return a deterministic candidate ranking for one map and robot pose.
+def evaluate_search(grid, robot_pose, *, camera=None):
+    """Rank safe frontier poses with GAIN_COST_VISIBLE_OPAQUE_W050.
 
-    robot_pose is (world_x, world_y, world_yaw). Optional camera uses
-    horizontal_fov_deg and max_range_m. Freshness is a mapping from
-    free-cell (x, y) to last-seen seconds and requires now_s/ttl_s.
+    grid contains OccupancyGrid width, height, resolution, origin [x,y,yaw],
+    and row-major data. robot_pose is world (x,y,yaw). Camera requires verified
+    horizontal_fov_deg and max_range_m settings; missing settings return a
+    waiting status. Grid path cost is only a ranking input; Nav2 executes routes.
     """
     if grid is None:
         return {"status": "WAITING_FOR_MAP", "candidates": [], "ranking": []}
     if robot_pose is None:
         return {"status": "WAITING_FOR_LOCALIZATION", "candidates": [], "ranking": []}
+    if (not isinstance(camera, dict)
+            or not _number(camera.get("horizontal_fov_deg"))
+            or not 0 < camera["horizontal_fov_deg"] <= 360
+            or not _number(camera.get("max_range_m"))
+            or camera["max_range_m"] <= 0):
+        return {"status": "WAITING_FOR_CAMERA_CONFIGURATION", "candidates": [], "ranking": []}
+
     width, height, resolution, origin, cells = _read_grid(grid)
-    if not isinstance(robot_pose, (list, tuple)) or len(robot_pose) != 3 or not all(_number(v) for v in robot_pose):
+    if (not isinstance(robot_pose, (list, tuple)) or len(robot_pose) != 3
+            or not all(_number(value) for value in robot_pose)):
         raise ValueError("robot_pose must contain finite world x, y, yaw")
     start = world_to_cell({"origin": origin, "resolution": resolution}, robot_pose[0], robot_pose[1])
     if not _inside(start, width, height):
@@ -132,45 +152,63 @@ def evaluate_search(grid, robot_pose, *, camera=None, freshness=None, gain_weigh
     for y in range(height):
         for x in range(width):
             if cells[(x, y)] == FREE and any(
-                _inside((x + dx, y + dy), width, height) and cells[(x + dx, y + dy)] == UNKNOWN
-                for dx, dy, _ in DIRECTIONS
-            ):
+                    _inside((x + dx, y + dy), width, height)
+                    and cells[(x + dx, y + dy)] == UNKNOWN
+                    for dx, dy, _ in DIRECTIONS):
                 frontiers.append((x, y))
 
-    candidates = {}
-    for fx, fy in frontiers:
+    proposals = {}
+    for frontier_x, frontier_y in frontiers:
         for dx, dy, direction in DIRECTIONS:
-            unknown = fx + dx, fy + dy
+            unknown = frontier_x + dx, frontier_y + dy
             if not _inside(unknown, width, height) or cells[unknown] != UNKNOWN:
                 continue
-            cell = fx - dx, fy - dy
-            candidates.setdefault((cell[0], cell[1], direction), []).append((fx, fy))
+            cell = frontier_x - dx, frontier_y - dy
+            proposals.setdefault((cell[0], cell[1], direction), []).append((frontier_x, frontier_y))
 
-    records = []
-    for x, y, direction in sorted(candidates, key=lambda c: (c[1], c[0], c[2])):
-        cell = (x, y)
-        identifier = f"x{x}_y{y}_d{direction}"
+    candidates = []
+    for x, y, direction in sorted(proposals, key=lambda item: (item[1], item[0], item[2])):
+        cell = x, y
         cost = _path_cost(start, cell, width, height, resolution, cells) if _safe(cell, width, height, cells) else None
-        yaw = origin[2] + _YAWS[direction]
-        record = {"id": identifier, "cell": [x, y], "direction": direction, "source_frontiers": [list(p) for p in candidates[(x, y, direction)]], "cost_m": cost, "pose_world": [origin[0] + math.cos(origin[2]) * (x + 0.5) * resolution - math.sin(origin[2]) * (y + 0.5) * resolution, origin[1] + math.sin(origin[2]) * (x + 0.5) * resolution + math.cos(origin[2]) * (y + 0.5) * resolution, math.atan2(math.sin(yaw), math.cos(yaw))], "visible_unknown_cells": [], "visible_stale_free_cells": [], "score": None}
-        if cost is None:
-            record["reason"] = "UNSAFE_OR_UNREACHABLE"
-        else:
-            record["visible_unknown_cells"] = [list(p) for p in _visible_cells(cell, yaw, UNKNOWN, "OPTIMISTIC", camera["horizontal_fov_deg"], camera["max_range_m"], width, height, resolution, origin[2], cells)] if camera else []
-            if freshness:
-                now, ttl = freshness.get("now_s"), freshness.get("ttl_s")
-                history = freshness.get("last_seen_s", {})
-                if _number(now) and _number(ttl) and ttl >= 0:
-                    known = {tuple(k) if isinstance(k, list) else k: v for k, v in history.items()}
-                    record["visible_stale_free_cells"] = [list(p) for p in _visible_cells(cell, yaw, FREE, "UNKNOWN_OPAQUE", camera["horizontal_fov_deg"], camera["max_range_m"], width, height, resolution, origin[2], cells) if p in known and _number(known[p]) and known[p] <= now and now - known[p] >= ttl] if camera else []
-            records.append(record)
+        yaw = origin[2] + _DIRECTION_YAWS[direction]
+        pose_x = origin[0] + math.cos(origin[2]) * (x + 0.5) * resolution - math.sin(origin[2]) * (y + 0.5) * resolution
+        pose_y = origin[1] + math.sin(origin[2]) * (x + 0.5) * resolution + math.cos(origin[2]) * (y + 0.5) * resolution
+        record = {
+            "id": f"x{x}_y{y}_d{direction}",
+            "cell": [x, y],
+            "direction": direction,
+            "source_frontiers": [list(point) for point in proposals[(x, y, direction)]],
+            "pose_world": [pose_x, pose_y, math.atan2(math.sin(yaw), math.cos(yaw))],
+            "cost_m": cost,
+        }
+        if cost is not None:
+            visible = _visible_unknown(cell, yaw, camera, width, height, resolution, origin[2], cells)
+            record["visible_unknown_cells"] = [list(point) for point in visible]
+            record["visible_gain_area_m2"] = len(visible) * resolution * resolution
+            candidates.append(record)
 
-    if not records:
-        return {"status": "NO_ADMISSIBLE_CANDIDATE" if frontiers else "NO_FRONTIERS", "frontier_cells": [list(p) for p in frontiers], "candidates": [], "ranking": []}
-    max_cost = max(r["cost_m"] for r in records)
-    max_gain = max((len(r["visible_unknown_cells"]) + len(r["visible_stale_free_cells"]) for r in records), default=0)
-    for record in records:
-        gain = len(record["visible_unknown_cells"]) + len(record["visible_stale_free_cells"])
-        record["score"] = gain_weight * (gain / max_gain if max_gain else 0.0) - (1.0 - gain_weight) * (record["cost_m"] / max_cost if max_cost else 0.0)
-    ranking = [r["id"] for r in sorted(records, key=lambda r: (-r["score"], r["cost_m"], r["cell"][1], r["cell"][0], r["direction"]))]
-    return {"status": "RECOMMENDATION_AVAILABLE", "frontier_cells": [list(p) for p in frontiers], "candidates": records, "ranking": ranking, "recommended": ranking[0]}
+    if not candidates:
+        return {
+            "status": "NO_ADMISSIBLE_CANDIDATE" if frontiers else "NO_FRONTIERS",
+            "frontier_cells": [list(point) for point in frontiers],
+            "candidates": [],
+            "ranking": [],
+        }
+
+    max_gain = max(candidate["visible_gain_area_m2"] for candidate in candidates)
+    max_cost = max(candidate["cost_m"] for candidate in candidates)
+    for candidate in candidates:
+        gain_score = candidate["visible_gain_area_m2"] / max_gain if max_gain else 0.0
+        cost_score = candidate["cost_m"] / max_cost if max_cost else 0.0
+        candidate["score"] = 0.5 * gain_score - 0.5 * cost_score
+    ranking = [candidate["id"] for candidate in sorted(
+        candidates,
+        key=lambda item: (-item["score"], item["cost_m"], item["cell"][1], item["cell"][0], item["direction"]),
+    )]
+    return {
+        "status": "RECOMMENDATION_AVAILABLE",
+        "frontier_cells": [list(point) for point in frontiers],
+        "candidates": candidates,
+        "ranking": ranking,
+        "recommended": ranking[0],
+    }
