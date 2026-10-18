@@ -538,7 +538,7 @@
     <parent link="chassis"/>
     <child link="left_steer"/>
     <axis xyz="0 0 1" rpy="0 0 0"/>
-    <limit lower="-0.04" upper="0.04" effort="10000" velocity="1000"/>
+    <limit lower="-0.7853981633974483" upper="0.7853981633974483" effort="10000" velocity="1000"/>
     <dynamics damping="0.0" friction="0.0"/>
   </joint>
 
@@ -548,7 +548,7 @@
     <parent link="chassis"/>
     <child link="right_steer"/>
     <axis xyz="0 0 1" rpy="0 0 0"/>
-    <limit lower="-0.04" upper="0.04" effort="10000" velocity="1000"/>
+    <limit lower="-0.7853981633974483" upper="0.7853981633974483" effort="10000" velocity="1000"/>
     <dynamics damping="0.0" friction="0.0"/>
   </joint>
 
@@ -699,7 +699,7 @@
       <right_steering_joint>right_steer_joint</right_steering_joint>
       <wheelbase_m>0.155</wheelbase_m>
       <front_track_m>0.148</front_track_m>
-      <max_steering_angle_rad>0.04</max_steering_angle_rad>
+      <max_steering_angle_rad>0.7853981633974483</max_steering_angle_rad>
       <max_steering_rate_radps>0.10</max_steering_rate_radps>
       <xacro:if value="$(arg steering_trace_enabled)">
         <trace_path>$(arg steering_trace_path)</trace_path>

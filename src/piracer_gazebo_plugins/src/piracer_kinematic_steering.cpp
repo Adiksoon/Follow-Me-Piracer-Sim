@@ -193,7 +193,7 @@ private:
   double yaw_rate_radps_{0.0};
   double wheelbase_m_{0.155};
   double track_m_{0.148};
-  double max_angle_rad_{0.04};
+  double max_angle_rad_{0.7853981633974483};
   double max_rate_radps_{0.10};
   double last_sim_time_s_{0.0};
   double desired_left_steering_rad_{0.0};

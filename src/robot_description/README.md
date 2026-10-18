@@ -1,5 +1,10 @@
 # PiRacer robot description
 
+Current steering amendment (2026-10-18): the front-wheel limit is now 45 degrees
+as an approximate author-observed simulation assumption. The matching planning
+radius is 0.25 m. Historical RUN48/RUN49 results below apply to their recorded
+settings and do not qualify the new tighter-turn behavior or physical hardware.
+
 Pochodzenie: [PiRacer-Gazebo-Simulation](https://github.com/lalywr2000/PiRacer-Gazebo-Simulation), Sujong Ha (lalywr2000), MIT, przypięty upstream commit db9f49c85e4417ec3566d0d87702f49febbd3ee1. Oryginalny tekst licencji znajduje się w `third_party_licenses/PiRacer-Gazebo-Simulation-MIT.txt`.
 
 Zachowano strukturę modelu Xacro i siedem upstreamowych meshy STL. Opis został dostosowany do pakietu `robot_description` i ramy `base_link`; kamera jest oznaczona jako przybliżenie symulacyjne, nie jako pomiar fizycznego montażu.
