@@ -191,6 +191,8 @@ def _build_simulation(context):
             )
 
     return [
+        # Select NVIDIA for Mesa D3D12 rendering under WSLg.
+        SetEnvironmentVariable("MESA_D3D12_DEFAULT_ADAPTER_NAME", "NVIDIA"),
         SetEnvironmentVariable("GAZEBO_MODEL_DATABASE_URI", ""),
         SetEnvironmentVariable(
             "GAZEBO_MODEL_PATH",
