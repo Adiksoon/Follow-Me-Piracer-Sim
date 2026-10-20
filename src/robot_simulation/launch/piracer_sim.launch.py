@@ -100,7 +100,11 @@ def _build_simulation(context):
                 "rgbd_visual_odometry.launch.py",
             )
         ),
-        condition=IfCondition(LaunchConfiguration("camera_enabled")),
+        condition=IfCondition(
+            LaunchConfiguration("visual_odometry_enabled")
+            if camera_enabled in {"1", "true", "yes"}
+            else "false"
+        ),
     )
     yolo_nodes = []
     if yolo_enabled in {"1", "true", "yes"}:
@@ -229,6 +233,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("camera_enabled", default_value="true"),
+        DeclareLaunchArgument("visual_odometry_enabled", default_value="true"),
         DeclareLaunchArgument("camera_update_rate", default_value="30.0"),
         DeclareLaunchArgument("steering_trace_enabled", default_value="false"),
         DeclareLaunchArgument("steering_trace_path", default_value=""),
