@@ -6,19 +6,20 @@
 <robot name="piracer" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <!--
-    Simulation-only camera.  Its pose is a convenient approximation for the
-    Gazebo perception experiments, not a measured OAK-D Lite installation.
-    SIM_CAMERA_POSE != FINAL_PHYSICAL_OAKD_POSE.
+    Simulation-only camera using CAM-MOUNT-01 setting h339_x000_a20:
+    339 mm above floor, 320 mm above base_link at the default 19 mm spawn,
+    at the modeled front edge (x=236 mm) and pitched 20 degrees downward.
+    This Gazebo/YOLO study pose is not a measured physical OAK-D Lite mount.
   -->
   <xacro:arg name="include_camera" default="false"/>
   <xacro:arg name="steering_trace_enabled" default="false"/>
   <xacro:arg name="steering_trace_path" default=""/>
   <!-- SYMULACJA_RGBD_PROTOTYPE_V1: 16:9 raster scaled from the unit's factory RGB calibration raster. -->
-  <xacro:arg name="camera_x" default="0.180"/>
+  <xacro:arg name="camera_x" default="0.236"/>
   <xacro:arg name="camera_y" default="0.0"/>
-  <xacro:arg name="camera_z" default="0.120"/>
+  <xacro:arg name="camera_z" default="0.320"/>
   <xacro:arg name="camera_roll" default="0.0"/>
-  <xacro:arg name="camera_pitch" default="0.0"/>
+  <xacro:arg name="camera_pitch" default="0.3490658504"/>
   <xacro:arg name="camera_yaw" default="0.0"/>
   <xacro:arg name="camera_width" default="640"/>
   <xacro:arg name="camera_height" default="360"/>
