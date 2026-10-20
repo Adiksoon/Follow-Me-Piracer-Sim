@@ -1,0 +1,77 @@
+<?xml version='1.0' encoding='utf-8'?>
+<sdf version="1.5">
+  <model name="classroom_planter">
+    <static>true</static>
+    <link name="planter_link">
+      <collision name="pot_collision">
+        <pose>0 0 0.22 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.23</radius>
+            <length>0.42</length>
+          </cylinder>
+        </geometry>
+      </collision>
+      <visual name="pot">
+        <pose>0 0 0.22 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.23</radius>
+            <length>0.42</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.55 0.24 0.16 1</ambient>
+          <diffuse>0.72 0.34 0.22 1</diffuse>
+        </material>
+      </visual>
+      <visual name="soil">
+        <pose>0 0 0.435 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.205</radius>
+            <length>0.02</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.18 0.12 0.08 1</ambient>
+          <diffuse>0.26 0.18 0.10 1</diffuse>
+        </material>
+      </visual>
+      <collision name="stem_collision">
+        <pose>0 0 0.82 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.025</radius>
+            <length>0.78</length>
+          </cylinder>
+        </geometry>
+      </collision>
+      <visual name="stem">
+        <pose>0 0 0.82 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.022</radius>
+            <length>0.78</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.18 0.32 0.14 1</ambient>
+          <diffuse>0.24 0.43 0.18 1</diffuse>
+        </material>
+      </visual>
+      <visual name="leaves">
+        <pose>0 0 0.82 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://classroom_details/meshes/plant.dae</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.19 0.42 0.20 1</ambient>
+          <diffuse>0.28 0.58 0.27 1</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

@@ -44,3 +44,14 @@ adapter and drive plugin. It does not start VO, YOLO, RViz, SLAM or Nav2 and sen
 no movement commands. The camera topic is /piracer/sim_camera/color/image_raw.
 The visual_odometry_enabled argument defaults to true to preserve the previous
 launch behavior; VO is always skipped when the camera is disabled.
+
+## Production classroom scene details
+
+The production classroom scene now has three closed, divided windows with
+wooden sills, a closed wooden door, a chalkboard with chalk marks, two teaching
+posters, a low shelf with colored books, and two planters. The wall decorations
+and procedural planter asset were authored locally for this scene; no external
+meshes or textures were copied. These details are intended to add visual
+texture for a future VO evaluation. Their appearance still needs author visual
+review, and no VO improvement has been established. Existing room collisions,
+furniture, suitcase, spawn positions, physics and plugins are unchanged.
