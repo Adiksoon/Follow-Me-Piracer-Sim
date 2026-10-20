@@ -8,10 +8,10 @@
   <!--
     Simulation-only RGB-D camera for the author-requested VO visibility trial:
     339 mm above floor, 320 mm above base_link at the default 19 mm spawn,
-    at the modeled front edge (x=236 mm), with a level optical axis (0 degrees).
-    Position is retained from CAM-MOUNT-01; the former h339_x000_a20 setting
-    used 20 degrees downward for suitcase detection. The level setting is a
-    new trial, not a result of that study or a measured physical OAK-D mount.
+    at the modeled front edge (x=236 mm), pitched 20 degrees upward.
+    Position is retained from CAM-MOUNT-01; its former h339_x000_a20 setting
+    used 20 degrees downward for suitcase detection. The upward setting is a
+    new author choice, not a study result or a measured physical OAK-D mount.
   -->
   <xacro:arg name="include_camera" default="false"/>
   <xacro:arg name="steering_trace_enabled" default="false"/>
@@ -21,7 +21,7 @@
   <xacro:arg name="camera_y" default="0.0"/>
   <xacro:arg name="camera_z" default="0.320"/>
   <xacro:arg name="camera_roll" default="0.0"/>
-  <xacro:arg name="camera_pitch" default="0.0"/>
+  <xacro:arg name="camera_pitch" default="-0.3490658504"/>
   <xacro:arg name="camera_yaw" default="0.0"/>
   <xacro:arg name="camera_width" default="640"/>
   <xacro:arg name="camera_height" default="360"/>
