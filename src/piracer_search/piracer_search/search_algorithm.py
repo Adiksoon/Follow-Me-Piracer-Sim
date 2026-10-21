@@ -346,6 +346,10 @@ def evaluate_frontier_candidates(
         raise ValueError("invalid Nav2 costmap")
     costs = (costmap["width"], costmap["height"], float(costmap["resolution"]),
              list(costmap["origin"]), costmap["data"])
+    if (not math.isclose(costs[2], resolution, rel_tol=0.0, abs_tol=1e-9)
+            or any(not math.isclose(a, b, rel_tol=0.0, abs_tol=1e-8)
+                   for a, b in zip(costs[3], origin))):
+        return {"status": "COSTMAP_GEOMETRY_MISMATCH", "groups": [], "selected": None}
     # Nav2 cost values 253, 254 and 255 denote inscribed, lethal and unknown.
 
     frontier_cells = {

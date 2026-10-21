@@ -174,6 +174,15 @@ class FrontierEvaluationTests(unittest.TestCase):
         self.assertEqual("WAITING_FOR_NAVIGATION_COSTMAP", result["status"])
         self.assertIsNone(result["selected"])
 
+    def test_misaligned_costmap_geometry_waits_instead_of_scoring(self):
+        raw = grid()
+        set_rect(raw, 4, 31, 4, 25)
+        costs = costmap_like(raw)
+        costs["origin"] = [0.1, 0.0, 0.0]
+        result = evaluate(raw, cost=costs)
+        self.assertEqual("COSTMAP_GEOMETRY_MISMATCH", result["status"])
+        self.assertIsNone(result["selected"])
+
 
 if __name__ == "__main__":
     unittest.main()
