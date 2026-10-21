@@ -2,12 +2,14 @@
 
 from datetime import datetime, timezone
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
+    ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
     RegisterEventHandler,
@@ -16,7 +18,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from nav2_common.launch import RewrittenYaml
 
@@ -127,6 +129,40 @@ def _build_launch(context, *args, **kwargs):
         ],
     )
 
+    start_zone_map = ExecuteProcess(
+        cmd=[
+            sys.executable,
+            "-m",
+            "piracer_navigation.start_zone_map",
+            "--ros-args",
+            "-p",
+            "use_sim_time:=true",
+            "-p",
+            PythonExpression(
+                ["'enabled:=' + '", LaunchConfiguration("start_zone_enabled"), "'"]
+            ),
+            "-p",
+            PythonExpression(
+                ["'radius:=' + '", LaunchConfiguration("start_zone_radius"), "'"]
+            ),
+            "-p",
+            PythonExpression(
+                ["'input_topic:=' + '", LaunchConfiguration("raw_map_topic"), "'"]
+            ),
+            "-p",
+            PythonExpression(
+                ["'output_topic:=' + '", LaunchConfiguration("map_topic"), "'"]
+            ),
+            "-p",
+            "map_frame:=map",
+            "-p",
+            "base_frame:=base_link",
+            "-p",
+            "max_tf_age:=0.20",
+        ],
+        output="screen",
+    )
+
     nav2_config = os.path.join(package_share, "config", "nav2_params.yaml")
     bt_path = os.path.join(package_share, "behavior_trees", "navigate_to_pose.xml")
     bt_through_poses_path = os.path.join(
@@ -192,6 +228,7 @@ def _build_launch(context, *args, **kwargs):
         odom_bridge,
         scan_converter,
         rtabmap,
+        start_zone_map,
         nav2,
         command_gate,
     ]
@@ -203,7 +240,7 @@ def generate_launch_description():
             DeclareLaunchArgument("gui", default_value="false"),
             DeclareLaunchArgument(
                 "native_tf",
-                default_value="false",
+                default_value="true",
                 description=(
                     "Use RTAB-Map visual odometry for vo_odom to base_link TF "
                     "and omit odom_tf_bridge."
@@ -213,7 +250,10 @@ def generate_launch_description():
             DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),
             DeclareLaunchArgument("robot_spawn_y", default_value="0.0"),
             DeclareLaunchArgument("robot_spawn_yaw", default_value="0.0"),
-            DeclareLaunchArgument("map_topic", default_value="/map"),
+            DeclareLaunchArgument("raw_map_topic", default_value="/map"),
+            DeclareLaunchArgument("map_topic", default_value="/nav2/map"),
+            DeclareLaunchArgument("start_zone_enabled", default_value="true"),
+            DeclareLaunchArgument("start_zone_radius", default_value="1.0"),
             OpaqueFunction(function=_build_launch),
         ]
     )
