@@ -1,0 +1,9 @@
+piracer_state_manager:
+  ros__parameters:
+    detection_topic: /piracer/yolo/detections
+    acquire_hits: 2
+    acquire_window: 3
+    follow_confirm_hits: 5
+    follow_lost_misses: 3
+    detector_timeout_s: 2.0
+    acquire_timeout_s: 10.0

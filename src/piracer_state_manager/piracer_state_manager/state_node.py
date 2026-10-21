@@ -1,0 +1,104 @@
+"""ROS adapter for the pure detector-driven state machine."""
+
+import time
+
+import rclpy
+from rclpy.clock import Clock, ClockType
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from std_msgs.msg import Bool, String
+from std_srvs.srv import SetBool
+from vision_msgs.msg import Detection2DArray
+
+from piracer_state_manager.state_machine import StateMachine
+
+
+class StateManagerNode(Node):
+    def __init__(self):
+        super().__init__("piracer_state_manager")
+        defaults = {
+            "detection_topic": "/piracer/yolo/detections",
+            "acquire_hits": 2,
+            "acquire_window": 3,
+            "follow_confirm_hits": 5,
+            "follow_lost_misses": 3,
+            "detector_timeout_s": 2.0,
+            "acquire_timeout_s": 10.0,
+        }
+        for name, value in defaults.items():
+            self.declare_parameter(name, value)
+        values = {name: self.get_parameter(name).value for name in defaults}
+        self.machine = StateMachine(**{k: v for k, v in values.items() if k != "detection_topic"})
+        output_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.state_pub = self.create_publisher(String, "/piracer/state", output_qos)
+        self.active_pub = self.create_publisher(Bool, "/piracer/state/active", output_qos)
+        self._published_state = None
+        self._published_active = None
+        self._publish_changes(force=True)
+        self.subscription = self.create_subscription(
+            Detection2DArray, values["detection_topic"], self._on_detections, qos_profile_sensor_data
+        )
+        self.service = self.create_service(SetBool, "/piracer/state/enable", self._on_enable)
+        steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.timer = self.create_timer(0.1, self._on_timer, clock=steady_clock)
+
+    def _publish_changes(self, force=False):
+        if force or self.machine.state != self._published_state:
+            msg = String()
+            msg.data = self.machine.state
+            self.state_pub.publish(msg)
+            self._published_state = self.machine.state
+        if force or self.machine.active != self._published_active:
+            msg = Bool()
+            msg.data = self.machine.active
+            self.active_pub.publish(msg)
+            self._published_active = self.machine.active
+
+    def _log_events(self, events):
+        for event in events:
+            if event in ("SEARCH_TO_ACQUIRE", "ACQUIRE_TO_FOLLOW", "FOLLOW_TO_ACQUIRE"):
+                self.get_logger().info(f"State transition: {event}")
+            elif event == "NO_DATA":
+                self.get_logger().warning("NO_DATA: detector stream timed out; paused in SEARCH")
+            elif event == "DATA_RECOVERED":
+                self.get_logger().info("Detector data recovered; resumed in SEARCH")
+            elif event == "MANUAL_STOP":
+                self.get_logger().info("MANUAL_STOP: state manager disabled")
+            elif event == "MANUAL_ENABLE":
+                self.get_logger().info("Manual enable: restarted in SEARCH")
+            elif event == "ACQUIRE_TIMEOUT":
+                self.get_logger().info("ACQUIRE attempt timed out; returned to SEARCH")
+
+    def _on_detections(self, message):
+        stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
+        events = self.machine.observe(stamp, bool(message.detections), time.monotonic())
+        self._log_events(events)
+        self._publish_changes()
+
+    def _on_timer(self):
+        events = self.machine.tick(time.monotonic())
+        self._log_events(events)
+        self._publish_changes()
+
+    def _on_enable(self, request, response):
+        events = self.machine.set_enabled(request.data, time.monotonic())
+        response.success = True
+        response.message = "enabled" if request.data else "stopped"
+        self._log_events(events)
+        self._publish_changes()
+        return response
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = StateManagerNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
