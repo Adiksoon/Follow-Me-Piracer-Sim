@@ -120,7 +120,11 @@ class NavigationCoordinator(Node):
             return NavigateToPose.Result()
 
         session.terminal_result_received = True
-        if downstream_result.status == GoalStatus.STATUS_SUCCEEDED:
+        if session.cancel_requested:
+            # An accepted upstream cancel leaves its goal handle CANCELING.
+            # Finish that transition only after Nav2 reports a terminal result.
+            upstream_handle.canceled()
+        elif downstream_result.status == GoalStatus.STATUS_SUCCEEDED:
             upstream_handle.succeed()
         elif downstream_result.status == GoalStatus.STATUS_CANCELED:
             upstream_handle.canceled()
