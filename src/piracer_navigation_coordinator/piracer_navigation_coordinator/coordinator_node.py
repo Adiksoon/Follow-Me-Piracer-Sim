@@ -53,7 +53,7 @@ class NavigationCoordinator(Node):
             self.get_logger().warning("Rejecting goal; Nav2 NavigateToPose is not ready")
             return GoalResponse.REJECT
         self._owner = _OwnerSession(owner)
-        return GoalResponse.ACCEPT_AND_EXECUTE
+        return GoalResponse.ACCEPT
 
     def _start_goal(self, owner, upstream_handle):
         session = self._owner
