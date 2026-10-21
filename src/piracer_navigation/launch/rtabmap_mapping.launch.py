@@ -5,7 +5,10 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -23,7 +26,12 @@ def generate_launch_description():
         executable="odom_tf_bridge",
         name="piracer_odom_tf_bridge",
         output="screen",
-        parameters=[{"use_sim_time": True}],
+        parameters=[{
+            "use_sim_time": True,
+            "diagnostics_enabled": ParameterValue(
+                LaunchConfiguration("bridge_diagnostics"), value_type=bool
+            ),
+        }],
     )
 
     rtabmap = Node(
@@ -44,4 +52,12 @@ def generate_launch_description():
         ],
     )
 
-    return LaunchDescription([odom_bridge, rtabmap])
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            "bridge_diagnostics",
+            default_value="false",
+            description="Enable periodic odom_tf_bridge diagnostics",
+        ),
+        odom_bridge,
+        rtabmap,
+    ])
