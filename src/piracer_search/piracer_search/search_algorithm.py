@@ -212,3 +212,320 @@ def evaluate_search(grid, robot_pose, *, camera=None):
         "ranking": ranking,
         "recommended": ranking[0],
     }
+
+
+def _grid_geometry(grid):
+    width, height, resolution, origin, _ = _read_grid(grid)
+    return width, height, resolution, origin
+
+
+def _cell_center_world(cell, resolution, origin):
+    x, y = cell
+    ox, oy, yaw = origin
+    local_x, local_y = (x + 0.5) * resolution, (y + 0.5) * resolution
+    return (ox + math.cos(yaw) * local_x - math.sin(yaw) * local_y,
+            oy + math.sin(yaw) * local_x + math.cos(yaw) * local_y)
+
+
+def _world_to_cell_geometry(x, y, resolution, origin):
+    ox, oy, yaw = origin
+    dx, dy = x - ox, y - oy
+    local_x = math.cos(yaw) * dx + math.sin(yaw) * dy
+    local_y = -math.sin(yaw) * dx + math.cos(yaw) * dy
+    return math.floor(local_x / resolution), math.floor(local_y / resolution)
+
+
+def _polygons_intersect(first, second):
+    for polygon in (first, second):
+        for index, point in enumerate(polygon):
+            following = polygon[(index + 1) % len(polygon)]
+            axis = (-(following[1] - point[1]), following[0] - point[0])
+            first_projection = [p[0] * axis[0] + p[1] * axis[1] for p in first]
+            second_projection = [p[0] * axis[0] + p[1] * axis[1] for p in second]
+            if (max(first_projection) < min(second_projection) - 1e-10
+                    or max(second_projection) < min(first_projection) - 1e-10):
+                return False
+    return True
+
+
+def _footprint_cells(center, yaw, footprint, width, height, resolution, origin):
+    world_polygon = [
+        (center[0] + math.cos(yaw) * x - math.sin(yaw) * y,
+         center[1] + math.sin(yaw) * x + math.cos(yaw) * y)
+        for x, y in footprint
+    ]
+    local_polygon = []
+    ox, oy, map_yaw = origin
+    for x, y in world_polygon:
+        dx, dy = x - ox, y - oy
+        local_x = math.cos(map_yaw) * dx + math.sin(map_yaw) * dy
+        local_y = -math.sin(map_yaw) * dx + math.cos(map_yaw) * dy
+        local_polygon.append((local_x / resolution, local_y / resolution))
+    min_x = math.floor(min(point[0] for point in local_polygon))
+    max_x = math.floor(max(point[0] for point in local_polygon))
+    min_y = math.floor(min(point[1] for point in local_polygon))
+    max_y = math.floor(max(point[1] for point in local_polygon))
+    cells = []
+    for cell_y in range(min_y, max_y + 1):
+        for cell_x in range(min_x, max_x + 1):
+            if not (0 <= cell_x < width and 0 <= cell_y < height):
+                return None
+            square = [(cell_x, cell_y), (cell_x + 1, cell_y),
+                      (cell_x + 1, cell_y + 1), (cell_x, cell_y + 1)]
+            if _polygons_intersect(local_polygon, square):
+                cells.append((cell_x, cell_y))
+    return cells
+
+
+def _costmap_value(world_x, world_y, costmap):
+    width, height, resolution, origin, data = costmap
+    cell = _world_to_cell_geometry(world_x, world_y, resolution, origin)
+    if not (0 <= cell[0] < width and 0 <= cell[1] < height):
+        return None
+    return data[cell[1] * width + cell[0]]
+
+
+def evaluate_frontier_candidates(
+    raw_grid,
+    navigation_grid,
+    costmap,
+    robot_pose,
+    *,
+    footprint,
+    camera,
+    min_group_cells=3,
+):
+    """Explain frontier candidates without issuing navigation or motion commands.
+
+    Grid dictionaries use OccupancyGrid values and origin [x, y, yaw]. Costmap
+    dictionaries use Nav2 uint8 costs and the same geometry fields. The returned
+    connectivity is a center-cell grid check, not an Ackermann path guarantee.
+    """
+    if navigation_grid is None or costmap is None:
+        return {"status": "WAITING_FOR_NAVIGATION_COSTMAP", "groups": [], "selected": None}
+    if (not isinstance(min_group_cells, int) or isinstance(min_group_cells, bool)
+            or min_group_cells < 1):
+        raise ValueError("min_group_cells must be a positive integer")
+    if (not isinstance(footprint, (list, tuple)) or len(footprint) < 3
+            or any(not isinstance(point, (list, tuple)) or len(point) != 2
+                   or not all(_number(value) for value in point) for point in footprint)):
+        raise ValueError("footprint must contain at least three finite 2D points")
+    if (not isinstance(robot_pose, (list, tuple)) or len(robot_pose) != 3
+            or not all(_number(value) for value in robot_pose)):
+        raise ValueError("robot_pose must contain finite world x, y, yaw")
+    if (not isinstance(camera, dict)
+            or not _number(camera.get("horizontal_fov_deg"))
+            or not 0 < camera["horizontal_fov_deg"] <= 360
+            or not _number(camera.get("max_range_m"))
+            or camera["max_range_m"] <= 0):
+        raise ValueError("camera configuration must contain a valid FOV and range")
+
+    raw_width, raw_height, raw_resolution, raw_origin, raw_cells = _read_grid(raw_grid)
+    width, height, resolution, origin, cells = _read_grid(navigation_grid)
+    if (raw_width, raw_height) != (width, height) or not math.isclose(
+        raw_resolution, resolution, rel_tol=0.0, abs_tol=1e-9
+    ) or any(not math.isclose(a, b, rel_tol=0.0, abs_tol=1e-8)
+             for a, b in zip(raw_origin, origin)):
+        return {"status": "MAP_GEOMETRY_MISMATCH", "groups": [], "selected": None}
+    if any((raw_cells[cell] == FREE and cells[cell] != FREE)
+           or (raw_cells[cell] == OCCUPIED and cells[cell] != OCCUPIED)
+           or (raw_cells[cell] == UNKNOWN and cells[cell] == OCCUPIED)
+           for cell in raw_cells):
+        return {"status": "MAP_SEMANTIC_MISMATCH", "groups": [], "selected": None}
+    if (not isinstance(costmap, dict) or not isinstance(costmap.get("width"), int)
+            or not isinstance(costmap.get("height"), int)
+            or not _number(costmap.get("resolution"))
+            or costmap["resolution"] <= 0
+            or not isinstance(costmap.get("origin"), (list, tuple))
+            or len(costmap["origin"]) != 3
+            or not all(_number(value) for value in costmap["origin"])
+            or not isinstance(costmap.get("data"), (list, tuple))
+            or len(costmap["data"]) != costmap["width"] * costmap["height"]
+            or any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255
+                   for value in costmap["data"])):
+        raise ValueError("invalid Nav2 costmap")
+    costs = (costmap["width"], costmap["height"], float(costmap["resolution"]),
+             list(costmap["origin"]), costmap["data"])
+    # Nav2 cost values 253, 254 and 255 denote inscribed, lethal and unknown.
+
+    frontier_cells = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if cells[(x, y)] == FREE and any(
+            _inside((x + dx, y + dy), width, height)
+            and cells[(x + dx, y + dy)] == UNKNOWN
+            for dx, dy, _ in DIRECTIONS
+        )
+    }
+    groups = []
+    unassigned = set(frontier_cells)
+    while unassigned:
+        seed = min(unassigned, key=lambda cell: (cell[1], cell[0]))
+        pending, group_cells = [seed], set()
+        unassigned.remove(seed)
+        while pending:
+            cell = pending.pop()
+            group_cells.add(cell)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    neighbor = (cell[0] + dx, cell[1] + dy)
+                    if neighbor in unassigned:
+                        unassigned.remove(neighbor)
+                        pending.append(neighbor)
+        groups.append(sorted(group_cells, key=lambda cell: (cell[1], cell[0])))
+
+    start = _world_to_cell_geometry(robot_pose[0], robot_pose[1], resolution, origin)
+    if not _inside(start, width, height) or cells[start] != FREE:
+        return {"status": "INVALID_LOCALIZATION", "frontier_cells": [list(c) for c in sorted(frontier_cells)],
+                "groups": [], "selected": None}
+
+    def path_cost_at(cell):
+        wx, wy = _cell_center_world(cell, resolution, origin)
+        value = _costmap_value(wx, wy, costs)
+        return value if value is not None and value < 253 else None
+
+    start_cost = path_cost_at(start)
+    if start_cost is None:
+        return {"status": "START_BLOCKED_BY_COSTMAP", "frontier_cells": [list(c) for c in sorted(frontier_cells)],
+                "groups": [], "selected": None}
+    distances = {start: 0}
+    assumption_path = {start: raw_cells[start] != FREE}
+    pending = deque([start])
+    while pending:
+        current = pending.popleft()
+        for dx, dy, _ in DIRECTIONS:
+            neighbor = (current[0] + dx, current[1] + dy)
+            if (neighbor in distances or not _inside(neighbor, width, height)
+                    or cells[neighbor] != FREE or path_cost_at(neighbor) is None):
+                continue
+            distances[neighbor] = distances[current] + 1
+            assumption_path[neighbor] = assumption_path[current] or raw_cells[neighbor] != FREE
+            pending.append(neighbor)
+
+    max_forward = max(point[0] for point in footprint)
+    inward_cells = max(1, math.ceil((max_forward + resolution) / resolution))
+    candidate_records = []
+    group_records = []
+    for group_index, group in enumerate(groups):
+        record = {
+            "id": f"frontier_{group_index}",
+            "cells": [list(cell) for cell in group],
+            "status": "rejected",
+            "reason": "too_small" if len(group) < min_group_cells else None,
+            "source_is_assumption_based": any(raw_cells[cell] != FREE for cell in group),
+            "candidates": [],
+        }
+        if len(group) < min_group_cells:
+            group_records.append(record)
+            continue
+        if not any(cell in distances for cell in group):
+            record["reason"] = "disconnected_from_robot_free_space"
+            group_records.append(record)
+            continue
+
+        options = []
+        for boundary in group:
+            for dx, dy, direction in DIRECTIONS:
+                unknown = (boundary[0] + dx, boundary[1] + dy)
+                if not _inside(unknown, width, height) or cells[unknown] != UNKNOWN:
+                    continue
+                target = (boundary[0] - dx * inward_cells,
+                          boundary[1] - dy * inward_cells)
+                if not _inside(target, width, height) or cells[target] != FREE:
+                    continue
+                if target not in distances:
+                    continue
+                yaw = origin[2] + _DIRECTION_YAWS[direction]
+                center = _cell_center_world(target, resolution, origin)
+                covered = _footprint_cells(center, yaw, footprint, width, height,
+                                           resolution, origin)
+                if covered is None or any(cells[cell] != FREE for cell in covered):
+                    continue
+                footprint_costs = []
+                footprint_synthetic = False
+                blocked = False
+                for cell in covered:
+                    cell_center = _cell_center_world(cell, resolution, origin)
+                    cost = _costmap_value(cell_center[0], cell_center[1], costs)
+                    if cost is None or cost >= 253:
+                        blocked = True
+                        break
+                    footprint_costs.append(cost)
+                    footprint_synthetic = footprint_synthetic or raw_cells[cell] != FREE
+                if blocked:
+                    continue
+                visible = _visible_unknown(target, yaw, camera, width, height,
+                                           resolution, origin[2], cells)
+                gain = len(visible) * resolution * resolution
+                record_candidate = {
+                    "cell": list(target),
+                    "pose_world": [center[0], center[1],
+                                   math.atan2(math.sin(yaw), math.cos(yaw))],
+                    "frontier_cell": list(boundary),
+                    "grid_connected": True,
+                    "footprint_clear": True,
+                    "costmap_checked": True,
+                    "max_footprint_cost": max(footprint_costs, default=0),
+                    "path_uses_start_zone_assumption": assumption_path[target],
+                    "footprint_uses_start_zone_assumption": footprint_synthetic,
+                    "connectivity_status": "ASSUMPTION_BASED" if assumption_path[target]
+                    else "OBSERVED_FREE_PATH",
+                    "ackermann_feasibility": "NOT_EVALUATED",
+                    "visible_unknown_cells": [list(point) for point in visible],
+                    "visible_gain_area_m2": gain,
+                    "grid_distance_m": distances[target] * resolution,
+                }
+                options.append(record_candidate)
+        if not options:
+            record["reason"] = "no_connected_standoff_pose_passes_footprint_and_costmap_checks"
+            group_records.append(record)
+            continue
+        record["status"] = "candidate_available"
+        record["reason"] = "connected_free_side_pose_passes_endpoint_footprint_and_costmap_checks"
+        record["candidates"] = options
+        for candidate in options:
+            candidate["frontier_group"] = record["id"]
+            candidate_records.append(candidate)
+        group_records.append(record)
+
+    max_gain = max((item["visible_gain_area_m2"] for item in candidate_records), default=0.0)
+    max_distance = max((item["grid_distance_m"] for item in candidate_records), default=0.0)
+    for candidate in candidate_records:
+        gain_score = candidate["visible_gain_area_m2"] / max_gain if max_gain else 0.0
+        distance_score = candidate["grid_distance_m"] / max_distance if max_distance else 0.0
+        candidate["score_terms"] = {
+            "normalized_visible_gain": gain_score,
+            "normalized_grid_distance": distance_score,
+            "max_footprint_cost_tiebreak": candidate["max_footprint_cost"],
+            "weights": {"gain": 0.50, "distance": -0.50},
+        }
+        candidate["score"] = 0.5 * gain_score - 0.5 * distance_score
+    candidate_records.sort(key=lambda item: (-item["score"], item["max_footprint_cost"],
+                                               item["grid_distance_m"],
+                                               item["cell"][1], item["cell"][0],
+                                               item["frontier_cell"][1], item["frontier_cell"][0]))
+    selected = candidate_records[0] if candidate_records else None
+    for group in group_records:
+        group_options = [item for item in group["candidates"]]
+        if group_options:
+            group["recommended"] = min(
+                group_options,
+                key=lambda item: (-item["score"], item["max_footprint_cost"],
+                                  item["grid_distance_m"], item["cell"][1], item["cell"][0]),
+            )
+    if selected is not None:
+        selected["selected"] = True
+        selected["selection_reason"] = (
+            "highest normalized visible-gain minus grid-distance score; ties use "
+            "lower maximum footprint cost, shorter distance, then cell order"
+        )
+    return {
+        "status": "CANDIDATES_AVAILABLE" if selected else ("NO_FRONTIERS" if not groups else "NO_ADMISSIBLE_CANDIDATE"),
+        "frontier_cells": [list(cell) for cell in sorted(frontier_cells, key=lambda cell: (cell[1], cell[0]))],
+        "groups": group_records,
+        "candidates": candidate_records,
+        "selected": selected,
+        "connectivity_basis": "4-connected navigation-grid FREE center cells with non-lethal known costmap cells",
+        "ackermann_feasibility": "NOT_EVALUATED",
+    }
