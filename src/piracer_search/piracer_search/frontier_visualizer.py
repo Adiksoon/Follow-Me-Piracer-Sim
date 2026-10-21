@@ -66,6 +66,100 @@ def _stamp_key(message):
     return message.header.stamp.sec, message.header.stamp.nanosec
 
 
+def _score_diameters(candidates, minimum=0.08, maximum=0.35):
+    """Map the current set of evaluator scores linearly to marker diameters."""
+    if not candidates:
+        return []
+    scores = [float(candidate["score"]) for candidate in candidates]
+    if not all(math.isfinite(score) for score in scores):
+        raise ValueError("candidate scores must be finite")
+    low, high = min(scores), max(scores)
+    if math.isclose(low, high, rel_tol=0.0, abs_tol=1e-12):
+        diameter = (minimum + maximum) / 2.0
+        return [diameter] * len(scores)
+    return [minimum + (score - low) * (maximum - minimum) / (high - low)
+            for score in scores]
+
+
+def _candidate_markers(candidates, selected, map_frame, stamp, max_labels=10):
+    """Create score-sized candidate markers, bounded labels, and selected ring."""
+    markers = []
+    if not candidates:
+        return markers
+    diameters = _score_diameters(candidates)
+    ranked = sorted(enumerate(candidates), key=lambda item: (-item[1]["score"], item[0]))
+    label_ids = {index for index, _ in ranked[:max_labels]}
+    for index, (candidate, diameter) in enumerate(zip(candidates, diameters)):
+        x, y, yaw = candidate["pose_world"]
+        marker = Marker()
+        marker.header.frame_id = map_frame
+        marker.header.stamp = stamp
+        marker.ns = "frontier_candidates"
+        marker.id = index
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position.x, marker.pose.position.y = x, y
+        marker.pose.position.z = diameter / 2.0 + 0.02
+        marker.pose.orientation.z = math.sin(yaw / 2.0)
+        marker.pose.orientation.w = math.cos(yaw / 2.0)
+        marker.scale.x = marker.scale.y = marker.scale.z = diameter
+        marker.color.r, marker.color.g, marker.color.b = (0.1, 0.85, 0.65)
+        marker.color.a = 0.9
+        markers.append(marker)
+
+        if candidate is selected:
+            ring = Marker()
+            ring.header.frame_id = map_frame
+            ring.header.stamp = stamp
+            ring.ns = "selected_candidate_ring"
+            ring.id = 0
+            ring.type = Marker.LINE_STRIP
+            ring.action = Marker.ADD
+            ring.pose.orientation.w = 1.0
+            ring.scale.x = 0.025
+            ring.color.r, ring.color.g, ring.color.b, ring.color.a = (1.0, 0.72, 0.05, 1.0)
+            ring_radius = diameter / 2.0 + 0.045
+            ring.pose.position.z = 0.045
+            for point_index in range(33):
+                angle = 2.0 * math.pi * point_index / 32
+                point = Point()
+                point.x, point.y = x + ring_radius * math.cos(angle), y + ring_radius * math.sin(angle)
+                ring.points.append(point)
+            markers.append(ring)
+
+        if index in label_ids:
+            label = Marker()
+            label.header.frame_id = map_frame
+            label.header.stamp = stamp
+            label.ns = "candidate_scores"
+            label.id = index
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x, label.pose.position.y = x, y
+            label.pose.position.z = 0.28
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.065
+            label.color.r = label.color.g = label.color.b = 1.0
+            label.color.a = 1.0
+            label.text = f"score={candidate['score']:.3f}"
+            markers.append(label)
+    return markers
+
+
+def _stale_marker_deletions(previous_keys, current_keys, map_frame, stamp):
+    """Delete only stale markers from this visualizer's own namespaces."""
+    deletions = []
+    for namespace, marker_id in sorted(previous_keys - current_keys):
+        marker = Marker()
+        marker.header.frame_id = map_frame
+        marker.header.stamp = stamp
+        marker.ns = namespace
+        marker.id = marker_id
+        marker.action = Marker.DELETE
+        deletions.append(marker)
+    return deletions
+
+
 class FrontierVisualizer(Node):
     """Evaluate one current map/costmap snapshot and publish RViz markers only."""
 
@@ -78,12 +172,14 @@ class FrontierVisualizer(Node):
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("min_group_cells", 3)
+        self.declare_parameter("max_candidate_labels", 10)
         self.declare_parameter("camera.horizontal_fov_deg", 65.36016047954865)
         self.declare_parameter("camera.max_range_m", 5.0)
 
         self._raw_map = None
         self._navigation_map = None
         self._costmap = None
+        self._published_marker_keys = set()
         self._tf_buffer = Buffer(node=self)
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._markers = self.create_publisher(
@@ -159,11 +255,6 @@ class FrontierVisualizer(Node):
     def _publish_markers(self, result, robot_pose, map_frame):
         now = self.get_clock().now().to_msg()
         array = MarkerArray()
-        delete = Marker()
-        delete.header.frame_id = map_frame
-        delete.header.stamp = now
-        delete.action = Marker.DELETEALL
-        array.markers.append(delete)
 
         resolution = self._navigation_map.info.resolution
         origin = _grid_dict(self._navigation_map)["origin"]
@@ -220,48 +311,11 @@ class FrontierVisualizer(Node):
             label.text = f"{group['id']}: {group['reason']}"
             array.markers.append(label)
 
-        group_candidates = [group["recommended"] for group in result.get("groups", [])
-                            if group.get("recommended")]
-        for candidate_index, candidate in enumerate(group_candidates):
-            marker = Marker()
-            marker.header.frame_id = map_frame
-            marker.header.stamp = now
-            marker.ns = "frontier_candidates"
-            marker.id = candidate_index
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
-            marker.pose.position.x, marker.pose.position.y = candidate["pose_world"][:2]
-            marker.pose.position.z = 0.08
-            marker.pose.orientation.z = math.sin(candidate["pose_world"][2] / 2.0)
-            marker.pose.orientation.w = math.cos(candidate["pose_world"][2] / 2.0)
-            marker.scale.x = marker.scale.y = marker.scale.z = 0.09
-            selected = candidate is result.get("selected")
-            marker.color.r, marker.color.g, marker.color.b = (1.0, 0.8, 0.0) if selected else (0.2, 0.6, 1.0)
-            marker.color.a = 1.0
-            array.markers.append(marker)
-
-            label = Marker()
-            label.header.frame_id = map_frame
-            label.header.stamp = now
-            label.ns = "candidate_reasons"
-            label.id = candidate_index
-            label.type = Marker.TEXT_VIEW_FACING
-            label.action = Marker.ADD
-            label.pose.position.x, label.pose.position.y = candidate["pose_world"][:2]
-            label.pose.position.z = 0.28
-            label.pose.orientation.w = 1.0
-            label.scale.z = 0.065
-            label.color.r = label.color.g = label.color.b = 1.0
-            label.color.a = 1.0
-            assumption = candidate["connectivity_status"] == "ASSUMPTION_BASED"
-            label.text = (
-                f"{candidate['frontier_group']} score={candidate['score']:.2f} "
-                f"gain={candidate['score_terms']['normalized_visible_gain']:.2f} "
-                f"distance={candidate['grid_distance_m']:.2f}m "
-                f"cost={candidate['max_footprint_cost']} "
-                f"{'start-zone assumption' if assumption else 'observed-free path'}"
-            )
-            array.markers.append(label)
+        candidates = result.get("candidates", [])
+        array.markers.extend(_candidate_markers(
+            candidates, result.get("selected"), map_frame, now,
+            max_labels=int(self.get_parameter("max_candidate_labels").value),
+        ))
 
         robot = Marker()
         robot.header.frame_id = map_frame
@@ -276,6 +330,12 @@ class FrontierVisualizer(Node):
         robot.scale.x, robot.scale.y, robot.scale.z = (0.30, 0.06, 0.06)
         robot.color.r, robot.color.g, robot.color.b, robot.color.a = (0.1, 0.8, 1.0, 1.0)
         array.markers.append(robot)
+        current_keys = {(marker.ns, marker.id) for marker in array.markers
+                        if marker.action == Marker.ADD}
+        array.markers.extend(_stale_marker_deletions(
+            self._published_marker_keys, current_keys, map_frame, now
+        ))
+        self._published_marker_keys = current_keys
         self._markers.publish(array)
 
 

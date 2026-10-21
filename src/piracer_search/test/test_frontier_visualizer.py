@@ -1,6 +1,14 @@
 import math
 import unittest
 
+from visualization_msgs.msg import Marker
+from builtin_interfaces.msg import Time
+
+from piracer_search.frontier_visualizer import (
+    _candidate_markers,
+    _score_diameters,
+    _stale_marker_deletions,
+)
 from piracer_search.search_algorithm import _footprint_cells, evaluate_frontier_candidates
 
 
@@ -182,6 +190,58 @@ class FrontierEvaluationTests(unittest.TestCase):
         result = evaluate(raw, cost=costs)
         self.assertEqual("COSTMAP_GEOMETRY_MISMATCH", result["status"])
         self.assertIsNone(result["selected"])
+
+
+class FrontierMarkerTests(unittest.TestCase):
+    def setUp(self):
+        self.candidates = [
+            {"score": -0.2, "pose_world": [1.0, 2.0, 0.0]},
+            {"score": 0.0, "pose_world": [3.0, 4.0, 0.5]},
+            {"score": 0.4, "pose_world": [5.0, 6.0, 1.0]},
+        ]
+
+    def test_higher_score_gives_larger_marker(self):
+        sizes = _score_diameters(self.candidates)
+        self.assertEqual(0.08, sizes[0])
+        self.assertAlmostEqual(0.17, sizes[1])
+        self.assertEqual(0.35, sizes[2])
+
+    def test_equal_scores_keep_equal_marker_sizes(self):
+        equal = [{"score": 0.25}, {"score": 0.25}, {"score": 0.25}]
+        self.assertEqual([0.215, 0.215, 0.215], _score_diameters(equal))
+
+    def test_all_candidates_have_map_markers_and_selected_has_gold_ring(self):
+        markers = _candidate_markers(
+            self.candidates, self.candidates[2], "map", Time(), max_labels=3
+        )
+        candidate_markers = [m for m in markers if m.ns == "frontier_candidates"]
+        rings = [m for m in markers if m.ns == "selected_candidate_ring"]
+        labels = [m for m in markers if m.ns == "candidate_scores"]
+        self.assertEqual(3, len(candidate_markers))
+        self.assertTrue(all(m.header.frame_id == "map" for m in candidate_markers))
+        self.assertEqual((5.0, 6.0), (rings[0].points[0].x - (0.35 / 2 + 0.045), rings[0].points[0].y))
+        self.assertEqual(1, len(rings))
+        self.assertEqual(3, len(labels))
+        self.assertIn("score=0.400", {label.text for label in labels})
+        self.assertEqual(Marker.LINE_STRIP, rings[0].type)
+        self.assertEqual(0.35, candidate_markers[2].scale.x)
+
+    def test_labels_are_bounded_to_highest_scoring_candidates(self):
+        markers = _candidate_markers(
+            self.candidates, self.candidates[2], "map", Time(), max_labels=2
+        )
+        labels = [m for m in markers if m.ns == "candidate_scores"]
+        self.assertEqual(2, len(labels))
+        self.assertEqual({"score=0.000", "score=0.400"}, {m.text for m in labels})
+
+    def test_removed_frontier_markers_are_deleted_without_deleteall(self):
+        previous = {("frontier_candidates", 0), ("candidate_scores", 0),
+                    ("another_component", 4)}
+        current = {("frontier_candidates", 0)}
+        deletions = _stale_marker_deletions(previous, current, "map", Time())
+        self.assertEqual({("candidate_scores", 0), ("another_component", 4)},
+                         {(m.ns, m.id) for m in deletions})
+        self.assertTrue(all(m.action == Marker.DELETE for m in deletions))
 
 
 if __name__ == "__main__":
