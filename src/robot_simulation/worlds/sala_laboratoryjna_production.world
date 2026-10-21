@@ -1,6 +1,13 @@
 <?xml version='1.0' encoding='utf-8'?>
 <sdf version="1.5">
   <world name="room15x15">
+    <plugin name="piracer_ground_truth_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/piracer_ground_truth</namespace>
+      </ros>
+      <update_rate>10.0</update_rate>
+    </plugin>
+
     <!-- Keep the author-selected solver: world reduced passive PiRacer drift.
          Stationary evidence and limitations: robot_simulation/README.md. -->
     <physics name="piracer_world" type="ode">
