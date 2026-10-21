@@ -6,6 +6,8 @@ Feedback and terminal result values are forwarded from Nav2. Upstream cancellati
 
 If an upstream cancel was accepted, the upstream goal ends as canceled after Nav2 returns its terminal result, even if Nav2 completed successfully or aborted during the cancellation race; Nav2's result payload is still returned.
 
+If forwarding or result retrieval fails after an upstream cancel was accepted, the upstream handle is also completed as canceled to respect its `CANCELING` state; ownership stays reserved when the downstream outcome is uncertain.
+
 Run `ros2 launch piracer_navigation_coordinator navigation_coordinator.launch.py` to compose the existing Follow/Nav2/simulation launch, the Search/state-manager launch, and this coordinator. Launch-scoped `navigate_to_pose_action` parameters route Search and Follow to their separate coordinator endpoints. Follow navigation remains disabled by default through `enable_follow_navigation:=false`.
 
 This package does not publish `/cmd_vel` or modify the command arbiter.

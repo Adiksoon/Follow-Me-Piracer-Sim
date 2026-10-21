@@ -79,12 +79,12 @@ class NavigationCoordinator(Node):
             or session.owner != owner
             or session.upstream_handle is not upstream_handle
         ):
-            upstream_handle.abort()
+            self._abort_or_cancel(session, upstream_handle)
             return NavigateToPose.Result()
 
         if not self._nav_action.server_is_ready():
             self.get_logger().error("Nav2 NavigateToPose became unavailable before forwarding")
-            upstream_handle.abort()
+            self._abort_or_cancel(session, upstream_handle)
             self._release_unforwarded_goal(session)
             return NavigateToPose.Result()
 
@@ -97,13 +97,13 @@ class NavigationCoordinator(Node):
             )
         except Exception as exc:
             self.get_logger().error(f"Could not submit downstream goal: {exc}")
-            upstream_handle.abort()
+            self._abort_or_cancel(session, upstream_handle)
             # Keep ownership when submission outcome is uncertain.
             return NavigateToPose.Result()
 
         if not downstream_handle.accepted:
             self.get_logger().warning("Nav2 rejected the forwarded goal")
-            upstream_handle.abort()
+            self._abort_or_cancel(session, upstream_handle)
             self._release_unforwarded_goal(session)
             return NavigateToPose.Result()
 
@@ -115,7 +115,7 @@ class NavigationCoordinator(Node):
             downstream_result = await downstream_handle.get_result_async()
         except Exception as exc:
             self.get_logger().error(f"Could not receive downstream result: {exc}")
-            upstream_handle.abort()
+            self._abort_or_cancel(session, upstream_handle)
             # Keep the owner because the downstream goal may still be active.
             return NavigateToPose.Result()
 
@@ -143,6 +143,17 @@ class NavigationCoordinator(Node):
             return
         session.cancel_sent = True
         session.downstream_handle.cancel_goal_async()
+
+    @staticmethod
+    def _abort_or_cancel(session, upstream_handle):
+        if (
+            session is not None
+            and session.upstream_handle is upstream_handle
+            and session.cancel_requested
+        ):
+            upstream_handle.canceled()
+        else:
+            upstream_handle.abort()
 
     def _release_unforwarded_goal(self, session):
         """Release after Nav2 confirms no downstream goal was accepted."""
