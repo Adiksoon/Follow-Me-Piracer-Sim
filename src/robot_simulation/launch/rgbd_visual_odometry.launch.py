@@ -3,9 +3,11 @@
 The main simulation launch includes this node whenever the camera is enabled.
 """
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
-from launch.substitutions import PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 
 
 def generate_launch_description():
@@ -23,7 +25,14 @@ def generate_launch_description():
         name="rgbd_odometry",
         namespace="visual_vo",
         output="screen",
-        parameters=[parameters_file],
+        parameters=[
+            parameters_file,
+            {
+                "publish_tf": ParameterValue(
+                    LaunchConfiguration("publish_tf"), value_type=bool
+                )
+            },
+        ],
         remappings=[
             (
                 "/visual_vo/rgb/image",
@@ -41,4 +50,13 @@ def generate_launch_description():
         ],
     )
 
-    return LaunchDescription([odometry])
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                "publish_tf",
+                default_value="false",
+                description="Publish the visual odometry transform from this node.",
+            ),
+            odometry,
+        ]
+    )

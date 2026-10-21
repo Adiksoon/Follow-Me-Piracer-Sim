@@ -12,6 +12,7 @@ from launch.actions import (
     OpaqueFunction,
     RegisterEventHandler,
 )
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -41,6 +42,35 @@ def _build_launch(context, *args, **kwargs):
             "suitcase_control_gui": "false",
             "yolo_enabled": "false",
         }.items(),
+        condition=UnlessCondition(LaunchConfiguration("native_tf")),
+    )
+
+    native_simulation = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(simulation_share, "launch", "piracer_sim.launch.py")
+        ),
+        launch_arguments={
+            "gui": LaunchConfiguration("gui"),
+            "world": LaunchConfiguration("world"),
+            "robot_spawn_x": LaunchConfiguration("robot_spawn_x"),
+            "robot_spawn_y": LaunchConfiguration("robot_spawn_y"),
+            "robot_spawn_yaw": LaunchConfiguration("robot_spawn_yaw"),
+            "camera_enabled": "true",
+            "camera_update_rate": "30.0",
+            "camera_viewer_enabled": "false",
+            "suitcase_control_gui": "false",
+            "yolo_enabled": "false",
+            "visual_odometry_enabled": "false",
+        }.items(),
+        condition=IfCondition(LaunchConfiguration("native_tf")),
+    )
+
+    native_visual_odometry = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(simulation_share, "launch", "rgbd_visual_odometry.launch.py")
+        ),
+        launch_arguments={"publish_tf": "true"}.items(),
+        condition=IfCondition(LaunchConfiguration("native_tf")),
     )
 
     odom_bridge = Node(
@@ -49,6 +79,7 @@ def _build_launch(context, *args, **kwargs):
         name="piracer_odom_tf_bridge",
         output="screen",
         parameters=[{"use_sim_time": True}],
+        condition=UnlessCondition(LaunchConfiguration("native_tf")),
     )
 
     scan_converter = Node(
@@ -156,6 +187,8 @@ def _build_launch(context, *args, **kwargs):
     return [
         stop_launch_on_gate_exit,
         simulation,
+        native_simulation,
+        native_visual_odometry,
         odom_bridge,
         scan_converter,
         rtabmap,
@@ -168,6 +201,14 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("gui", default_value="false"),
+            DeclareLaunchArgument(
+                "native_tf",
+                default_value="false",
+                description=(
+                    "Use RTAB-Map visual odometry for vo_odom to base_link TF "
+                    "and omit odom_tf_bridge."
+                ),
+            ),
             DeclareLaunchArgument("world", default_value=""),
             DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),
             DeclareLaunchArgument("robot_spawn_y", default_value="0.0"),
