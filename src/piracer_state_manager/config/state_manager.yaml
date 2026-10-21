@@ -1,6 +1,7 @@
 piracer_state_manager:
   ros__parameters:
     detection_topic: /piracer/yolo/detections
+    search_enable_service: /search/enable
     acquire_hits: 2
     acquire_window: 3
     follow_confirm_hits: 5

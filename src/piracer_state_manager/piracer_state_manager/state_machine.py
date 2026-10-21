@@ -9,6 +9,40 @@ ACQUIRE = "ACQUIRE"
 FOLLOW = "FOLLOW"
 
 
+def search_should_run(state, active):
+    """Return whether current manager output requests Search to run."""
+    return bool(active) and state == SEARCH
+
+
+class SearchEnableBinding:
+    """Track one asynchronous SetBool request and retry until it succeeds."""
+
+    def __init__(self):
+        self.desired = None
+        self.confirmed = None
+        self.pending = None
+
+    def update(self, desired):
+        changed = self.desired is None or self.desired != bool(desired)
+        self.desired = bool(desired)
+        return changed
+
+    def request_if_ready(self, service_ready):
+        if not service_ready or self.pending is not None or self.desired == self.confirmed:
+            return None
+        self.pending = self.desired
+        return self.pending
+
+    def complete(self, requested, succeeded):
+        if self.pending is None or requested != self.pending:
+            return False
+        self.pending = None
+        if succeeded:
+            self.confirmed = requested
+            return True
+        return False
+
+
 class StateMachine:
     def __init__(
         self,

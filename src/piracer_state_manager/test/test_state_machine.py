@@ -1,7 +1,14 @@
 import math
 import pytest
 
-from piracer_state_manager.state_machine import ACQUIRE, FOLLOW, SEARCH, StateMachine
+from piracer_state_manager.state_machine import (
+    ACQUIRE,
+    FOLLOW,
+    SEARCH,
+    SearchEnableBinding,
+    StateMachine,
+    search_should_run,
+)
 
 
 def frame(machine, stamp, positive, now):
@@ -150,3 +157,31 @@ def test_source_stamps_must_be_strictly_increasing_and_valid():
     assert machine.last_receipt_time == 0
     frame(machine, (12, 101), True, .7)
     assert machine.state == ACQUIRE
+
+
+def test_search_is_requested_only_for_active_search_state():
+    assert search_should_run(SEARCH, True)
+    assert not search_should_run(SEARCH, False)
+    assert not search_should_run(ACQUIRE, True)
+    assert not search_should_run(FOLLOW, True)
+
+
+def test_search_enable_request_waits_retries_and_applies_latest_state():
+    binding = SearchEnableBinding()
+    assert binding.update(False)
+    assert binding.request_if_ready(False) is None
+    assert binding.request_if_ready(True) is False
+    assert binding.request_if_ready(True) is None  # one request in flight
+    assert not binding.complete(False, False)  # response failure remains retryable
+    assert binding.request_if_ready(True) is False
+    assert binding.complete(False, True)
+    assert binding.request_if_ready(True) is None  # confirmed until desired changes
+
+    binding.update(True)
+    assert binding.request_if_ready(True) is True
+    binding.update(False)  # a late success must be followed by the latest stop request
+    assert binding.request_if_ready(True) is None
+    assert binding.complete(True, True)
+    assert binding.request_if_ready(True) is False
+    assert binding.complete(False, True)
+    assert binding.request_if_ready(True) is None
