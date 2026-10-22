@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """ROS 2 node for CPU inference with the project's YOLO11n ONNX model."""
 
+import time
+
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 from vision_msgs.msg import Detection2DArray
 
 from robot_perception.opencv_dnn import OpenCVDNNDetector
-from robot_perception.ros_messages import image_message_to_rgb, publish_outputs
+from robot_perception.ros_messages import (
+    image_message_to_rgb,
+    to_debug_image_message,
+    to_detection_array,
+)
+from robot_perception.yolo_timing import build_timing_diagnostic
 
 
 def parse_suitcase_filter(value: str) -> set[int]:
@@ -38,6 +46,7 @@ class Yolo11nNode(Node):
         self.declare_parameter("torch_num_threads", 1)
         self.declare_parameter("detection_topic", "/piracer/yolo/detections")
         self.declare_parameter("debug_image_topic", "/piracer/yolo/debug_image")
+        self.declare_parameter("timing_topic", "/piracer/yolo/timing")
 
         backend = str(self.get_parameter("backend").value)
         if backend != "opencv_dnn":
@@ -62,6 +71,9 @@ class Yolo11nNode(Node):
             Detection2DArray, detection_topic, 10
         )
         self._debug_image_publisher = self.create_publisher(Image, debug_image_topic, 10)
+        self._timing_publisher = self.create_publisher(
+            String, str(self.get_parameter("timing_topic").value), 10
+        )
         image_topic = str(self.get_parameter("image_topic").value)
         self._image_subscription = self.create_subscription(
             Image,
@@ -78,16 +90,42 @@ class Yolo11nNode(Node):
         )
 
     def _on_image(self, image_message: Image) -> None:
+        callback_entry_ros_ns = self.get_clock().now().nanoseconds
+        callback_entry_monotonic_ns = time.monotonic_ns()
+
         image_rgb = image_message_to_rgb(image_message, self._bridge)
+        infer_start_ros_ns = self.get_clock().now().nanoseconds
+        infer_start_monotonic_ns = time.monotonic_ns()
         detections = self._detector.infer_rgb(image_rgb)
-        publish_outputs(
-            self._detection_publisher,
-            self._debug_image_publisher,
-            image_message,
-            image_rgb,
-            detections,
-            self._bridge,
+        infer_end_ros_ns = self.get_clock().now().nanoseconds
+        infer_end_monotonic_ns = time.monotonic_ns()
+
+        detection_message = to_detection_array(detections, image_message.header)
+        detection_publish_ros_ns = self.get_clock().now().nanoseconds
+        detection_publish_monotonic_ns = time.monotonic_ns()
+        self._detection_publisher.publish(detection_message)
+        self._debug_image_publisher.publish(
+            to_debug_image_message(
+                image_message, image_rgb, detections, self._bridge
+            )
         )
+
+        timing_message = String()
+        timing_message.data = build_timing_diagnostic(
+            source_stamp_ros_ns=(
+                image_message.header.stamp.sec * 1_000_000_000
+                + image_message.header.stamp.nanosec
+            ),
+            callback_entry_ros_ns=callback_entry_ros_ns,
+            infer_start_ros_ns=infer_start_ros_ns,
+            infer_end_ros_ns=infer_end_ros_ns,
+            detection_publish_ros_ns=detection_publish_ros_ns,
+            callback_entry_monotonic_ns=callback_entry_monotonic_ns,
+            infer_start_monotonic_ns=infer_start_monotonic_ns,
+            infer_end_monotonic_ns=infer_end_monotonic_ns,
+            detection_publish_monotonic_ns=detection_publish_monotonic_ns,
+        )
+        self._timing_publisher.publish(timing_message)
 
 
 def main(args=None) -> None:
