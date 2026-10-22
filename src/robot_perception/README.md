@@ -1,6 +1,6 @@
 # `robot_perception` — CP-00D.1 YOLO11n ONNX
 
-This is an independent detector package in the canonical `symulacja/`
+This is an independent perception package in the canonical `symulacja/`
 workspace. Its source was written there and does not copy or adapt code from
 the historical `ros2_ws/` workspace.
 
@@ -14,9 +14,16 @@ the historical `ros2_ws/` workspace.
 - `scripts/yolo11n_node` subscribes to `sensor_msgs/Image` using sensor-data
   QoS and accepts `rgb8`/`bgr8` via `cv_bridge`. It publishes
   `vision_msgs/Detection2DArray` on `/piracer/yolo/detections` and the
-  same-header RGB overlay on `/piracer/yolo/debug_image`.
+  same-header RGB overlay on `/piracer/yolo/debug_image`. It also publishes
+  per-frame ROS and monotonic timing diagnostics on `/piracer/yolo/timing`.
 - The approved filter is COCO `suitcase`, class ID 28. An empty
   `class_filter`, `suitcase`, or `28` selects that class.
+- `scripts/suitcase_point_node` synchronizes detections, depth, and color and
+  depth `CameraInfo` messages by exact timestamp. It checks the qualified
+  camera frame and calibration, samples depth at each detection center, and
+  publishes the highest-confidence valid camera-frame point on
+  `/piracer/follow/target_point`. If no valid point is available, it publishes
+  nothing. The node does not track detections between frames.
 - `piracer_sim.launch.py` defaults this backend to the retained model under
   `verification/yolo11n_same_frame_20261008/weights/yolo11n.onnx` when no
   explicit `yolo_model_path` is supplied. YOLO remains disabled by default in

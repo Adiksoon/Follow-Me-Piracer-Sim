@@ -173,9 +173,6 @@ def _build_simulation(context):
                     "opencv_num_threads": int(
                         LaunchConfiguration("yolo_opencv_num_threads").perform(context)
                     ),
-                    "torch_num_threads": int(
-                        LaunchConfiguration("yolo_torch_num_threads").perform(context)
-                    ),
                 }]
             yolo_nodes.append(Node(
                 package="robot_perception",
@@ -249,7 +246,6 @@ def generate_launch_description():
         DeclareLaunchArgument("yolo_imgsz", default_value="640"),
         DeclareLaunchArgument("yolo_class_filter", default_value=""),
         DeclareLaunchArgument("yolo_opencv_num_threads", default_value="8"),
-        DeclareLaunchArgument("yolo_torch_num_threads", default_value="1"),
         DeclareLaunchArgument("camera_view_topic", default_value="/piracer/sim_camera/color/image_raw"),
         DeclareLaunchArgument("world", default_value=""),
         DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),

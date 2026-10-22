@@ -7,8 +7,8 @@ from std_msgs.msg import Header
 from robot_perception.detection_pipeline import Detection
 from robot_perception.ros_messages import (
     image_message_to_rgb,
-    publish_outputs,
     to_detection_array,
+    to_debug_image_message,
 )
 
 
@@ -47,31 +47,19 @@ def test_rgb8_image_message_round_trips_and_keeps_channel_order():
     assert message.header.frame_id == "camera_rgb_optical_frame"
 
 
-def test_publish_outputs_emits_detection_and_debug_with_source_header():
+def test_debug_image_preserves_encoding_and_source_header():
     bridge = CvBridge()
     source = np.zeros((32, 32, 3), dtype=np.uint8)
     source[0, 0] = (240, 80, 10)
     image_message = bridge.cv2_to_imgmsg(source, encoding="rgb8")
     image_message.header.frame_id = "camera_rgb_optical_frame"
     image_message.header.stamp.sec = 12
-    detection_publisher = _CapturePublisher()
-    image_publisher = _CapturePublisher()
     detections = [Detection(28, 0.875, 4.0, 4.0, 24.0, 24.0)]
 
-    publish_outputs(
-        detection_publisher,
-        image_publisher,
-        image_message,
-        source,
-        detections,
-        bridge,
-    )
+    debug_message = to_debug_image_message(image_message, source, detections, bridge)
 
-    assert len(detection_publisher.messages) == 1
-    assert len(image_publisher.messages) == 1
-    assert detection_publisher.messages[0].header.frame_id == "camera_rgb_optical_frame"
-    debug_message = image_publisher.messages[0]
     assert debug_message.encoding == "rgb8"
+    assert debug_message.header.frame_id == "camera_rgb_optical_frame"
     assert debug_message.header.stamp.sec == 12
     assert np.count_nonzero(bridge.imgmsg_to_cv2(debug_message, "rgb8")) > 0
 
@@ -81,11 +69,3 @@ def test_unsupported_image_encoding_is_rejected():
     message.encoding = "mono8"
     with pytest.raises(ValueError, match="unsupported image encoding"):
         image_message_to_rgb(message, CvBridge())
-
-
-class _CapturePublisher:
-    def __init__(self):
-        self.messages = []
-
-    def publish(self, message):
-        self.messages.append(message)

@@ -2,7 +2,7 @@
 <package format="3">
   <name>robot_perception</name>
   <version>0.1.0</version>
-  <description>Independent offline perception pipeline skeleton for PiRacer.</description>
+  <description>YOLO11n detection and synchronized RGB-D target-point estimation for PiRacer.</description>
   <maintainer email="todo-author-input@example.invalid">TODO:AUTHOR_INPUT</maintainer>
   <license>MIT</license>
 

@@ -10,4 +10,3 @@ yolo11n_node:
     nms_iou: 0.5
     class_filter: "0"
     opencv_num_threads: 1
-    torch_num_threads: 1

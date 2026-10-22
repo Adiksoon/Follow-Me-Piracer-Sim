@@ -44,18 +44,3 @@ def to_debug_image_message(image_message, rgb_image, detections, bridge: CvBridg
     message = bridge.cv2_to_imgmsg(debug, encoding="rgb8")
     message.header = image_message.header
     return message
-
-
-def publish_outputs(
-    detection_publisher,
-    debug_image_publisher,
-    image_message,
-    rgb_image,
-    detections,
-    bridge: CvBridge,
-) -> None:
-    """Publish standard detections and a same-header diagnostic image."""
-    detection_publisher.publish(to_detection_array(detections, image_message.header))
-    debug_image_publisher.publish(
-        to_debug_image_message(image_message, rgb_image, detections, bridge)
-    )
