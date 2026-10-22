@@ -189,6 +189,7 @@ def _build_launch(context, *args, **kwargs):
             "use_composition": "False",
             "use_respawn": "False",
         }.items(),
+        condition=IfCondition(LaunchConfiguration("nav2_enabled")),
     )
 
     command_gate = Node(
@@ -238,6 +239,11 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("gui", default_value="false"),
+            DeclareLaunchArgument(
+                "nav2_enabled",
+                default_value="true",
+                description="Start Nav2 servers; disable for isolated manual driving.",
+            ),
             DeclareLaunchArgument(
                 "native_tf",
                 default_value="true",
