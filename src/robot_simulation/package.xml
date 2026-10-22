@@ -21,6 +21,7 @@
   <exec_depend>robot_description</exec_depend>
   <exec_depend>simulation_assets</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
   <exec_depend>rtabmap_odom</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>xacro</exec_depend>

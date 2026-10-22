@@ -45,6 +45,45 @@ no movement commands. The camera topic is /piracer/sim_camera/color/image_raw.
 The visual_odometry_enabled argument defaults to true to preserve the previous
 launch behavior; VO is always skipped when the camera is disabled.
 
+## DATA-01 suitcase dataset capture
+
+The dataset generator is installed as `suitcase_dataset_generator.py`. Without
+`--capture`, it plans camera viewpoints and checks the approved world and mesh
+offline; it does not contact ROS or start Gazebo. For example, to inspect a
+20-view pilot plan:
+
+```bash
+ros2 run robot_simulation suitcase_dataset_generator.py --sample-count 20
+```
+
+To capture that pilot, start the independent dataset-camera simulation in one
+terminal:
+
+```bash
+ros2 launch robot_simulation dataset_capture.launch.py scene:=production_room
+```
+
+After the launch is ready, run the generator in a second terminal:
+
+```bash
+ros2 run robot_simulation suitcase_dataset_generator.py --capture --sample-count 20
+```
+
+The default capture output is written under `verification/datasets/` in a
+timestamped `suitcase_pilot_*` directory. Capture mode uses the already-running
+DATA-01 camera session; it does not launch Gazebo itself. Diagnostic single
+captures use the separate `--diagnostic-single-shot` mode and require an
+explicit output directory.
+
+Current limitation (2026-10-22): DATA-01's approved production-world hash is
+pinned to `71111ed9cfd933117c3ac7013bed41c85d342eb5cc6b8e4e0eddbeeb5ae39c7e`,
+but the current `sala_laboratoryjna_production.world` has SHA-256
+`76570add543fbd17cbcd3030ab53e9306c0bec802805f965138390f84cfb1947`. The
+offline plan command rejects this world, and the DATA-01 launch has a matching
+pre-launch integrity check. The commands above describe the intended workflow;
+DATA-01 cannot currently use the production world until this pin is reconciled
+against the approved world revision. Do not bypass the check.
+
 ## Production classroom scene details
 
 The production classroom scene now has three closed, divided windows with
