@@ -38,11 +38,13 @@ plugin were copied unchanged from the author-reviewed world. The required
 Gazebo models are installed under `simulation_assets/assets/` and resolved by
 the launch file's existing `GAZEBO_MODEL_PATH`.
 
-The former `worlds/sala_laboratoryjna.world` remains available for explicit
-legacy comparisons; it is no longer the default because it references the
-different `sim012_final_suitcase` asset. The temporary textured suitcase
-probes under `verification/suitcase_realistic_side_probe_*` are not selected
-or referenced by this production scene.
+The legacy comparison world `worlds/sala_laboratoryjna.world` was removed from
+the source package on 2026-10-22. Historical references to it remain in
+`verification/` records; those records describe past runs and do not select a
+runtime world. The removed world used a different `sim012_final_suitcase`
+asset. The temporary textured suitcase probes under
+`verification/suitcase_realistic_side_probe_*` are not selected or referenced
+by this production scene.
 
 ## Suitcase attribution
 
