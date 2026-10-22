@@ -10,4 +10,6 @@ If forwarding or result retrieval fails after an upstream cancel was accepted, t
 
 Run `ros2 launch piracer_navigation_coordinator navigation_coordinator.launch.py` to compose the existing Follow/Nav2/simulation launch, the Search/state-manager launch, and this coordinator. Launch-scoped `navigate_to_pose_action` parameters route Search and Follow to their separate coordinator endpoints. Follow navigation remains disabled by default through `enable_follow_navigation:=false`.
 
+Use `ros2 launch piracer_navigation_coordinator sim.launch.py` as the canonical simulation entry point. It includes the existing `piracer_navigation/launch/slam_nav2.launch.py` once; Nav2 is off by default and can be enabled with `nav2_enabled:=true`. The existing core launch arguments, such as `gui:=true` and `world:=...`, remain available. The current `setup.py` installs launch files by glob, so build the Coordinator package once after adding or changing a launch file and source the workspace overlay; routine launches then use the installed file without rebuilding the whole workspace each time.
+
 This package does not publish `/cmd_vel` or modify the command arbiter.
