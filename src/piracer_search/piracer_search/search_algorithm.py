@@ -214,11 +214,6 @@ def evaluate_search(grid, robot_pose, *, camera=None):
     }
 
 
-def _grid_geometry(grid):
-    width, height, resolution, origin, _ = _read_grid(grid)
-    return width, height, resolution, origin
-
-
 def _cell_center_world(cell, resolution, origin):
     x, y = cell
     ox, oy, yaw = origin
