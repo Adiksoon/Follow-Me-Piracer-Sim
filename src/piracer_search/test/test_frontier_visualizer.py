@@ -1,11 +1,14 @@
 import math
 import unittest
 
-from visualization_msgs.msg import Marker
 from builtin_interfaces.msg import Time
+from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
+from visualization_msgs.msg import Marker
 
 from piracer_search.frontier_visualizer import (
+    DEFAULT_COSTMAP_TOPIC,
     _candidate_markers,
+    _costmap_qos,
     _score_diameters,
     _stale_marker_deletions,
 )
@@ -242,6 +245,12 @@ class FrontierMarkerTests(unittest.TestCase):
         self.assertEqual({("candidate_scores", 0), ("another_component", 4)},
                          {(m.ns, m.id) for m in deletions})
         self.assertTrue(all(m.action == Marker.DELETE for m in deletions))
+
+    def test_costmap_subscription_matches_nav2_raw_costmap(self):
+        qos = _costmap_qos()
+        self.assertEqual("/global_costmap/costmap_raw", DEFAULT_COSTMAP_TOPIC)
+        self.assertEqual(ReliabilityPolicy.RELIABLE, qos.reliability)
+        self.assertEqual(DurabilityPolicy.TRANSIENT_LOCAL, qos.durability)
 
 
 if __name__ == "__main__":

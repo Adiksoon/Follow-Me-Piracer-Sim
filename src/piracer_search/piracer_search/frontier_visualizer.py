@@ -14,6 +14,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from .search_algorithm import evaluate_frontier_candidates
 
+DEFAULT_COSTMAP_TOPIC = "/global_costmap/costmap_raw"
+
 
 def _map_qos():
     return QoSProfile(
@@ -29,7 +31,7 @@ def _costmap_qos():
         history=HistoryPolicy.KEEP_LAST,
         depth=1,
         reliability=ReliabilityPolicy.RELIABLE,
-        durability=DurabilityPolicy.VOLATILE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
     )
 
 
@@ -167,7 +169,7 @@ class FrontierVisualizer(Node):
         super().__init__("piracer_frontier_visualizer")
         self.declare_parameter("raw_map_topic", "/map")
         self.declare_parameter("navigation_map_topic", "/nav2/map")
-        self.declare_parameter("costmap_topic", "/global_costmap/costmap")
+        self.declare_parameter("costmap_topic", DEFAULT_COSTMAP_TOPIC)
         self.declare_parameter("marker_topic", "/piracer/frontier_markers")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "base_link")
