@@ -68,7 +68,6 @@ class StateMachine:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a positive finite duration")
         self.acquire_hits = acquire_hits
-        self.acquire_window = acquire_window
         self.follow_confirm_hits = follow_confirm_hits
         self.follow_lost_misses = follow_lost_misses
         self.detector_timeout_s = float(detector_timeout_s)

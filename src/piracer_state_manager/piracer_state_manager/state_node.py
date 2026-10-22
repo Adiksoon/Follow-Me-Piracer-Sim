@@ -33,7 +33,12 @@ class StateManagerNode(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         values = {name: self.get_parameter(name).value for name in defaults}
-        self.machine = StateMachine(**{k: v for k, v in values.items() if k != "detection_topic"})
+        state_machine_parameters = {
+            name: value
+            for name, value in values.items()
+            if name not in {"detection_topic", "search_enable_service"}
+        }
+        self.machine = StateMachine(**state_machine_parameters)
         output_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
