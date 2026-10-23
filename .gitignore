@@ -1,6 +1,12 @@
-build/
-install/
-log/
-/experiments/
-__pycache__/
+# Keep workspace metadata and generated artifacts out of Git.
+/*
+!/.gitignore
+!/src/
+
+# Generated files inside source packages.
+**/__pycache__/
 *.py[cod]
+**/.pytest_cache/
+**/build/
+**/install/
+**/log/
