@@ -19,4 +19,10 @@ def generate_launch_description():
             name="piracer_acquire",
             output="screen",
         ),
+        Node(
+            package="piracer_state_manager",
+            executable="follow_node",
+            name="piracer_follow",
+            output="screen",
+        ),
     ])
