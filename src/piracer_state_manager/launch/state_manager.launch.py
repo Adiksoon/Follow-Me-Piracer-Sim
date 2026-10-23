@@ -13,4 +13,10 @@ def generate_launch_description():
             output="screen",
             parameters=[package_share + "/config/state_manager.yaml"],
         ),
+        Node(
+            package="piracer_state_manager",
+            executable="acquire_state_node",
+            name="piracer_acquire_state",
+            output="screen",
+        ),
     ])

@@ -14,32 +14,46 @@ def search_should_run(state, active):
     return bool(active) and state == SEARCH
 
 
-class SearchEnableBinding:
-    """Track one asynchronous SetBool request and retry until it succeeds."""
+class BehaviorEnableCoordinator:
+    """Serialize SetBool handoffs between enabled behavior nodes."""
 
-    def __init__(self):
-        self.desired = None
-        self.confirmed = None
+    def __init__(self, behavior_names):
+        self.behavior_names = tuple(behavior_names)
+        self.confirmed = {name: None for name in self.behavior_names}
         self.pending = None
 
-    def update(self, desired):
-        changed = self.desired is None or self.desired != bool(desired)
-        self.desired = bool(desired)
-        return changed
-
-    def request_if_ready(self, service_ready):
-        if not service_ready or self.pending is not None or self.desired == self.confirmed:
+    def next_request(self, target, services_ready):
+        """Disable non-target behaviors before requesting the target enabled."""
+        if self.pending is not None:
             return None
-        self.pending = self.desired
-        return self.pending
+        if target is not None and target not in self.confirmed:
+            raise ValueError(f"unknown behavior target: {target}")
+        for name in self.behavior_names:
+            needs_disable = self.confirmed[name] is None or (
+                name != target and self.confirmed[name] is not False
+            )
+            if needs_disable:
+                return (name, False) if services_ready.get(name, False) else None
+        if target is not None and self.confirmed[target] is not True:
+            return (target, True) if services_ready.get(target, False) else None
+        return None
 
-    def complete(self, requested, succeeded):
-        if self.pending is None or requested != self.pending:
+    def begin(self, behavior, enabled):
+        request = (behavior, bool(enabled))
+        if self.pending is not None or behavior not in self.confirmed:
+            return False
+        self.pending = request
+        return True
+
+    def complete(self, behavior, enabled, succeeded):
+        request = (behavior, bool(enabled))
+        if self.pending != request:
             return False
         self.pending = None
         if succeeded:
-            self.confirmed = requested
+            self.confirmed[behavior] = bool(enabled)
             return True
+        self.confirmed[behavior] = None
         return False
 
 

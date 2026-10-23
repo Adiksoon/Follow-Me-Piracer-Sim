@@ -5,7 +5,7 @@ from piracer_state_manager.state_machine import (
     ACQUIRE,
     FOLLOW,
     SEARCH,
-    SearchEnableBinding,
+    BehaviorEnableCoordinator,
     StateMachine,
     search_should_run,
 )
@@ -166,22 +166,95 @@ def test_search_is_requested_only_for_active_search_state():
     assert not search_should_run(FOLLOW, True)
 
 
-def test_search_enable_request_waits_retries_and_applies_latest_state():
-    binding = SearchEnableBinding()
-    assert binding.update(False)
-    assert binding.request_if_ready(False) is None
-    assert binding.request_if_ready(True) is False
-    assert binding.request_if_ready(True) is None  # one request in flight
-    assert not binding.complete(False, False)  # response failure remains retryable
-    assert binding.request_if_ready(True) is False
-    assert binding.complete(False, True)
-    assert binding.request_if_ready(True) is None  # confirmed until desired changes
+def test_behavior_handoff_disables_all_nodes_before_enabling_target():
+    coordinator = BehaviorEnableCoordinator(("search", "acquire"))
+    ready = {"search": True, "acquire": True}
 
-    binding.update(True)
-    assert binding.request_if_ready(True) is True
-    binding.update(False)  # a late success must be followed by the latest stop request
-    assert binding.request_if_ready(True) is None
-    assert binding.complete(True, True)
-    assert binding.request_if_ready(True) is False
-    assert binding.complete(False, True)
-    assert binding.request_if_ready(True) is None
+    request = coordinator.next_request("search", ready)
+    assert request == ("search", False)
+    assert coordinator.begin(*request)
+    assert coordinator.complete(*request, True)
+
+    request = coordinator.next_request("search", ready)
+    assert request == ("acquire", False)
+    assert coordinator.begin(*request)
+    assert coordinator.complete(*request, True)
+
+    request = coordinator.next_request("search", ready)
+    assert request == ("search", True)
+    assert coordinator.begin(*request)
+    assert coordinator.complete(*request, True)
+    assert coordinator.next_request("search", ready) is None
+
+
+def test_failed_disable_blocks_other_behavior_enable_and_retries():
+    coordinator = BehaviorEnableCoordinator(("search", "acquire"))
+    ready = {"search": True, "acquire": True}
+    request = coordinator.next_request("acquire", ready)
+    assert request == ("search", False)
+    assert coordinator.begin(*request)
+    assert not coordinator.complete(*request, False)
+
+    retry = coordinator.next_request("acquire", ready)
+    assert retry == ("search", False)
+    assert coordinator.begin(*retry)
+    assert coordinator.complete(*retry, True)
+    request = coordinator.next_request("acquire", ready)
+    assert request == ("acquire", False)
+    assert coordinator.begin(*request)
+    assert coordinator.complete(*request, True)
+    assert coordinator.next_request("acquire", ready) == ("acquire", True)
+
+
+def test_target_change_while_request_pending_waits_for_acknowledgement():
+    coordinator = BehaviorEnableCoordinator(("search", "acquire"))
+    ready = {"search": True, "acquire": True}
+    request = coordinator.next_request("search", ready)
+    assert request == ("search", False)
+    assert coordinator.begin(*request)
+
+    assert coordinator.next_request("acquire", ready) is None
+    assert coordinator.complete(*request, True)
+    assert coordinator.next_request("acquire", ready) == ("acquire", False)
+
+
+def test_inactive_manager_requests_all_behaviors_disabled():
+    coordinator = BehaviorEnableCoordinator(("search", "acquire"))
+    ready = {"search": True, "acquire": True}
+    for name in ("search", "acquire"):
+        request = (name, True)
+        assert coordinator.begin(*request)
+        assert coordinator.complete(*request, True)
+
+    request = coordinator.next_request(None, ready)
+    assert request == ("search", False)
+    assert coordinator.begin(*request)
+    assert coordinator.complete(*request, True)
+    assert coordinator.next_request(None, ready) == ("acquire", False)
+
+
+def test_behavior_handoff_waits_when_next_service_is_not_ready():
+    coordinator = BehaviorEnableCoordinator(("search", "acquire"))
+    request = coordinator.next_request("acquire", {"search": True, "acquire": False})
+    assert request == ("search", False)
+    assert coordinator.begin(*request)
+    assert coordinator.complete(*request, True)
+    assert coordinator.next_request(
+        "acquire", {"search": True, "acquire": False}
+    ) is None
+
+
+def test_ambiguous_enable_failure_requires_disable_ack_before_new_target():
+    coordinator = BehaviorEnableCoordinator(("search", "acquire"))
+    ready = {"search": True, "acquire": True}
+    for name in ("search", "acquire"):
+        request = (name, False)
+        assert coordinator.begin(*request)
+        assert coordinator.complete(*request, True)
+
+    request = coordinator.next_request("search", ready)
+    assert request == ("search", True)
+    assert coordinator.begin(*request)
+    assert not coordinator.complete(*request, False)
+
+    assert coordinator.next_request("acquire", ready) == ("search", False)

@@ -1,0 +1,42 @@
+"""Scaffold for the future Acquire behavior state."""
+
+import rclpy
+from rclpy.node import Node
+from std_srvs.srv import SetBool
+
+
+class AcquireStateNode(Node):
+    def __init__(self):
+        super().__init__("piracer_acquire_state")
+        # TODO: Add the Acquire behavior here; this node is only a service scaffold.
+        self.declare_parameter("enable_service", "/acquire/enable")
+        self._enabled = False
+        self._enable_service = self.create_service(
+            SetBool,
+            self.get_parameter("enable_service").value,
+            self._set_enabled,
+        )
+
+    def _set_enabled(self, request, response):
+        self._enabled = bool(request.data)
+        response.success = True
+        response.message = (
+            "Acquire enabled (behavior is a scaffold)"
+            if self._enabled
+            else "Acquire disabled"
+        )
+        return response
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = AcquireStateNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
