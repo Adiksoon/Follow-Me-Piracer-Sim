@@ -6,7 +6,7 @@ import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool
 from std_srvs.srv import SetBool
 from vision_msgs.msg import Detection2DArray
 
@@ -45,9 +45,7 @@ class StateManagerNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self.state_pub = self.create_publisher(String, "/piracer/state", output_qos)
         self.run_pub = self.create_publisher(Bool, "/piracer/state/run", output_qos)
-        self._published_state = None
         self._published_run = None
         self._publish_changes(force=True)
         self.search_binding = SearchEnableBinding()
@@ -64,11 +62,6 @@ class StateManagerNode(Node):
         self._sync_search_enable()
 
     def _publish_changes(self, force=False):
-        if force or self.machine.state != self._published_state:
-            msg = String()
-            msg.data = self.machine.state
-            self.state_pub.publish(msg)
-            self._published_state = self.machine.state
         if force or self.machine.active != self._published_run:
             msg = Bool()
             msg.data = self.machine.active
