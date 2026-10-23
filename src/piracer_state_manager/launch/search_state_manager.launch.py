@@ -1,6 +1,7 @@
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -8,6 +9,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     package_share = get_package_share_directory("piracer_state_manager")
     search_share = get_package_share_directory("piracer_search")
+    state_manager_launch = package_share + "/launch/state_manager.launch.py"
     search_service = LaunchConfiguration("search_enable_service")
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -41,14 +43,8 @@ def generate_launch_description():
                 + "/behavior_trees/search_navigate_to_pose.xml",
             }],
         ),
-        Node(
-            package="piracer_state_manager",
-            executable="state_manager_node",
-            name="piracer_state_manager",
-            output="screen",
-            parameters=[
-                package_share + "/config/state_manager.yaml",
-                {"search_enable_service": search_service},
-            ],
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(state_manager_launch),
+            launch_arguments={"search_enable_service": search_service}.items(),
         ),
     ])

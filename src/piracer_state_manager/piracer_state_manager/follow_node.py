@@ -18,13 +18,14 @@ class PiracerFollowNode(Node):
         )
 
     def _set_enabled(self, request, response):
-        self._enabled = bool(request.data)
+        if request.data:
+            self._enabled = False
+            response.success = False
+            response.message = "Follow behavior is not implemented"
+            return response
+        self._enabled = False
         response.success = True
-        response.message = (
-            "Follow enabled (behavior is a scaffold)"
-            if self._enabled
-            else "Follow disabled"
-        )
+        response.message = "Follow disabled"
         return response
 
 

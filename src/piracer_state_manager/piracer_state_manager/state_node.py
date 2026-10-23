@@ -25,6 +25,7 @@ class StateManagerNode(Node):
             "detection_topic": "/piracer/yolo/detections",
             "search_enable_service": "/search/enable",
             "acquire_enable_service": "/acquire/enable",
+            "follow_enable_service": "/follow/enable",
             "acquire_hits": 2,
             "acquire_window": 3,
             "follow_confirm_hits": 5,
@@ -42,6 +43,7 @@ class StateManagerNode(Node):
                 "detection_topic",
                 "search_enable_service",
                 "acquire_enable_service",
+                "follow_enable_service",
             }
         }
         self.machine = StateMachine(**state_machine_parameters)
@@ -54,10 +56,13 @@ class StateManagerNode(Node):
         self.run_pub = self.create_publisher(Bool, "/piracer/state/run", output_qos)
         self._published_run = None
         self._publish_changes(force=True)
-        self.behavior_coordinator = BehaviorEnableCoordinator(("search", "acquire"))
+        self.behavior_coordinator = BehaviorEnableCoordinator(
+            ("search", "acquire", "follow")
+        )
         self.behavior_clients = {
             "search": self.create_client(SetBool, values["search_enable_service"]),
             "acquire": self.create_client(SetBool, values["acquire_enable_service"]),
+            "follow": self.create_client(SetBool, values["follow_enable_service"]),
         }
         self._handoff_failure_logged = False
         self.subscription = self.create_subscription(

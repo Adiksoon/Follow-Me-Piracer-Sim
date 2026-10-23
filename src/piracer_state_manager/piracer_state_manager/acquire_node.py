@@ -18,13 +18,14 @@ class AcquireNode(Node):
         )
 
     def _set_enabled(self, request, response):
-        self._enabled = bool(request.data)
+        if request.data:
+            self._enabled = False
+            response.success = False
+            response.message = "Acquire behavior is not implemented"
+            return response
+        self._enabled = False
         response.success = True
-        response.message = (
-            "Acquire enabled (behavior is a scaffold)"
-            if self._enabled
-            else "Acquire disabled"
-        )
+        response.message = "Acquire disabled"
         return response
 
 
