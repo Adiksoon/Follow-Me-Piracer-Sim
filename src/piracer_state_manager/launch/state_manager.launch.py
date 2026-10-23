@@ -3,6 +3,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -12,6 +13,11 @@ def generate_launch_description():
             "search_enable_service",
             default_value="/search/enable",
             description="SetBool service used by the state manager to start or stop Search.",
+        ),
+        DeclareLaunchArgument(
+            "follow_use_sim_time",
+            default_value="false",
+            description="Use /clock for Follow target timestamp validation in simulation.",
         ),
         Node(
             package="piracer_state_manager",
@@ -34,5 +40,11 @@ def generate_launch_description():
             executable="follow_node",
             name="piracer_follow",
             output="screen",
+            parameters=[{
+                "use_sim_time": ParameterValue(
+                    LaunchConfiguration("follow_use_sim_time"),
+                    value_type=bool,
+                ),
+            }],
         ),
     ])
