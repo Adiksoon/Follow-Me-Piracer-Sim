@@ -15,8 +15,8 @@ def generate_launch_description():
         ),
         Node(
             package="piracer_state_manager",
-            executable="acquire_state_node",
-            name="piracer_acquire_state",
+            executable="acquire_node",
+            name="piracer_acquire",
             output="screen",
         ),
     ])

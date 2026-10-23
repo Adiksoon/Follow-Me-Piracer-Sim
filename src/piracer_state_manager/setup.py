@@ -22,7 +22,7 @@ setup(
     entry_points={
         "console_scripts": [
             "state_manager_node = piracer_state_manager.state_node:main",
-            "acquire_state_node = piracer_state_manager.acquire_node:main",
+            "acquire_node = piracer_state_manager.acquire_node:main",
         ]
     },
 )

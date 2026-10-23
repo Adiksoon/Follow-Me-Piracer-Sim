@@ -5,9 +5,9 @@ from rclpy.node import Node
 from std_srvs.srv import SetBool
 
 
-class AcquireStateNode(Node):
+class AcquireNode(Node):
     def __init__(self):
-        super().__init__("piracer_acquire_state")
+        super().__init__("piracer_acquire")
         # TODO: Add the Acquire behavior here; this node is only a service scaffold.
         self.declare_parameter("enable_service", "/acquire/enable")
         self._enabled = False
@@ -30,7 +30,7 @@ class AcquireStateNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = AcquireStateNode()
+    node = AcquireNode()
     try:
         rclpy.spin(node)
     finally:
