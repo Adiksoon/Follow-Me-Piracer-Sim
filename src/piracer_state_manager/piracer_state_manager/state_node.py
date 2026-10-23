@@ -46,9 +46,9 @@ class StateManagerNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.state_pub = self.create_publisher(String, "/piracer/state", output_qos)
-        self.active_pub = self.create_publisher(Bool, "/piracer/state/active", output_qos)
+        self.run_pub = self.create_publisher(Bool, "/piracer/state/run", output_qos)
         self._published_state = None
-        self._published_active = None
+        self._published_run = None
         self._publish_changes(force=True)
         self.search_binding = SearchEnableBinding()
         self._search_failure_logged = False
@@ -69,11 +69,11 @@ class StateManagerNode(Node):
             msg.data = self.machine.state
             self.state_pub.publish(msg)
             self._published_state = self.machine.state
-        if force or self.machine.active != self._published_active:
+        if force or self.machine.active != self._published_run:
             msg = Bool()
             msg.data = self.machine.active
-            self.active_pub.publish(msg)
-            self._published_active = self.machine.active
+            self.run_pub.publish(msg)
+            self._published_run = self.machine.active
 
     def _log_events(self, events):
         for event in events:
