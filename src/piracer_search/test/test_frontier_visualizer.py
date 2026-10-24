@@ -227,7 +227,10 @@ class FrontierMarkerTests(unittest.TestCase):
         self.assertEqual(3, len(labels))
         self.assertIn("score=0.400", {label.text for label in labels})
         self.assertEqual(Marker.LINE_STRIP, rings[0].type)
-        self.assertEqual(0.35, candidate_markers[2].scale.x)
+        self.assertEqual(
+            0.35,
+            next(marker.scale.x for marker in candidate_markers if marker.id == 2),
+        )
 
     def test_labels_are_bounded_to_highest_scoring_candidates(self):
         markers = _candidate_markers(
@@ -236,6 +239,25 @@ class FrontierMarkerTests(unittest.TestCase):
         labels = [m for m in markers if m.ns == "candidate_scores"]
         self.assertEqual(2, len(labels))
         self.assertEqual({"score=0.000", "score=0.400"}, {m.text for m in labels})
+
+    def test_only_six_highest_scoring_candidates_are_rendered(self):
+        candidates = [
+            {"score": float(index), "pose_world": [float(index), 0.0, 0.0]}
+            for index in range(8)
+        ]
+        markers = _candidate_markers(
+            candidates, candidates[-1], "map", Time()
+        )
+        candidate_markers = [m for m in markers if m.ns == "frontier_candidates"]
+        labels = [m for m in markers if m.ns == "candidate_scores"]
+        rings = [m for m in markers if m.ns == "selected_candidate_ring"]
+
+        self.assertEqual(6, len(candidate_markers))
+        self.assertEqual({2, 3, 4, 5, 6, 7}, {m.id for m in candidate_markers})
+        self.assertEqual({"score=2.000", "score=3.000", "score=4.000",
+                          "score=5.000", "score=6.000", "score=7.000"},
+                         {m.text for m in labels})
+        self.assertEqual(1, len(rings))
 
     def test_removed_frontier_markers_are_deleted_without_deleteall(self):
         previous = {("frontier_candidates", 0), ("candidate_scores", 0),

@@ -15,6 +15,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from .search_algorithm import evaluate_frontier_candidates
 
 DEFAULT_COSTMAP_TOPIC = "/global_costmap/costmap_raw"
+MAX_DISPLAYED_CANDIDATES = 6
 
 
 def _map_qos():
@@ -84,14 +85,17 @@ def _score_diameters(candidates, minimum=0.08, maximum=0.35):
 
 
 def _candidate_markers(candidates, selected, map_frame, stamp, max_labels=10):
-    """Create score-sized candidate markers, bounded labels, and selected ring."""
+    """Create markers for the six highest-scoring candidates and selected ring."""
     markers = []
     if not candidates:
         return markers
-    diameters = _score_diameters(candidates)
-    ranked = sorted(enumerate(candidates), key=lambda item: (-item[1]["score"], item[0]))
+    ranked = sorted(
+        enumerate(candidates), key=lambda item: (-item[1]["score"], item[0])
+    )[:MAX_DISPLAYED_CANDIDATES]
+    displayed_candidates = [candidate for _, candidate in ranked]
+    diameters = _score_diameters(displayed_candidates)
     label_ids = {index for index, _ in ranked[:max_labels]}
-    for index, (candidate, diameter) in enumerate(zip(candidates, diameters)):
+    for (index, candidate), diameter in zip(ranked, diameters):
         x, y, yaw = candidate["pose_world"]
         marker = Marker()
         marker.header.frame_id = map_frame
