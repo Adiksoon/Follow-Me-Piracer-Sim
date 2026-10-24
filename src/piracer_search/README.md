@@ -32,6 +32,3 @@ Run offline tests from the package directory:
     PYTHONPATH=. python3 -m unittest discover -s test -v
 
 `search.launch.py` starts Search by itself and defaults to `/map`.
-`frontier_manual.launch.py` is the combined simulation profile; it starts the
-Nav2-backed simulation and Search on `/nav2/map`. Search remains disabled until
-`/search/enable` is called.
