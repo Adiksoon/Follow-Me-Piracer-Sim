@@ -16,7 +16,7 @@ class StartZoneMap(Node):
     def __init__(self):
         super().__init__("piracer_start_zone_map")
         self.declare_parameter("enabled", True)
-        self.declare_parameter("radius", 1.0)
+        self.declare_parameter("radius", 1.5)
         self.declare_parameter("input_topic", "/map")
         self.declare_parameter("output_topic", "/nav2/map")
         self.declare_parameter("map_frame", "map")

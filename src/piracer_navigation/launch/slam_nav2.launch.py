@@ -259,7 +259,7 @@ def generate_launch_description():
             DeclareLaunchArgument("raw_map_topic", default_value="/map"),
             DeclareLaunchArgument("map_topic", default_value="/nav2/map"),
             DeclareLaunchArgument("start_zone_enabled", default_value="true"),
-            DeclareLaunchArgument("start_zone_radius", default_value="1.0"),
+            DeclareLaunchArgument("start_zone_radius", default_value="1.5"),
             OpaqueFunction(function=_build_launch),
         ]
     )
