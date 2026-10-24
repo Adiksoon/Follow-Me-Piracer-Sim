@@ -124,7 +124,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         action_parent = types.ModuleType("action_msgs")
         action_parent.__path__ = []
 
-        marker_helpers = types.ModuleType("piracer_search.frontier_visualizer")
+        marker_helpers = types.ModuleType("piracer_search.search_markers")
         marker_helpers._candidate_markers = lambda *args, **kwargs: []
         marker_helpers._stale_marker_deletions = lambda *args, **kwargs: []
 
@@ -147,7 +147,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "visualization_msgs.msg": marker_module,
             "action_msgs": action_parent,
             "action_msgs.msg": action_status,
-            "piracer_search.frontier_visualizer": marker_helpers,
+            "piracer_search.search_markers": marker_helpers,
         }
         with patch.dict(sys.modules, modules):
             cls.module = importlib.import_module("piracer_search.search_node")

@@ -15,7 +15,7 @@ from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
 
-from .frontier_visualizer import _candidate_markers, _stale_marker_deletions
+from .search_markers import _candidate_markers, _stale_marker_deletions
 from .search_algorithm import evaluate_search
 
 

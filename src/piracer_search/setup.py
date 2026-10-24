@@ -21,7 +21,5 @@ setup(
     license="MIT",
     entry_points={"console_scripts": [
         "search_node = piracer_search.search_node:main",
-        "start_area_node = piracer_search.start_area_node:main",
-        "frontier_visualizer = piracer_search.frontier_visualizer:main",
     ]},
 )
