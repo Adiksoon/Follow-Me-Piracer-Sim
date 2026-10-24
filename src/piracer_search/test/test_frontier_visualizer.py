@@ -259,6 +259,36 @@ class FrontierMarkerTests(unittest.TestCase):
                          {m.text for m in labels})
         self.assertEqual(1, len(rings))
 
+    def test_selected_goal_ring_remains_visible_outside_top_six(self):
+        candidates = [
+            {"score": float(index), "pose_world": [float(index), 0.0, 0.0]}
+            for index in range(8)
+        ]
+        selected = candidates[0]
+        markers = _candidate_markers(candidates, selected, "map", Time())
+        candidate_markers = [m for m in markers if m.ns == "frontier_candidates"]
+        rings = [m for m in markers if m.ns == "selected_candidate_ring"]
+
+        self.assertEqual(6, len(candidate_markers))
+        self.assertEqual(1, len(rings))
+        self.assertAlmostEqual(selected["pose_world"][0] + 0.35 / 2 + 0.045,
+                               rings[0].points[0].x)
+
+    def test_selected_goal_ring_is_rendered_when_current_candidates_are_empty(self):
+        selected = {"score": 0.2, "pose_world": [9.0, -2.0, 0.0]}
+        markers = _candidate_markers(
+            [], selected, "current_map", Time(), selected_frame="submitted_map"
+        )
+
+        self.assertEqual([], [m for m in markers if m.ns == "frontier_candidates"])
+        rings = [m for m in markers if m.ns == "selected_candidate_ring"]
+        self.assertEqual(1, len(rings))
+        self.assertEqual("submitted_map", rings[0].header.frame_id)
+        self.assertAlmostEqual(9.0 + 0.35 / 2 + 0.045, rings[0].points[0].x)
+
+    def test_empty_candidates_without_selection_emit_no_add_markers(self):
+        self.assertEqual([], _candidate_markers([], None, "map", Time()))
+
     def test_removed_frontier_markers_are_deleted_without_deleteall(self):
         previous = {("frontier_candidates", 0), ("candidate_scores", 0),
                     ("another_component", 4)}

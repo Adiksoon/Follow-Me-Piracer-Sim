@@ -84,19 +84,22 @@ def _score_diameters(candidates, minimum=0.08, maximum=0.35):
             for score in scores]
 
 
-def _candidate_markers(candidates, selected, map_frame, stamp, max_labels=10):
+def _candidate_markers(
+    candidates, selected, map_frame, stamp, max_labels=10, selected_frame=None
+):
     """Create markers for the six highest-scoring candidates and selected ring."""
     markers = []
-    if not candidates:
-        return markers
     ranked = sorted(
         enumerate(candidates), key=lambda item: (-item[1]["score"], item[0])
     )[:MAX_DISPLAYED_CANDIDATES]
     displayed_candidates = [candidate for _, candidate in ranked]
     diameters = _score_diameters(displayed_candidates)
+    selected_diameter = None
     label_ids = {index for index, _ in ranked[:max_labels]}
     for (index, candidate), diameter in zip(ranked, diameters):
         x, y, yaw = candidate["pose_world"]
+        if candidate is selected:
+            selected_diameter = diameter
         marker = Marker()
         marker.header.frame_id = map_frame
         marker.header.stamp = stamp
@@ -112,26 +115,6 @@ def _candidate_markers(candidates, selected, map_frame, stamp, max_labels=10):
         marker.color.r, marker.color.g, marker.color.b = (0.1, 0.85, 0.65)
         marker.color.a = 0.9
         markers.append(marker)
-
-        if candidate is selected:
-            ring = Marker()
-            ring.header.frame_id = map_frame
-            ring.header.stamp = stamp
-            ring.ns = "selected_candidate_ring"
-            ring.id = 0
-            ring.type = Marker.LINE_STRIP
-            ring.action = Marker.ADD
-            ring.pose.orientation.w = 1.0
-            ring.scale.x = 0.025
-            ring.color.r, ring.color.g, ring.color.b, ring.color.a = (1.0, 0.72, 0.05, 1.0)
-            ring_radius = diameter / 2.0 + 0.045
-            ring.pose.position.z = 0.045
-            for point_index in range(33):
-                angle = 2.0 * math.pi * point_index / 32
-                point = Point()
-                point.x, point.y = x + ring_radius * math.cos(angle), y + ring_radius * math.sin(angle)
-                ring.points.append(point)
-            markers.append(ring)
 
         if index in label_ids:
             label = Marker()
@@ -149,6 +132,29 @@ def _candidate_markers(candidates, selected, map_frame, stamp, max_labels=10):
             label.color.a = 1.0
             label.text = f"score={candidate['score']:.3f}"
             markers.append(label)
+
+    if selected is not None:
+        x, y = selected["pose_world"][:2]
+        diameter = selected_diameter or 0.35
+        ring = Marker()
+        ring.header.frame_id = selected_frame or map_frame
+        ring.header.stamp = stamp
+        ring.ns = "selected_candidate_ring"
+        ring.id = 0
+        ring.type = Marker.LINE_STRIP
+        ring.action = Marker.ADD
+        ring.pose.orientation.w = 1.0
+        ring.scale.x = 0.025
+        ring.color.r, ring.color.g, ring.color.b, ring.color.a = (1.0, 0.72, 0.05, 1.0)
+        ring_radius = diameter / 2.0 + 0.045
+        ring.pose.position.z = 0.045
+        for point_index in range(33):
+            angle = 2.0 * math.pi * point_index / 32
+            point = Point()
+            point.x = x + ring_radius * math.cos(angle)
+            point.y = y + ring_radius * math.sin(angle)
+            ring.points.append(point)
+        markers.append(ring)
     return markers
 
 
