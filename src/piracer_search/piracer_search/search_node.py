@@ -1,5 +1,6 @@
 """Search lifecycle, shared frontier evaluation, and Nav2 goal handoff."""
 
+from collections import deque
 import math
 
 import rclpy
@@ -7,9 +8,16 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
+from rtabmap_msgs.msg import OdomInfo
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from rclpy.time import Time
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
@@ -28,6 +36,10 @@ def _map_subscription_qos():
     )
 
 
+def _odom_info_subscription_qos():
+    return qos_profile_sensor_data
+
+
 class SearchNode(Node):
     """Evaluate one map snapshot, visualize it, and own at most one Nav2 goal."""
 
@@ -39,6 +51,8 @@ class SearchNode(Node):
         self.declare_parameter("behavior_tree", "")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("marker_topic", "/piracer/frontier_markers")
+        self.declare_parameter("odom_info_topic", "/visual_vo/odom_info")
+        self.declare_parameter("max_localization_age_sec", 0.5)
         self.declare_parameter("goal_switch_margin", 0.10)
         # Simulation settings only; physical camera calibration is TBD.
         self.declare_parameter("camera.horizontal_fov_deg", 65.36016047954865)
@@ -60,6 +74,12 @@ class SearchNode(Node):
         self._challenger_epoch = None
         self._challenger_count = 0
         self._published_marker_keys = set()
+        self._odom_info = deque(maxlen=10)
+        self._localization_available = False
+        self._localization_invalidated_at_ns = None
+        self._last_accepted_odom_stamp_ns = None
+        self._last_ros_time_ns = None
+        self._localization_reason = None
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -75,13 +95,145 @@ class SearchNode(Node):
             self._map_callback,
             _map_subscription_qos(),
         )
+        self._odom_info_subscription = self.create_subscription(
+            OdomInfo,
+            self.get_parameter("odom_info_topic").value,
+            self._odom_info_callback,
+            _odom_info_subscription_qos(),
+        )
         self._start_stop = self.create_service(
             SetBool, self.get_parameter("start_stop_service").value, self._set_search
         )
         self._timer = self.create_timer(1.0, self._search_tick)
+        self.get_logger().info(
+            "Search localization max age: "
+            f"{float(self.get_parameter('max_localization_age_sec').value):.3f} s"
+        )
 
     def _map_callback(self, message):
         self._map = message
+
+    @staticmethod
+    def _stamp_ns(message):
+        stamp = message.header.stamp
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    def _current_ros_time_ns(self):
+        now_ns = self.get_clock().now().nanoseconds
+        if self._last_ros_time_ns is not None and now_ns < self._last_ros_time_ns:
+            self._handle_clock_regression(now_ns)
+        self._last_ros_time_ns = now_ns
+        return now_ns
+
+    def _mark_owned_goal_localization_invalidated(self, reason):
+        if self._pending_goal is not None:
+            self._pending_goal["localization_invalidated"] = True
+            if self._pending_goal["cancel_reason"] is None:
+                self._pending_goal["cancel_reason"] = reason
+        if self._active_goal is not None:
+            self._active_goal["localization_invalidated"] = True
+            if not self._active_goal["cancel_requested"]:
+                self._cancel_active_goal(reason)
+
+    def _handle_clock_regression(self, now_ns):
+        was_available = self._localization_available
+        self._odom_info.clear()
+        self._tf_buffer.clear()
+        self._localization_available = False
+        self._localization_invalidated_at_ns = None
+        self._last_accepted_odom_stamp_ns = None
+        self._mark_owned_goal_localization_invalidated("clock_regression")
+        self._reset_challenger()
+        if was_available or self._localization_reason != "ROS clock moved backwards":
+            self.get_logger().warning("Search localization invalidated: ROS clock moved backwards")
+        self._localization_reason = "ROS clock moved backwards"
+
+    def _invalidate_localization(self, reason, lost_stamp_ns=None):
+        was_available = self._localization_available
+        boundaries = [self._localization_invalidated_at_ns, self._last_accepted_odom_stamp_ns]
+        if lost_stamp_ns is not None and lost_stamp_ns > 0:
+            boundaries.append(lost_stamp_ns)
+        if was_available:
+            boundaries.append(self._current_ros_time_ns())
+        self._localization_invalidated_at_ns = max(
+            (value for value in boundaries if value is not None), default=None
+        )
+        self._localization_available = False
+        self._odom_info.clear()
+        self._reset_challenger()
+        self._mark_owned_goal_localization_invalidated("localization_invalidated")
+        if was_available or self._localization_reason != reason:
+            self.get_logger().warning(f"Search localization invalidated: {reason}")
+        self._localization_reason = reason
+
+    def _odom_info_callback(self, message):
+        self._current_ros_time_ns()
+        stamp_ns = self._stamp_ns(message)
+        if message.lost:
+            self._invalidate_localization("OdomInfo reports lost", stamp_ns)
+            return
+        if stamp_ns == 0:
+            return
+        if (self._localization_invalidated_at_ns is not None
+                and stamp_ns <= self._localization_invalidated_at_ns):
+            return
+        self._odom_info.append(message)
+
+    def _localization_pose(self, map_frame):
+        now_ns = self._current_ros_time_ns()
+        eligible = [
+            message for message in self._odom_info
+            if 0 < self._stamp_ns(message) <= now_ns
+            and (self._localization_invalidated_at_ns is None
+                 or self._stamp_ns(message) > self._localization_invalidated_at_ns)
+            and (self._last_accepted_odom_stamp_ns is None
+                 or self._stamp_ns(message) >= self._last_accepted_odom_stamp_ns)
+        ]
+        if not eligible:
+            if self._localization_available:
+                self._invalidate_localization("no current OdomInfo")
+            return None
+
+        message = max(eligible, key=self._stamp_ns)
+        stamp_ns = self._stamp_ns(message)
+        age_ns = now_ns - stamp_ns
+        max_age_ns = round(float(self.get_parameter("max_localization_age_sec").value) * 1_000_000_000)
+        if age_ns < 0 or age_ns > max_age_ns:
+            self._invalidate_localization("OdomInfo is older than max_localization_age_sec")
+            return None
+
+        measurement_time = Time(
+            nanoseconds=stamp_ns,
+            clock_type=self.get_clock().clock_type,
+        )
+        base_frame = self.get_parameter("base_frame").value
+        try:
+            self._tf_buffer.lookup_transform("vo_odom", base_frame, measurement_time)
+        except Exception:
+            self._invalidate_localization("vo_odom to base frame TF unavailable")
+            return None
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                map_frame, base_frame, measurement_time
+            )
+        except Exception:
+            self._invalidate_localization("map to base frame TF unavailable")
+            return None
+
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        yaw = math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        )
+        was_available = self._localization_available
+        self._localization_available = True
+        self._localization_invalidated_at_ns = None
+        self._last_accepted_odom_stamp_ns = stamp_ns
+        self._localization_reason = None
+        if not was_available:
+            self.get_logger().info("Search localization is available")
+        return translation.x, translation.y, yaw
 
     def _set_search(self, request, response):
         if request.data:
@@ -116,18 +268,6 @@ class SearchNode(Node):
     def _has_goal_ownership(self):
         return self._pending_goal is not None or self._active_goal is not None
 
-    def _robot_pose(self, map_frame):
-        transform = self._tf_buffer.lookup_transform(
-            map_frame, self.get_parameter("base_frame").value, Time()
-        )
-        translation = transform.transform.translation
-        rotation = transform.transform.rotation
-        yaw = math.atan2(
-            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
-            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
-        )
-        return translation.x, translation.y, yaw
-
     def _grid(self):
         info = self._map.info
         origin = info.origin
@@ -154,14 +294,20 @@ class SearchNode(Node):
             ).value,
             "max_range_m": self.get_parameter("camera.max_range_m").value,
         }
+        robot_pose = self._localization_pose(self._map.header.frame_id)
+        if robot_pose is None:
+            return
         try:
             result = evaluate_search(
                 self._grid(),
-                self._robot_pose(self._map.header.frame_id),
+                robot_pose,
                 camera=camera,
             )
         except Exception as error:
             self.get_logger().debug(f"Search waits for current map/TF: {error}")
+            return
+
+        if self._localization_pose(self._map.header.frame_id) is None:
             return
 
         candidates = {candidate["id"]: candidate for candidate in result["candidates"]}
@@ -307,6 +453,9 @@ class SearchNode(Node):
         return (candidate["id"], frame_id, tuple(candidate["pose_world"]))
 
     def _send_goal(self, candidate, behavior_tree):
+        if self._localization_pose(self._map.header.frame_id) is None:
+            return False
+
         goal = NavigateToPose.Goal()
         goal.pose = PoseStamped()
         goal.pose.header.frame_id = self._map.header.frame_id
@@ -336,6 +485,7 @@ class SearchNode(Node):
             self._replacement_target = None
         future = self._action.send_goal_async(goal)
         future.add_done_callback(lambda completed: self._goal_response(completed, token))
+        return True
 
     def _goal_response(self, future, token):
         pending = self._pending_goal
@@ -352,7 +502,8 @@ class SearchNode(Node):
         if not handle.accepted:
             candidate_id = pending["candidate"]["id"]
             self.get_logger().info(f"Nav2 rejected Search candidate {candidate_id}")
-            if pending["epoch"] == self._search_epoch:
+            if (pending["epoch"] == self._search_epoch
+                    and not pending.get("localization_invalidated", False)):
                 if pending["cancel_reason"] not in (
                     "higher_scoring_candidate", "retry_invalidated"
                 ):
@@ -497,7 +648,7 @@ class SearchNode(Node):
         if status == GoalStatus.STATUS_SUCCEEDED:
             if active["epoch"] == self._search_epoch:
                 self._completed_candidates.add(active["identity"])
-        elif not (
+        elif not active.get("localization_invalidated", False) and not (
             status == GoalStatus.STATUS_CANCELED
             and active["cancel_reason"] is not None
         ) and active["cancel_reason"] not in (

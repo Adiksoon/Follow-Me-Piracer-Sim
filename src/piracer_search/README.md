@@ -5,8 +5,13 @@ node. It ranks frontier observation poses from an OccupancyGrid with the
 GAIN_COST_VISIBLE_OPAQUE_W050 rule. Grid path cost is a ranking estimate;
 Nav2 plans the route and handles obstacle and costmap feasibility.
 
-The node subscribes to its configured map topic, obtains `map -> base_link`
-from TF, and owns one `NavigateToPose` action client. `/search/enable`
+The node subscribes to its configured map topic and `/visual_vo/odom_info`. It
+uses the newest positive odometry information no more than 0.5 seconds old and
+checks `vo_odom -> base_link` and `map -> base_link` at that measurement time
+before evaluating or sending a goal. A localization loss cancels an owned goal;
+recovery requires a newer odometry measurement. The maximum age is available as
+the `max_localization_age_sec` parameter. The node owns one `NavigateToPose`
+action client. `/search/enable`
 (std_srvs/SetBool) starts or stops Search. While enabled, it periodically
 ranks candidates, publishes the six highest-scoring markers on
 `/piracer/frontier_markers`, and sends the selected goal to Nav2. Nav2 rejection

@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from collections import deque
 from unittest.mock import patch
 
 
@@ -66,7 +67,50 @@ class SearchNodeCallbackTest(unittest.TestCase):
         rclpy.spin = lambda node: None
         rclpy.shutdown = lambda: None
         node_module = types.ModuleType("rclpy.node")
-        node_module.Node = type("Node", (), {})
+
+        class FakeNode:
+            def __init__(self, name):
+                self.parameters = {}
+                self.subscriptions = []
+
+            def declare_parameter(self, name, value):
+                self.parameters[name] = value
+
+            def get_parameter(self, name):
+                return types.SimpleNamespace(value=self.parameters[name])
+
+            def create_subscription(self, message_type, topic, callback, qos):
+                record = types.SimpleNamespace(
+                    message_type=message_type, topic=topic, callback=callback, qos=qos
+                )
+                self.subscriptions.append(record)
+                return record
+
+            def create_publisher(self, *args):
+                return FakePublisher()
+
+            def create_service(self, *args):
+                return types.SimpleNamespace()
+
+            def create_timer(self, *args):
+                return types.SimpleNamespace()
+
+            def get_clock(self):
+                return types.SimpleNamespace(
+                    clock_type="ros",
+                    now=lambda: types.SimpleNamespace(
+                        nanoseconds=10_000_000_000, to_msg=lambda: "sim-stamp"
+                    ),
+                )
+
+            def get_logger(self):
+                return types.SimpleNamespace(
+                    warning=lambda *args: None,
+                    info=lambda *args: None,
+                    debug=lambda *args: None,
+                )
+
+        node_module.Node = FakeNode
 
         class FakeQoSProfile:
             def __init__(self, *, history, depth, reliability, durability):
@@ -78,12 +122,22 @@ class SearchNodeCallbackTest(unittest.TestCase):
         qos_module = types.ModuleType("rclpy.qos")
         qos_module.QoSProfile = FakeQoSProfile
         qos_module.HistoryPolicy = types.SimpleNamespace(KEEP_LAST="keep_last")
-        qos_module.ReliabilityPolicy = types.SimpleNamespace(RELIABLE="reliable")
-        qos_module.DurabilityPolicy = types.SimpleNamespace(TRANSIENT_LOCAL="transient_local")
+        qos_module.ReliabilityPolicy = types.SimpleNamespace(RELIABLE="reliable", BEST_EFFORT="best_effort")
+        qos_module.DurabilityPolicy = types.SimpleNamespace(TRANSIENT_LOCAL="transient_local", VOLATILE="volatile")
+        qos_module.qos_profile_sensor_data = FakeQoSProfile(
+            history="keep_last", depth=5, reliability="best_effort", durability="volatile"
+        )
         action_module = types.ModuleType("rclpy.action")
-        action_module.ActionClient = type("ActionClient", (), {})
+        action_module.ActionClient = type("ActionClient", (), {
+            "__init__": lambda self, *args: None,
+        })
         time_module = types.ModuleType("rclpy.time")
-        time_module.Time = type("Time", (), {})
+        class FakeTime:
+            def __init__(self, *, nanoseconds=0, clock_type="ros"):
+                self.nanoseconds = nanoseconds
+                self.clock_type = clock_type
+
+        time_module.Time = FakeTime
 
         class FakePoseStamped:
             def __init__(self):
@@ -106,13 +160,19 @@ class SearchNodeCallbackTest(unittest.TestCase):
         nav_module.OccupancyGrid = type("OccupancyGrid", (), {})
         nav_parent = types.ModuleType("nav_msgs")
         nav_parent.__path__ = []
+        rtabmap_module = types.ModuleType("rtabmap_msgs.msg")
+        rtabmap_module.OdomInfo = type("OdomInfo", (), {})
+        rtabmap_parent = types.ModuleType("rtabmap_msgs")
+        rtabmap_parent.__path__ = []
         service_module = types.ModuleType("std_srvs.srv")
         service_module.SetBool = type("SetBool", (), {})
         service_parent = types.ModuleType("std_srvs")
         service_parent.__path__ = []
         tf_module = types.ModuleType("tf2_ros")
         tf_module.Buffer = type("Buffer", (), {})
-        tf_module.TransformListener = type("TransformListener", (), {})
+        tf_module.TransformListener = type("TransformListener", (), {
+            "__init__": lambda self, *args: None,
+        })
         marker_module = types.ModuleType("visualization_msgs.msg")
         marker_module.MarkerArray = type("MarkerArray", (), {"__init__": lambda self: setattr(self, "markers", [])})
         marker_parent = types.ModuleType("visualization_msgs")
@@ -140,6 +200,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "nav2_msgs.action": nav2_action_module,
             "nav_msgs": nav_parent,
             "nav_msgs.msg": nav_module,
+            "rtabmap_msgs": rtabmap_parent,
+            "rtabmap_msgs.msg": rtabmap_module,
             "std_srvs": service_parent,
             "std_srvs.srv": service_module,
             "tf2_ros": tf_module,
@@ -173,6 +235,14 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._challenger_epoch = None
         node._challenger_count = 0
         node._published_marker_keys = set()
+        node._odom_info = deque(maxlen=10)
+        node._localization_available = False
+        node._localization_invalidated_at_ns = None
+        node._last_accepted_odom_stamp_ns = None
+        node._last_ros_time_ns = None
+        node._localization_reason = None
+        node._now_ns = 10_000_000_000
+        node._tf_buffer = type("TFBuffer", (), {"clear": lambda self: None})()
         node._action = FakeAction()
         node._markers = FakePublisher()
         node._logger = type(
@@ -185,16 +255,55 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "camera.horizontal_fov_deg": 65.0,
             "camera.max_range_m": 5.0,
             "base_frame": "base_link",
+            "max_localization_age_sec": 0.5,
+            "odom_info_topic": "/visual_vo/odom_info",
             "goal_switch_margin": 0.10,
         }
         node.get_parameter = lambda name: types.SimpleNamespace(value=params[name])
         node.get_clock = lambda: types.SimpleNamespace(
-            now=lambda: types.SimpleNamespace(to_msg=lambda: "sim-stamp")
+            clock_type="ros",
+            now=lambda: types.SimpleNamespace(
+                nanoseconds=node._now_ns, to_msg=lambda: "sim-stamp"
+            ),
         )
         node._grid = lambda: {"width": 1, "height": 1, "resolution": 1.0,
                               "origin": [0.0, 0.0, 0.0], "data": (0,)}
-        node._robot_pose = lambda frame: (1.0, 2.0, 0.5)
+        node._localization_pose = lambda frame: (1.0, 2.0, 0.5)
         return node
+
+    def make_localization_node(self):
+        node = self.make_node()
+        del node._localization_pose
+
+        class TFBuffer:
+            def __init__(self):
+                self.calls = []
+                self.missing = set()
+
+            def lookup_transform(self, target, source, stamp):
+                self.calls.append((target, source, stamp.nanoseconds))
+                if target in self.missing:
+                    raise LookupError(target)
+                return types.SimpleNamespace(transform=types.SimpleNamespace(
+                    translation=types.SimpleNamespace(x=1.0, y=2.0),
+                    rotation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+                ))
+
+            def clear(self):
+                self.calls.clear()
+
+        node._tf_buffer = TFBuffer()
+        return node
+
+    @staticmethod
+    def odom_info(stamp_ns, lost=False):
+        return types.SimpleNamespace(
+            header=types.SimpleNamespace(stamp=types.SimpleNamespace(
+                sec=stamp_ns // 1_000_000_000,
+                nanosec=stamp_ns % 1_000_000_000,
+            )),
+            lost=lost,
+        )
 
     @staticmethod
     def candidate(candidate_id, score=0.0, x=1.0):
@@ -216,6 +325,256 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual("keep_last", qos.history)
         self.assertEqual("reliable", qos.reliability)
         self.assertEqual("transient_local", qos.durability)
+
+    def test_odom_info_uses_sensor_data_qos(self):
+        self.assertIs(self.module._odom_info_subscription_qos(),
+                      self.module.qos_profile_sensor_data)
+
+    def test_search_node_declares_and_wires_project_odom_info_topic(self):
+        node = self.module.SearchNode()
+        self.assertEqual("/visual_vo/odom_info",
+                         node.get_parameter("odom_info_topic").value)
+        odom_subscription = next(
+            subscription for subscription in node.subscriptions
+            if subscription.message_type is self.module.OdomInfo
+        )
+        self.assertEqual("/visual_vo/odom_info", odom_subscription.topic)
+
+    def test_future_sample_does_not_hide_latest_nonfuture_sample(self):
+        node = self.make_localization_node()
+        old_stamp = 9_950_000_000
+        future_stamp = 10_054_000_000
+        node._odom_info_callback(self.odom_info(old_stamp))
+        node._odom_info_callback(self.odom_info(future_stamp))
+
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+        self.assertEqual([("vo_odom", "base_link", old_stamp),
+                          ("map", "base_link", old_stamp)], node._tf_buffer.calls)
+        node._now_ns = 10_100_000_000
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+        self.assertEqual(future_stamp, node._tf_buffer.calls[-1][2])
+
+    def test_only_future_sample_does_not_allow_localization(self):
+        node = self.make_localization_node()
+        node._odom_info_callback(self.odom_info(10_054_000_000))
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertFalse(node._localization_available)
+        self.assertEqual([], node._tf_buffer.calls)
+
+    def test_zero_stamp_is_ignored_and_exact_age_boundary_is_inclusive(self):
+        node = self.make_localization_node()
+        node._odom_info_callback(self.odom_info(0))
+        node._odom_info_callback(self.odom_info(9_500_000_000))
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+        node = self.make_localization_node()
+        node._odom_info_callback(self.odom_info(9_499_999_999))
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertFalse(node._localization_available)
+
+    def test_lost_info_creates_strict_recovery_barrier(self):
+        node = self.make_localization_node()
+        node._localization_available = True
+        node._last_accepted_odom_stamp_ns = 9_900_000_000
+        node._odom_info_callback(self.odom_info(11_000_000_000, lost=True))
+        self.assertEqual(11_000_000_000, node._localization_invalidated_at_ns)
+        node._now_ns = 11_400_000_000
+        node._odom_info_callback(self.odom_info(11_000_000_000))
+        self.assertEqual([], list(node._odom_info))
+        node._odom_info_callback(self.odom_info(11_000_000_001))
+        self.assertIsNotNone(node._localization_pose("map"))
+        self.assertIsNone(node._localization_invalidated_at_ns)
+
+    def test_lost_transition_uses_ros_now_and_duplicate_lost_can_raise_by_stamp(self):
+        node = self.make_localization_node()
+        node._localization_available = True
+        node._now_ns = 10_200_000_000
+        node._odom_info_callback(self.odom_info(10_100_000_000, lost=True))
+        self.assertEqual(10_200_000_000, node._localization_invalidated_at_ns)
+        node._now_ns = 10_300_000_000
+        node._odom_info_callback(self.odom_info(10_250_000_000, lost=True))
+        self.assertEqual(10_250_000_000, node._localization_invalidated_at_ns)
+
+    def test_repeated_localization_failure_does_not_move_recovery_boundary(self):
+        node = self.make_localization_node()
+        node._localization_available = True
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        node._tf_buffer.missing.add("map")
+        self.assertIsNone(node._localization_pose("map"))
+        boundary = node._localization_invalidated_at_ns
+        node._now_ns += 100_000_000
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual(boundary, node._localization_invalidated_at_ns)
+
+    def test_new_info_during_repeated_tf_failure_does_not_slide_boundary(self):
+        node = self.make_localization_node()
+        node._localization_available = True
+        node._last_accepted_odom_stamp_ns = 9_900_000_000
+        node._odom_info_callback(self.odom_info(9_950_000_000))
+        node._tf_buffer.missing.add("map")
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual(10_000_000_000, node._localization_invalidated_at_ns)
+
+        node._now_ns = 10_100_000_000
+        node._odom_info_callback(self.odom_info(10_050_000_000))
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual(10_000_000_000, node._localization_invalidated_at_ns)
+
+        node._tf_buffer.missing.clear()
+        node._odom_info_callback(self.odom_info(10_050_000_000))
+        self.assertIsNotNone(node._localization_pose("map"))
+        self.assertIsNone(node._localization_invalidated_at_ns)
+
+    def test_older_info_cannot_replace_latest_accepted_timestamp_after_deque_rollover(self):
+        node = self.make_localization_node()
+        node._last_accepted_odom_stamp_ns = 9_990_000_000
+        for stamp_ns in range(9_800_000_000, 9_900_000_000, 10_000_000):
+            node._odom_info_callback(self.odom_info(stamp_ns))
+        self.assertEqual(10, len(node._odom_info))
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertFalse(node._localization_available)
+        self.assertEqual([], node._tf_buffer.calls)
+
+    def test_clock_regression_clears_old_samples_and_requires_new_axis_data(self):
+        node = self.make_localization_node()
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        self.assertIsNotNone(node._localization_pose("map"))
+        self.assertEqual(2, len(node._tf_buffer.calls))
+        node._now_ns = 1_000_000_000
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual([], list(node._odom_info))
+        self.assertEqual([], node._tf_buffer.calls)
+        node._odom_info_callback(self.odom_info(1_000_000_000))
+        self.assertIsNotNone(node._localization_pose("map"))
+
+    def test_clock_regression_clears_cached_future_odom_info(self):
+        node = self.make_localization_node()
+        future_stamp = 10_500_000_000
+        node._odom_info_callback(self.odom_info(future_stamp))
+        self.assertEqual([future_stamp], [
+            node._stamp_ns(message) for message in node._odom_info
+        ])
+        node._now_ns = 1_000_000_000
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual([], list(node._odom_info))
+        node._odom_info_callback(self.odom_info(1_000_000_000))
+        self.assertIsNotNone(node._localization_pose("map"))
+
+    def test_localization_failure_cancels_goal_and_aborted_race_has_no_penalty(self):
+        node = self.make_localization_node()
+        candidate = self.candidate("moving")
+        handle = FakeHandle()
+        node._active_goal = {
+            "token": 30, "candidate": candidate, "identity": node._goal_identity(candidate, "map"),
+            "epoch": 0, "is_retry": False, "handle": handle,
+            "cancel_requested": True, "cancel_reason": "search_disabled",
+        }
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        node._tf_buffer.missing.add("vo_odom")
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertTrue(node._active_goal["localization_invalidated"])
+        self.assertEqual(0, handle.cancel_count)
+        node._goal_result(Future(types.SimpleNamespace(status=6)), 30)
+        self.assertEqual({}, node._failed_attempts)
+
+    def test_no_odom_info_on_startup_blocks_evaluation_and_dispatch(self):
+        node = self.make_localization_node()
+        with patch.object(self.module, "evaluate_search") as evaluate:
+            node._search_tick()
+        evaluate.assert_not_called()
+        self.assertEqual([], node._action.sent)
+
+    def test_either_missing_transform_cancels_active_goal_once(self):
+        for target_frame in ("vo_odom", "map"):
+            with self.subTest(target_frame=target_frame):
+                node = self.make_localization_node()
+                candidate = self.candidate("active")
+                handle = FakeHandle()
+                identity = node._goal_identity(candidate, "map")
+                node._active_goal = {
+                    "token": 70, "candidate": candidate, "identity": identity,
+                    "epoch": 0, "is_retry": False, "handle": handle,
+                    "cancel_requested": False, "cancel_reason": None,
+                }
+                node._odom_info_callback(self.odom_info(9_900_000_000))
+                node._tf_buffer.missing.add(target_frame)
+                self.assertIsNone(node._localization_pose("map"))
+                self.assertTrue(node._active_goal["localization_invalidated"])
+                self.assertEqual(1, handle.cancel_count)
+                node._odom_info_callback(self.odom_info(10_000_000_000, lost=True))
+                self.assertEqual(1, handle.cancel_count)
+
+    def test_recovery_before_terminal_result_waits_then_fresh_data_allows_next_goal(self):
+        node = self.make_localization_node()
+        candidate = self.candidate("active")
+        node._odom_info_callback(self.odom_info(9_950_000_000))
+        self.assertTrue(node._send_goal(candidate, "/tree.xml"))
+        token = node._pending_goal["token"]
+        handle = FakeHandle()
+        node._goal_response(Future(handle), token)
+
+        node._odom_info_callback(self.odom_info(10_000_000_000, lost=True))
+        self.assertEqual(1, handle.cancel_count)
+        self.assertTrue(node._active_goal["localization_invalidated"])
+        node._now_ns = 10_100_000_000
+        node._odom_info_callback(self.odom_info(10_050_000_000))
+        evaluation = self.result([candidate])
+        with patch.object(self.module, "evaluate_search", return_value=evaluation):
+            node._search_tick()
+        self.assertEqual(1, len(node._action.sent))
+
+        node._goal_result(Future(types.SimpleNamespace(status=5)), token)
+        self.assertEqual({}, node._failed_attempts)
+        node._now_ns = 10_120_000_000
+        node._odom_info_callback(self.odom_info(10_110_000_000))
+        with patch.object(self.module, "evaluate_search", return_value=evaluation):
+            node._search_tick()
+        self.assertEqual(2, len(node._action.sent))
+
+    def test_pending_accept_after_localization_loss_is_cancelled_without_rejection_penalty(self):
+        node = self.make_node()
+        candidate = self.candidate("pending")
+        node._send_goal(candidate, "/tree.xml")
+        token = node._pending_goal["token"]
+        node._invalidate_localization("test loss", 10_000_000_000)
+        self.assertTrue(node._pending_goal["localization_invalidated"])
+        handle = FakeHandle()
+        node._goal_response(Future(handle), token)
+        self.assertEqual(1, handle.cancel_count)
+        node._goal_result(Future(types.SimpleNamespace(status=5)), token)
+        self.assertEqual({}, node._failed_attempts)
+
+    def test_rejection_after_localization_loss_has_no_attempt_penalty(self):
+        node = self.make_node()
+        node._send_goal(self.candidate("rejected"), "/tree.xml")
+        token = node._pending_goal["token"]
+        node._invalidate_localization("test loss", 10_000_000_000)
+        node._goal_response(Future(FakeHandle(accepted=False)), token)
+        self.assertEqual({}, node._failed_attempts)
+
+    def test_second_validation_after_evaluation_can_block_goal_send(self):
+        node = self.make_node()
+        pose = (1.0, 2.0, 0.5)
+        validations = iter((pose, None))
+        node._localization_pose = lambda frame: next(validations)
+        with patch.object(self.module, "evaluate_search", return_value=self.result([
+            self.candidate("candidate")
+        ])) as evaluate:
+            node._search_tick()
+        evaluate.assert_called_once()
+        self.assertEqual([], node._action.sent)
+
+    def test_send_goal_revalidates_after_marker_work_advances_clock(self):
+        node = self.make_localization_node()
+        node._odom_info_callback(self.odom_info(10_000_000_000))
+        node._publish_markers = lambda *args: setattr(node, "_now_ns", 10_600_000_000)
+        with patch.object(self.module, "evaluate_search", return_value=self.result([
+            self.candidate("candidate")
+        ])):
+            node._search_tick()
+        self.assertEqual([], node._action.sent)
+        self.assertIsNone(node._pending_goal)
+        self.assertEqual(10_600_000_000, node._localization_invalidated_at_ns)
 
     def test_search_evaluates_once_for_goal_and_markers_from_nav2_map(self):
         node = self.make_node()
