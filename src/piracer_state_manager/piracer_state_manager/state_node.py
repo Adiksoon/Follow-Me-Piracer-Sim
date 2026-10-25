@@ -65,6 +65,10 @@ class StateManagerNode(Node):
             "follow": self.create_client(SetBool, values["follow_enable_service"]),
         }
         self._handoff_failure_logged = False
+        self._handoff_started_monotonic = None
+        self._handoff_future = None
+        self._handoff_wait_logged = False
+        self._blocking_service_logged = None
         self.subscription = self.create_subscription(
             Detection2DArray, values["detection_topic"], self._on_detections, qos_profile_sensor_data
         )
@@ -132,13 +136,47 @@ class StateManagerNode(Node):
         }
         requested = self.behavior_coordinator.next_request(target, services_ready)
         if requested is None:
+            pending = self.behavior_coordinator.pending
+            if pending is not None and self._handoff_started_monotonic is not None:
+                elapsed = time.monotonic() - self._handoff_started_monotonic
+                if elapsed >= 5.0 and not self._handoff_wait_logged:
+                    done = None if self._handoff_future is None else self._handoff_future.done()
+                    self.get_logger().warning(
+                        f"Behavior pending: request={pending}, elapsed_wall_s={elapsed:.3f}, future_done={done}"
+                    )
+                    self._handoff_wait_logged = True
+            elif pending is None:
+                # next_request is pure: ask which request would run if services were ready.
+                wanted = self.behavior_coordinator.next_request(
+                    target, {name: True for name in self.behavior_clients}
+                )
+                blocked = None if wanted is None else wanted[0]
+                if blocked != self._blocking_service_logged:
+                    if blocked is not None:
+                        self.get_logger().info(
+                            f"Behavior waiting for service: {self.behavior_clients[blocked].srv_name}"
+                        )
+                    self._blocking_service_logged = blocked
             return
         behavior, enabled = requested
         if not self.behavior_coordinator.begin(behavior, enabled):
             return
         request = SetBool.Request()
         request.data = enabled
-        future = self.behavior_clients[behavior].call_async(request)
+        self._handoff_started_monotonic = time.monotonic()
+        self._handoff_future = None
+        self._handoff_wait_logged = False
+        self._blocking_service_logged = None
+        self.get_logger().info(
+            f"Behavior request: service={self.behavior_clients[behavior].srv_name}, "
+            f"enabled={enabled}, monotonic_s={self._handoff_started_monotonic:.6f}"
+        )
+        try:
+            future = self.behavior_clients[behavior].call_async(request)
+        except Exception as error:
+            self.get_logger().error(f"Behavior request dispatch raised: {error}")
+            raise
+        self._handoff_future = future
         future.add_done_callback(
             lambda completed, sent=behavior, value=enabled: self._on_behavior_enable_result(
                 sent, value, completed
