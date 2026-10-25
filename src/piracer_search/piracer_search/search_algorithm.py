@@ -49,32 +49,56 @@ def _inside(cell, width, height):
     return 0 <= cell[0] < width and 0 <= cell[1] < height
 
 
-def _safe(cell, width, height, cells):
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            neighbor = cell[0] + dx, cell[1] + dy
-            if not _inside(neighbor, width, height) or cells[neighbor] != FREE:
-                return False
-    return True
+def _safe_free_cells(width, height, cells):
+    """Return FREE cells whose full 3x3 footprint is also FREE."""
+    safe_cells = set()
+    for y in range(height):
+        for x in range(width):
+            cell = (x, y)
+            if cells[cell] != FREE:
+                continue
+            if all(
+                    _inside((x + dx, y + dy), width, height)
+                    and cells[(x + dx, y + dy)] == FREE
+                    for dy in (-1, 0, 1)
+                    for dx in (-1, 0, 1)
+            ):
+                safe_cells.add(cell)
+    return safe_cells
 
 
-def _path_cost(start, goal, width, height, resolution, cells):
-    """Return cardinal path length over safe FREE cells, in meters."""
-    if not _safe(start, width, height, cells):
-        return None
-    pending = deque([(start, 0)])
-    visited = {start}
+def _reachable_edge_counts(start, width, height, safe_cells):
+    """Return cardinal shortest-path edge counts over safe FREE cells."""
+    if start not in safe_cells:
+        return {}
+    pending = deque([start])
+    edge_counts = {start: 0}
     while pending:
-        cell, edges = pending.popleft()
-        if cell == goal:
-            return edges * resolution
+        cell = pending.popleft()
         for dx, dy, _ in DIRECTIONS:
             neighbor = cell[0] + dx, cell[1] + dy
-            if (neighbor not in visited and _inside(neighbor, width, height)
-                    and _safe(neighbor, width, height, cells)):
-                visited.add(neighbor)
-                pending.append((neighbor, edges + 1))
-    return None
+            if neighbor in safe_cells and neighbor not in edge_counts:
+                edge_counts[neighbor] = edge_counts[cell] + 1
+                pending.append(neighbor)
+    return edge_counts
+
+
+def _unknown_boundary_cells(width, height, cells):
+    """Return UNKNOWN cells adjacent to FREE cells, in row-major order."""
+    targets = []
+    for y in range(height):
+        for x in range(width):
+            if cells[(x, y)] != UNKNOWN:
+                continue
+            if any(
+                    _inside((x + dx, y + dy), width, height)
+                    and cells[(x + dx, y + dy)] == FREE
+                    for dy in (-1, 0, 1)
+                    for dx in (-1, 0, 1)
+                    if dx != 0 or dy != 0
+            ):
+                targets.append((x, y))
+    return targets
 
 
 def _ray(start, end):
@@ -95,29 +119,28 @@ def _ray(start, end):
             error, y = error + dx, y + step_y
 
 
-def _visible_unknown(observer, yaw, camera, width, height, resolution, origin_yaw, cells):
+def _visible_unknown(
+        observer, yaw, camera, width, height, resolution, origin_yaw, cells, unknown_targets
+):
     """Count UNKNOWN cells under the frozen UNKNOWN_OPAQUE visibility rule."""
     fov = camera["horizontal_fov_deg"]
     max_range = camera["max_range_m"]
     heading = math.atan2(math.sin(yaw - origin_yaw), math.cos(yaw - origin_yaw))
     visible = []
-    for y in range(height):
-        for x in range(width):
-            if cells[(x, y)] != UNKNOWN:
-                continue
-            dx = (x - observer[0]) * resolution
-            dy = (y - observer[1]) * resolution
-            distance = math.hypot(dx, dy)
-            if distance == 0 or distance > max_range + 1e-12:
-                continue
-            angle = math.atan2(dy, dx)
-            difference = math.atan2(math.sin(angle - heading), math.cos(angle - heading))
-            if abs(difference) > math.radians(fov) / 2 + 1e-12:
-                continue
-            middle = _ray(observer, (x, y))[1:-1]
-            if any(cells[cell] in (OCCUPIED, UNKNOWN) for cell in middle):
-                continue
-            visible.append((x, y))
+    for x, y in unknown_targets:
+        dx = (x - observer[0]) * resolution
+        dy = (y - observer[1]) * resolution
+        distance = math.hypot(dx, dy)
+        if distance == 0 or distance > max_range + 1e-12:
+            continue
+        angle = math.atan2(dy, dx)
+        difference = math.atan2(math.sin(angle - heading), math.cos(angle - heading))
+        if abs(difference) > math.radians(fov) / 2 + 1e-12:
+            continue
+        middle = _ray(observer, (x, y))[1:-1]
+        if any(cells[cell] in (OCCUPIED, UNKNOWN) for cell in middle):
+            continue
+        visible.append((x, y))
     return visible
 
 
@@ -148,6 +171,10 @@ def evaluate_search(grid, robot_pose, *, camera=None):
     if not _inside(start, width, height):
         return {"status": "INVALID_LOCALIZATION", "candidates": [], "ranking": []}
 
+    safe_cells = _safe_free_cells(width, height, cells)
+    edge_counts = _reachable_edge_counts(start, width, height, safe_cells)
+    unknown_targets = _unknown_boundary_cells(width, height, cells)
+
     frontiers = []
     for y in range(height):
         for x in range(width):
@@ -169,7 +196,8 @@ def evaluate_search(grid, robot_pose, *, camera=None):
     candidates = []
     for x, y, direction in sorted(proposals, key=lambda item: (item[1], item[0], item[2])):
         cell = x, y
-        cost = _path_cost(start, cell, width, height, resolution, cells) if _safe(cell, width, height, cells) else None
+        edges = edge_counts.get(cell)
+        cost = edges * resolution if edges is not None else None
         yaw = origin[2] + _DIRECTION_YAWS[direction]
         pose_x = origin[0] + math.cos(origin[2]) * (x + 0.5) * resolution - math.sin(origin[2]) * (y + 0.5) * resolution
         pose_y = origin[1] + math.sin(origin[2]) * (x + 0.5) * resolution + math.cos(origin[2]) * (y + 0.5) * resolution
@@ -182,7 +210,9 @@ def evaluate_search(grid, robot_pose, *, camera=None):
             "cost_m": cost,
         }
         if cost is not None:
-            visible = _visible_unknown(cell, yaw, camera, width, height, resolution, origin[2], cells)
+            visible = _visible_unknown(
+                cell, yaw, camera, width, height, resolution, origin[2], cells, unknown_targets
+            )
             record["visible_unknown_cells"] = [list(point) for point in visible]
             record["visible_gain_area_m2"] = len(visible) * resolution * resolution
             candidates.append(record)
