@@ -105,7 +105,8 @@ planner_server:
       max_on_approach_iterations: 1000
       max_planning_time: 2.0
       motion_model_for_search: DUBIN
-      minimum_turning_radius: 0.25
+      # Leave steering margin for path tracking near the goal (Run10 overshot).
+      minimum_turning_radius: 0.50
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
       allow_reverse_expansion: false
