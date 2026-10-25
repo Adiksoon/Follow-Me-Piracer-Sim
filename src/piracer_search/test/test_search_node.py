@@ -169,6 +169,13 @@ class SearchNodeCallbackTest(unittest.TestCase):
         service_parent = types.ModuleType("std_srvs")
         service_parent.__path__ = []
         tf_module = types.ModuleType("tf2_ros")
+        class FakeTFException(Exception):
+            pass
+
+        tf_module.LookupException = type("LookupException", (FakeTFException,), {})
+        tf_module.ConnectivityException = type("ConnectivityException", (FakeTFException,), {})
+        tf_module.ExtrapolationException = type("ExtrapolationException", (FakeTFException,), {})
+        tf_module.TimeoutException = type("TimeoutException", (FakeTFException,), {})
         tf_module.Buffer = type("Buffer", (), {})
         tf_module.TransformListener = type("TransformListener", (), {
             "__init__": lambda self, *args: None,
@@ -283,10 +290,13 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
             def lookup_transform(self, target, source, stamp):
                 self.calls.append((target, source, stamp.nanoseconds))
-                if target in self.errors:
-                    raise self.errors[target]
+                error = self.errors.get((target, stamp.nanoseconds))
+                if error is None:
+                    error = self.errors.get(target)
+                if error is not None:
+                    raise error
                 if target in self.missing:
-                    raise LookupError(target)
+                    raise self.expected_exception(target)
                 return types.SimpleNamespace(transform=types.SimpleNamespace(
                     translation=types.SimpleNamespace(x=1.0, y=2.0),
                     rotation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
@@ -296,6 +306,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.calls.clear()
 
         node._tf_buffer = TFBuffer()
+        node._tf_buffer.expected_exception = self.module.ExtrapolationException
         return node
 
     @staticmethod
@@ -374,6 +385,210 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._odom_info_callback(self.odom_info(9_499_999_999))
         self.assertIsNone(node._localization_pose("map"))
         self.assertFalse(node._localization_available)
+
+    def test_newest_candidate_with_coverage_is_selected_without_cancelling_goal(self):
+        node = self.make_localization_node()
+        warnings = []
+        node._logger.warning = warnings.append
+        handle = FakeHandle()
+        node._active_goal = {
+            "token": 73, "candidate": self.candidate("active"),
+            "identity": node._goal_identity(self.candidate("active"), "map"),
+            "epoch": 0, "is_retry": False, "handle": handle,
+            "cancel_requested": False, "cancel_reason": None,
+        }
+        older_stamp = 13_898_000_000
+        newer_stamp = 13_931_000_000
+        node._now_ns = 14_000_000_000
+        node._odom_info_callback(self.odom_info(older_stamp))
+        node._odom_info_callback(self.odom_info(newer_stamp))
+        node._tf_buffer.errors[("vo_odom", newer_stamp)] = (
+            self.module.ExtrapolationException("newer transform is future")
+        )
+
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+        self.assertEqual([
+            ("vo_odom", "base_link", newer_stamp),
+            ("vo_odom", "base_link", older_stamp),
+            ("map", "base_link", older_stamp),
+        ], node._tf_buffer.calls)
+        self.assertEqual(older_stamp, node._last_accepted_odom_stamp_ns)
+        self.assertTrue(node._localization_available)
+        self.assertIsNone(node._localization_invalidated_at_ns)
+        self.assertEqual(0, handle.cancel_count)
+        self.assertEqual([], warnings)
+
+    def test_newest_complete_candidate_wins_with_out_of_order_deque(self):
+        node = self.make_localization_node()
+        stamps = (9_900_000_000, 9_950_000_000, 9_925_000_000)
+        for stamp in stamps:
+            node._odom_info_callback(self.odom_info(stamp))
+
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+        self.assertEqual(9_950_000_000, node._last_accepted_odom_stamp_ns)
+        self.assertEqual([
+            ("vo_odom", "base_link", 9_950_000_000),
+            ("map", "base_link", 9_950_000_000),
+        ], node._tf_buffer.calls)
+
+    def test_map_tf_failure_for_newer_candidate_falls_back_without_mixing_stamps(self):
+        node = self.make_localization_node()
+        warnings = []
+        node._logger.warning = warnings.append
+        older_stamp = 9_900_000_000
+        newer_stamp = 9_950_000_000
+        node._odom_info_callback(self.odom_info(older_stamp))
+        node._odom_info_callback(self.odom_info(newer_stamp))
+        node._tf_buffer.errors[("map", newer_stamp)] = (
+            self.module.ExtrapolationException("map transform unavailable")
+        )
+
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+        self.assertEqual([
+            ("vo_odom", "base_link", newer_stamp),
+            ("map", "base_link", newer_stamp),
+            ("vo_odom", "base_link", older_stamp),
+            ("map", "base_link", older_stamp),
+        ], node._tf_buffer.calls)
+        self.assertEqual(older_stamp, node._last_accepted_odom_stamp_ns)
+        self.assertEqual([], warnings)
+
+    def test_all_fresh_tf_failures_invalidate_once_using_newest_first_error(self):
+        node = self.make_localization_node()
+        node._localization_available = True
+        warnings = []
+        node._logger.warning = warnings.append
+        handle = FakeHandle()
+        candidate = self.candidate("active")
+        node._active_goal = {
+            "token": 74, "candidate": candidate,
+            "identity": node._goal_identity(candidate, "map"),
+            "epoch": 0, "is_retry": True, "handle": handle,
+            "cancel_requested": False, "cancel_reason": None,
+        }
+        older_stamp = 9_900_000_000
+        newer_stamp = 9_950_000_000
+        node._odom_info_callback(self.odom_info(older_stamp))
+        node._odom_info_callback(self.odom_info(newer_stamp))
+        node._tf_buffer.errors[("map", newer_stamp)] = (
+            self.module.ExtrapolationException("newest map failure")
+        )
+        node._tf_buffer.errors[("vo_odom", older_stamp)] = (
+            self.module.ExtrapolationException("older odom failure")
+        )
+        node._failed_attempts = {"previous": 3}
+
+        self.assertIsNone(node._localization_pose("map"))
+
+        self.assertEqual([
+            ("vo_odom", "base_link", newer_stamp),
+            ("map", "base_link", newer_stamp),
+            ("vo_odom", "base_link", older_stamp),
+        ], node._tf_buffer.calls)
+        self.assertLessEqual(len(node._tf_buffer.calls), 2 * 2)
+        self.assertEqual(10_000_000_000, node._localization_invalidated_at_ns)
+        self.assertEqual("map to base frame TF unavailable", node._localization_reason)
+        self.assertTrue(node._active_goal["localization_invalidated"])
+        self.assertEqual(1, handle.cancel_count)
+        self.assertEqual({"previous": 3}, node._failed_attempts)
+        self.assertEqual(1, len(warnings))
+        self.assertIn("selected_measurement_stamp_ns=9950000000", warnings[0])
+        self.assertIn("target_frame='map'", warnings[0])
+        self.assertIn("exception_message='newest map failure'", warnings[0])
+
+    def test_stale_candidates_cannot_rescue_localization(self):
+        node = self.make_localization_node()
+        node._localization_available = True
+        node._odom_info_callback(self.odom_info(9_499_999_999))
+        node._odom_info_callback(self.odom_info(9_400_000_000))
+
+        self.assertIsNone(node._localization_pose("map"))
+
+        self.assertEqual([], node._tf_buffer.calls)
+        self.assertFalse(node._localization_available)
+        self.assertEqual("OdomInfo is older than max_localization_age_sec",
+                         node._localization_reason)
+
+    def test_timestamp_below_accepted_floor_cannot_rescue_localization(self):
+        node = self.make_localization_node()
+        node._last_accepted_odom_stamp_ns = 9_900_000_000
+        node._odom_info_callback(self.odom_info(9_899_999_999))
+
+        self.assertIsNone(node._localization_pose("map"))
+
+        self.assertEqual([], node._tf_buffer.calls)
+        self.assertFalse(node._localization_available)
+
+    def test_timestamp_equal_to_accepted_floor_remains_eligible(self):
+        node = self.make_localization_node()
+        node._last_accepted_odom_stamp_ns = 9_900_000_000
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+        self.assertEqual(9_900_000_000, node._last_accepted_odom_stamp_ns)
+        self.assertEqual([
+            ("vo_odom", "base_link", 9_900_000_000),
+            ("map", "base_link", 9_900_000_000),
+        ], node._tf_buffer.calls)
+
+    def test_each_expected_tf2_availability_exception_allows_fallback(self):
+        expected_exceptions = (
+            self.module.LookupException,
+            self.module.ConnectivityException,
+            self.module.ExtrapolationException,
+            self.module.TimeoutException,
+        )
+        for exception_type in expected_exceptions:
+            with self.subTest(exception_type=exception_type.__name__):
+                node = self.make_localization_node()
+                older_stamp = 9_900_000_000
+                newer_stamp = 9_950_000_000
+                node._odom_info_callback(self.odom_info(older_stamp))
+                node._odom_info_callback(self.odom_info(newer_stamp))
+                node._tf_buffer.errors[("vo_odom", newer_stamp)] = exception_type(
+                    "availability failure"
+                )
+
+                self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+                self.assertEqual(older_stamp, node._last_accepted_odom_stamp_ns)
+                self.assertEqual([
+                    ("vo_odom", "base_link", newer_stamp),
+                    ("vo_odom", "base_link", older_stamp),
+                    ("map", "base_link", older_stamp),
+                ], node._tf_buffer.calls)
+
+    def test_unexpected_tf_exception_invalidates_without_trying_older_candidate(self):
+        for target_frame, reason, expected_calls in (
+            ("vo_odom", "vo_odom to base frame TF unavailable", 1),
+            ("map", "map to base frame TF unavailable", 2),
+        ):
+            with self.subTest(target_frame=target_frame):
+                node = self.make_localization_node()
+                warnings = []
+                node._logger.warning = warnings.append
+                node._localization_available = True
+                older_stamp = 9_900_000_000
+                newer_stamp = 9_950_000_000
+                node._odom_info_callback(self.odom_info(older_stamp))
+                node._odom_info_callback(self.odom_info(newer_stamp))
+                node._tf_buffer.errors[(target_frame, newer_stamp)] = RuntimeError(
+                    "unexpected TF implementation failure"
+                )
+
+                self.assertIsNone(node._localization_pose("map"))
+
+                self.assertEqual(expected_calls, len(node._tf_buffer.calls))
+                self.assertEqual(10_000_000_000,
+                                 node._localization_invalidated_at_ns)
+                self.assertEqual(reason, node._localization_reason)
+                self.assertEqual(1, len(warnings))
+                self.assertIn("selected_measurement_stamp_ns=9950000000", warnings[0])
+                self.assertIn("exception_class=RuntimeError", warnings[0])
 
     def test_lost_info_creates_strict_recovery_barrier(self):
         node = self.make_localization_node()

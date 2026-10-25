@@ -20,7 +20,14 @@ from rclpy.qos import (
 )
 from rclpy.time import Time
 from std_srvs.srv import SetBool
-from tf2_ros import Buffer, TransformListener
+from tf2_ros import (
+    Buffer,
+    ConnectivityException,
+    ExtrapolationException,
+    LookupException,
+    TimeoutException,
+    TransformListener,
+)
 from visualization_msgs.msg import MarkerArray
 
 from .search_markers import _candidate_markers, _stale_marker_deletions
@@ -199,72 +206,84 @@ class SearchNode(Node):
                 self._invalidate_localization("no current OdomInfo")
             return None
 
-        message = max(eligible, key=self._stamp_ns)
-        stamp_ns = self._stamp_ns(message)
-        age_ns = now_ns - stamp_ns
         max_age_ns = round(float(self.get_parameter("max_localization_age_sec").value) * 1_000_000_000)
-        if age_ns < 0 or age_ns > max_age_ns:
+        candidates = []
+        for message in sorted(eligible, key=self._stamp_ns, reverse=True):
+            stamp_ns = self._stamp_ns(message)
+            age_ns = now_ns - stamp_ns
+            if age_ns <= max_age_ns:
+                candidates.append((stamp_ns, age_ns))
+
+        if not candidates:
             self._invalidate_localization("OdomInfo is older than max_localization_age_sec")
             return None
 
-        measurement_time = Time(
-            nanoseconds=stamp_ns,
-            clock_type=self.get_clock().clock_type,
-        )
         base_frame = self.get_parameter("base_frame").value
-        target_frame = "vo_odom"
-        try:
-            self._tf_buffer.lookup_transform(
-                target_frame, base_frame, measurement_time
+        first_failure = None
+        for stamp_ns, age_ns in candidates:
+            measurement_time = Time(
+                nanoseconds=stamp_ns,
+                clock_type=self.get_clock().clock_type,
             )
-        except Exception as exc:
-            diagnostic_details = (
-                f"selected_measurement_stamp_ns={stamp_ns}, "
-                f"requested_stamp_ns={measurement_time.nanoseconds}, "
-                f"ros_now_ns={now_ns}, age_ns={age_ns}, max_age_ns={max_age_ns}, "
-                f"target_frame={target_frame!r}, source_frame={base_frame!r}, "
-                f"exception_class={type(exc).__name__}, "
-                f"exception_message={str(exc)!r}"
-            )
+            candidate_transform = None
+            candidate_failed = False
+            for target_frame, reason in (
+                ("vo_odom", "vo_odom to base frame TF unavailable"),
+                (map_frame, "map to base frame TF unavailable"),
+            ):
+                try:
+                    candidate_transform = self._tf_buffer.lookup_transform(
+                        target_frame, base_frame, measurement_time
+                    )
+                except Exception as exc:
+                    diagnostic_details = (
+                        f"selected_measurement_stamp_ns={stamp_ns}, "
+                        f"requested_stamp_ns={measurement_time.nanoseconds}, "
+                        f"ros_now_ns={now_ns}, age_ns={age_ns}, max_age_ns={max_age_ns}, "
+                        f"target_frame={target_frame!r}, source_frame={base_frame!r}, "
+                        f"exception_class={type(exc).__name__}, "
+                        f"exception_message={str(exc)!r}"
+                    )
+                    if isinstance(exc, (
+                        LookupException,
+                        ConnectivityException,
+                        ExtrapolationException,
+                        TimeoutException,
+                    )):
+                        if first_failure is None:
+                            first_failure = (reason, diagnostic_details)
+                        candidate_failed = True
+                        break
+                    self._invalidate_localization(
+                        reason, diagnostic_details=diagnostic_details
+                    )
+                    return None
+                if target_frame == map_frame:
+                    transform = candidate_transform
+            if not candidate_failed:
+                translation = transform.transform.translation
+                rotation = transform.transform.rotation
+                yaw = math.atan2(
+                    2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+                    1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+                )
+                was_available = self._localization_available
+                self._localization_available = True
+                self._localization_invalidated_at_ns = None
+                self._last_accepted_odom_stamp_ns = stamp_ns
+                self._localization_reason = None
+                if not was_available:
+                    self.get_logger().info("Search localization is available")
+                return translation.x, translation.y, yaw
+
+        if first_failure is not None:
+            reason, diagnostic_details = first_failure
             self._invalidate_localization(
-                "vo_odom to base frame TF unavailable",
-                diagnostic_details=diagnostic_details,
-            )
-            return None
-        target_frame = map_frame
-        try:
-            transform = self._tf_buffer.lookup_transform(
-                target_frame, base_frame, measurement_time
-            )
-        except Exception as exc:
-            diagnostic_details = (
-                f"selected_measurement_stamp_ns={stamp_ns}, "
-                f"requested_stamp_ns={measurement_time.nanoseconds}, "
-                f"ros_now_ns={now_ns}, age_ns={age_ns}, max_age_ns={max_age_ns}, "
-                f"target_frame={target_frame!r}, source_frame={base_frame!r}, "
-                f"exception_class={type(exc).__name__}, "
-                f"exception_message={str(exc)!r}"
-            )
-            self._invalidate_localization(
-                "map to base frame TF unavailable",
-                diagnostic_details=diagnostic_details,
+                reason, diagnostic_details=diagnostic_details
             )
             return None
 
-        translation = transform.transform.translation
-        rotation = transform.transform.rotation
-        yaw = math.atan2(
-            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
-            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
-        )
-        was_available = self._localization_available
-        self._localization_available = True
-        self._localization_invalidated_at_ns = None
-        self._last_accepted_odom_stamp_ns = stamp_ns
-        self._localization_reason = None
-        if not was_available:
-            self.get_logger().info("Search localization is available")
-        return translation.x, translation.y, yaw
+        return None
 
     def _set_search(self, request, response):
         if request.data:
