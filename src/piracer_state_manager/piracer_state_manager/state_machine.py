@@ -104,6 +104,14 @@ class StateMachine:
         self.miss_streak = 0
         self.acquire_started = now if state == ACQUIRE else None
 
+    def invalidate_detector_data(self):
+        """Drop the previous clock epoch's evidence without releasing manual STOP."""
+        self._reset_state()
+        self.active = False
+        self.data_paused = True
+        self.last_receipt_time = None
+        self.last_stamp = None
+
     def _timeout(self, now):
         return self.last_receipt_time is not None and now - self.last_receipt_time >= self.detector_timeout_s
 

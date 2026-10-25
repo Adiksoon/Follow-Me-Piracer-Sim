@@ -47,6 +47,7 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(state_manager_launch),
             launch_arguments={
                 "search_enable_service": search_service,
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
                 "follow_use_sim_time": LaunchConfiguration("use_sim_time"),
             }.items(),
         ),

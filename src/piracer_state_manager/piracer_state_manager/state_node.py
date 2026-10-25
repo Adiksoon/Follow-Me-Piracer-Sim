@@ -47,6 +47,8 @@ class StateManagerNode(Node):
             }
         }
         self.machine = StateMachine(**state_machine_parameters)
+        self._last_sim_time_ns = None
+        self._sim_epoch_start_ns = 0
         output_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -99,21 +101,45 @@ class StateManagerNode(Node):
             elif event == "ACQUIRE_TIMEOUT":
                 self.get_logger().info("ACQUIRE attempt timed out; returned to SEARCH")
 
+    def _freshness_now(self):
+        """Use simulation time for simulation deadlines, monotonic time on hardware."""
+        if not self.get_parameter("use_sim_time").value:
+            return time.monotonic()
+        now_ns = self.get_clock().now().nanoseconds
+        previous_ns = self._last_sim_time_ns
+        self._last_sim_time_ns = now_ns
+        if previous_ns is not None and now_ns < previous_ns:
+            self.machine.invalidate_detector_data()
+            self._sim_epoch_start_ns = now_ns
+            self.get_logger().warning("Simulation clock moved backwards; detector data invalidated")
+            return None
+        return now_ns / 1_000_000_000 if now_ns > 0 else None
+
     def _on_detections(self, message):
+        now = self._freshness_now()
         stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
-        events = self.machine.observe(stamp, bool(message.detections), time.monotonic())
+        events = []
+        if now is not None:
+            valid_epoch = True
+            if self.get_parameter("use_sim_time").value:
+                stamp_ns = stamp[0] * 1_000_000_000 + stamp[1]
+                valid_epoch = 0 < stamp_ns and self._sim_epoch_start_ns <= stamp_ns <= self._last_sim_time_ns
+            events = (self.machine.observe(stamp, bool(message.detections), now)
+                      if valid_epoch else self.machine.tick(now))
         self._log_events(events)
         self._publish_changes()
         self._sync_behavior_services()
 
     def _on_timer(self):
-        events = self.machine.tick(time.monotonic())
+        now = self._freshness_now()
+        events = [] if now is None else self.machine.tick(now)
         self._log_events(events)
         self._publish_changes()
         self._sync_behavior_services()
 
     def _on_enable(self, request, response):
-        events = self.machine.set_enabled(request.data, time.monotonic())
+        now = self._freshness_now()
+        events = self.machine.set_enabled(request.data, 0.0 if now is None else now)
         response.success = True
         response.message = "enabled" if request.data else "stopped"
         self._log_events(events)

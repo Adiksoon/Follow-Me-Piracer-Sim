@@ -9,6 +9,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     package_share = get_package_share_directory("piracer_state_manager")
     return LaunchDescription([
+        DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument(
             "search_enable_service",
             default_value="/search/enable",
@@ -26,7 +27,10 @@ def generate_launch_description():
             output="screen",
             parameters=[
                 package_share + "/config/state_manager.yaml",
-                {"search_enable_service": LaunchConfiguration("search_enable_service")},
+                {
+                    "search_enable_service": LaunchConfiguration("search_enable_service"),
+                    "use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool),
+                },
             ],
         ),
         Node(
