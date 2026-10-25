@@ -383,6 +383,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._last_accepted_odom_stamp_ns = None
         node._last_ros_time_ns = None
         node._localization_reason = None
+        node._tf_snapshot_attempted = False
         node._now_ns = 10_000_000_000
         node._tf_buffer = type("TFBuffer", (), {"clear": lambda self: None})()
         node._action = FakeAction()
@@ -422,6 +423,9 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.calls = []
                 self.missing = set()
                 self.errors = {}
+                self.snapshot_calls = 0
+                self.snapshot_error = None
+                self.snapshot_yaml = "base_link:\n  parent: 'vo_odom'\n"
 
             def lookup_transform(self, target, source, stamp):
                 self.calls.append((target, source, stamp.nanoseconds))
@@ -439,6 +443,12 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
             def clear(self):
                 self.calls.clear()
+
+            def all_frames_as_yaml(self):
+                self.snapshot_calls += 1
+                if self.snapshot_error is not None:
+                    raise self.snapshot_error
+                return self.snapshot_yaml
 
         node._tf_buffer = TFBuffer()
         node._tf_buffer.expected_exception = self.module.ExtrapolationException
@@ -630,9 +640,13 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, handle.cancel_count)
         self.assertEqual({"previous": 3}, node._failed_attempts)
         self.assertEqual(1, len(warnings))
+        self.assertEqual(1, node._tf_buffer.snapshot_calls)
         self.assertIn("selected_measurement_stamp_ns=9950000000", warnings[0])
         self.assertIn("target_frame='map'", warnings[0])
         self.assertIn("exception_message='newest map failure'", warnings[0])
+        self.assertIn(
+            f"buffer_snapshot_yaml={node._tf_buffer.snapshot_yaml!r}", warnings[0]
+        )
 
     def test_stale_candidates_cannot_rescue_localization(self):
         node = self.make_localization_node()
@@ -722,6 +736,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
                                  node._localization_invalidated_at_ns)
                 self.assertEqual(reason, node._localization_reason)
                 self.assertEqual(1, len(warnings))
+                self.assertEqual(0, node._tf_buffer.snapshot_calls)
                 self.assertIn("selected_measurement_stamp_ns=9950000000", warnings[0])
                 self.assertIn("exception_class=RuntimeError", warnings[0])
 
@@ -902,6 +917,115 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.assertIn("exception_class=RuntimeError", warning)
                 self.assertIn("exception_message='complete TF failure detail'", warning)
 
+    def test_exhausted_tf_candidates_capture_once_after_goal_invalidation(self):
+        node = self.make_localization_node()
+        warnings = []
+        events = []
+        node._logger.warning = warnings.append
+        node._localization_available = True
+        node._last_accepted_odom_stamp_ns = 9_900_000_000
+        handle = FakeHandle()
+        candidate = self.candidate("active")
+        node._active_goal = {
+            "token": 73, "candidate": candidate,
+            "identity": node._goal_identity(candidate, "map"),
+            "epoch": 0, "is_retry": False, "handle": handle,
+            "cancel_requested": False, "cancel_reason": None,
+        }
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        node._tf_buffer.missing.add("vo_odom")
+        node._tf_buffer.snapshot_yaml = (
+            "base_link:\n  parent: 'vo_odom'\n"
+            "vo_odom:\n  parent: 'map'\n"
+        )
+        node._reset_challenger = lambda: events.append("challenger_reset")
+        cancel_active_goal = node._cancel_active_goal
+        node._cancel_active_goal = lambda reason: (
+            events.append("cancel_started") or cancel_active_goal(reason)
+        )
+        all_frames_as_yaml = node._tf_buffer.all_frames_as_yaml
+        def capture_yaml():
+            events.append("buffer_snapshot")
+            self.assertFalse(node._localization_available)
+            self.assertTrue(node._active_goal["cancel_requested"])
+            return all_frames_as_yaml()
+        node._tf_buffer.all_frames_as_yaml = capture_yaml
+
+        with patch.object(self.module.time, "monotonic_ns", side_effect=[101, 102, 103]):
+            self.assertIsNone(node._localization_pose("map"))
+
+        self.assertEqual(["challenger_reset", "cancel_started", "buffer_snapshot"], events)
+        self.assertEqual(1, node._tf_buffer.snapshot_calls)
+        self.assertTrue(node._active_goal["localization_invalidated"])
+        self.assertEqual(1, handle.cancel_count)
+        self.assertEqual(1, len(warnings))
+        warning = warnings[0]
+        self.assertIn("exception_message='vo_odom'", warning)
+        self.assertIn("tf_failure_monotonic_ns=101", warning)
+        self.assertIn("buffer_snapshot_start_monotonic_ns=102", warning)
+        self.assertIn("buffer_snapshot_end_monotonic_ns=103", warning)
+        self.assertIn(f"buffer_snapshot_yaml={node._tf_buffer.snapshot_yaml!r}", warning)
+        self.assertIn("buffer_snapshot_capture_error=None", warning)
+
+    def test_older_successful_tf_fallback_does_not_capture(self):
+        node = self.make_localization_node()
+        node._localization_available = True
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        node._odom_info_callback(self.odom_info(9_950_000_000))
+        node._tf_buffer.errors[("vo_odom", 9_950_000_000)] = (
+            self.module.ExtrapolationException("newer unavailable")
+        )
+
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+        self.assertEqual(3, len(node._tf_buffer.calls))
+        self.assertEqual(0, node._tf_buffer.snapshot_calls)
+        self.assertTrue(node._localization_available)
+
+    def test_non_tf_invalidations_and_startup_tf_warning_do_not_capture(self):
+        node = self.make_localization_node()
+        node._localization_available = True
+        node._odom_info_callback(self.odom_info(10_000_000_000, lost=True))
+        self.assertEqual(0, node._tf_buffer.snapshot_calls)
+
+        node = self.make_localization_node()
+        node._localization_available = True
+        node._now_ns = 11_000_000_000
+        node._odom_info_callback(self.odom_info(9_000_000_000))
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual(0, node._tf_buffer.snapshot_calls)
+
+        node = self.make_localization_node()
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        node._tf_buffer.missing.add("vo_odom")
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertFalse(node._localization_available)
+        self.assertEqual(0, node._tf_buffer.snapshot_calls)
+
+    def test_capture_failure_keeps_warning_and_one_shot_attempt(self):
+        node = self.make_localization_node()
+        warnings = []
+        node._logger.warning = warnings.append
+        node._localization_available = True
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        node._tf_buffer.missing.add("vo_odom")
+        node._tf_buffer.snapshot_error = RuntimeError("yaml unavailable")
+
+        with patch.object(self.module.time, "monotonic_ns", side_effect=[201, 202, 203]):
+            self.assertIsNone(node._localization_pose("map"))
+
+        self.assertFalse(node._localization_available)
+        self.assertTrue(node._tf_snapshot_attempted)
+        self.assertEqual(1, len(warnings))
+        self.assertIn("buffer_snapshot_capture_error=\"RuntimeError: 'yaml unavailable'\"", warnings[0])
+
+        node._localization_available = True
+        node._now_ns += 100_000_000
+        node._odom_info_callback(self.odom_info(10_050_000_000))
+        with patch.object(self.module.time, "monotonic_ns", side_effect=[301, 302, 303]):
+            self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual(1, node._tf_buffer.snapshot_calls)
+        self.assertEqual(2, len(warnings))
+
     def test_tf_failure_warning_is_suppressed_for_repeated_same_reason(self):
         node = self.make_localization_node()
         warnings = []
@@ -926,6 +1050,21 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(boundary, node._localization_invalidated_at_ns)
         self.assertEqual(1, handle.cancel_count)
         self.assertEqual(1, len(warnings))
+        self.assertEqual(1, node._tf_buffer.snapshot_calls)
+        self.assertTrue(node._tf_snapshot_attempted)
+
+    def test_snapshot_attempt_flag_survives_recovery_enable_and_clock_regression(self):
+        node = self.make_localization_node()
+        node._tf_snapshot_attempted = True
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        self.assertIsNotNone(node._localization_pose("map"))
+        self.assertTrue(node._tf_snapshot_attempted)
+
+        node._handle_clock_regression(1_000_000_000)
+        self.assertTrue(node._tf_snapshot_attempted)
+        response = types.SimpleNamespace(success=None, message="")
+        node._set_search(types.SimpleNamespace(data=True), response)
+        self.assertTrue(node._tf_snapshot_attempted)
 
     def test_successful_tf_lookups_emit_no_failure_diagnostic(self):
         node = self.make_localization_node()
@@ -936,6 +1075,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
 
         self.assertEqual(2, len(node._tf_buffer.calls))
+        self.assertEqual(0, node._tf_buffer.snapshot_calls)
         self.assertEqual([], warnings)
 
     def test_recovery_before_terminal_result_waits_then_fresh_data_allows_next_goal(self):

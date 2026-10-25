@@ -2,6 +2,7 @@
 
 from collections import deque
 import math
+import time
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -88,6 +89,7 @@ class SearchNode(Node):
         self._last_accepted_odom_stamp_ns = None
         self._last_ros_time_ns = None
         self._localization_reason = None
+        self._tf_snapshot_attempted = False
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -157,7 +159,8 @@ class SearchNode(Node):
         self._localization_reason = "ROS clock moved backwards"
 
     def _invalidate_localization(
-        self, reason, lost_stamp_ns=None, diagnostic_details=None
+        self, reason, lost_stamp_ns=None, diagnostic_details=None,
+        tf_failure_monotonic_ns=None,
     ):
         was_available = self._localization_available
         boundaries = [self._localization_invalidated_at_ns, self._last_accepted_odom_stamp_ns]
@@ -172,6 +175,28 @@ class SearchNode(Node):
         self._odom_info.clear()
         self._reset_challenger()
         self._mark_owned_goal_localization_invalidated("localization_invalidated")
+        if (was_available and tf_failure_monotonic_ns is not None
+                and not self._tf_snapshot_attempted):
+            self._tf_snapshot_attempted = True
+            snapshot_started_ns = time.monotonic_ns()
+            snapshot_yaml = None
+            capture_error = None
+            try:
+                snapshot_yaml = self._tf_buffer.all_frames_as_yaml()
+            except Exception as exc:
+                capture_error = f"{type(exc).__name__}: {str(exc)!r}"
+            snapshot_ended_ns = time.monotonic_ns()
+            snapshot_details = (
+                f"tf_failure_monotonic_ns={tf_failure_monotonic_ns}, "
+                f"buffer_snapshot_start_monotonic_ns={snapshot_started_ns}, "
+                f"buffer_snapshot_end_monotonic_ns={snapshot_ended_ns}, "
+                f"buffer_snapshot_yaml={snapshot_yaml!r}, "
+                f"buffer_snapshot_capture_error={capture_error!r}"
+            )
+            if diagnostic_details is None:
+                diagnostic_details = snapshot_details
+            else:
+                diagnostic_details += "; " + snapshot_details
         if was_available or self._localization_reason != reason:
             message = f"Search localization invalidated: {reason}"
             if diagnostic_details is not None:
@@ -237,6 +262,15 @@ class SearchNode(Node):
                         target_frame, base_frame, measurement_time
                     )
                 except Exception as exc:
+                    availability_exception = isinstance(exc, (
+                        LookupException,
+                        ConnectivityException,
+                        ExtrapolationException,
+                        TimeoutException,
+                    ))
+                    failure_monotonic_ns = (
+                        time.monotonic_ns() if availability_exception else None
+                    )
                     diagnostic_details = (
                         f"selected_measurement_stamp_ns={stamp_ns}, "
                         f"requested_stamp_ns={measurement_time.nanoseconds}, "
@@ -245,14 +279,11 @@ class SearchNode(Node):
                         f"exception_class={type(exc).__name__}, "
                         f"exception_message={str(exc)!r}"
                     )
-                    if isinstance(exc, (
-                        LookupException,
-                        ConnectivityException,
-                        ExtrapolationException,
-                        TimeoutException,
-                    )):
+                    if availability_exception:
                         if first_failure is None:
-                            first_failure = (reason, diagnostic_details)
+                            first_failure = (
+                                reason, diagnostic_details, failure_monotonic_ns
+                            )
                         candidate_failed = True
                         break
                     self._invalidate_localization(
@@ -278,9 +309,10 @@ class SearchNode(Node):
                 return translation.x, translation.y, yaw
 
         if first_failure is not None:
-            reason, diagnostic_details = first_failure
+            reason, diagnostic_details, failure_monotonic_ns = first_failure
             self._invalidate_localization(
-                reason, diagnostic_details=diagnostic_details
+                reason, diagnostic_details=diagnostic_details,
+                tf_failure_monotonic_ns=failure_monotonic_ns,
             )
             return None
 
