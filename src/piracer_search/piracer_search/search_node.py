@@ -148,7 +148,9 @@ class SearchNode(Node):
             self.get_logger().warning("Search localization invalidated: ROS clock moved backwards")
         self._localization_reason = "ROS clock moved backwards"
 
-    def _invalidate_localization(self, reason, lost_stamp_ns=None):
+    def _invalidate_localization(
+        self, reason, lost_stamp_ns=None, diagnostic_details=None
+    ):
         was_available = self._localization_available
         boundaries = [self._localization_invalidated_at_ns, self._last_accepted_odom_stamp_ns]
         if lost_stamp_ns is not None and lost_stamp_ns > 0:
@@ -163,7 +165,10 @@ class SearchNode(Node):
         self._reset_challenger()
         self._mark_owned_goal_localization_invalidated("localization_invalidated")
         if was_available or self._localization_reason != reason:
-            self.get_logger().warning(f"Search localization invalidated: {reason}")
+            message = f"Search localization invalidated: {reason}"
+            if diagnostic_details is not None:
+                message += f"; {diagnostic_details}"
+            self.get_logger().warning(message)
         self._localization_reason = reason
 
     def _odom_info_callback(self, message):
@@ -207,17 +212,43 @@ class SearchNode(Node):
             clock_type=self.get_clock().clock_type,
         )
         base_frame = self.get_parameter("base_frame").value
+        target_frame = "vo_odom"
         try:
-            self._tf_buffer.lookup_transform("vo_odom", base_frame, measurement_time)
-        except Exception:
-            self._invalidate_localization("vo_odom to base frame TF unavailable")
+            self._tf_buffer.lookup_transform(
+                target_frame, base_frame, measurement_time
+            )
+        except Exception as exc:
+            diagnostic_details = (
+                f"selected_measurement_stamp_ns={stamp_ns}, "
+                f"requested_stamp_ns={measurement_time.nanoseconds}, "
+                f"ros_now_ns={now_ns}, age_ns={age_ns}, max_age_ns={max_age_ns}, "
+                f"target_frame={target_frame!r}, source_frame={base_frame!r}, "
+                f"exception_class={type(exc).__name__}, "
+                f"exception_message={str(exc)!r}"
+            )
+            self._invalidate_localization(
+                "vo_odom to base frame TF unavailable",
+                diagnostic_details=diagnostic_details,
+            )
             return None
+        target_frame = map_frame
         try:
             transform = self._tf_buffer.lookup_transform(
-                map_frame, base_frame, measurement_time
+                target_frame, base_frame, measurement_time
             )
-        except Exception:
-            self._invalidate_localization("map to base frame TF unavailable")
+        except Exception as exc:
+            diagnostic_details = (
+                f"selected_measurement_stamp_ns={stamp_ns}, "
+                f"requested_stamp_ns={measurement_time.nanoseconds}, "
+                f"ros_now_ns={now_ns}, age_ns={age_ns}, max_age_ns={max_age_ns}, "
+                f"target_frame={target_frame!r}, source_frame={base_frame!r}, "
+                f"exception_class={type(exc).__name__}, "
+                f"exception_message={str(exc)!r}"
+            )
+            self._invalidate_localization(
+                "map to base frame TF unavailable",
+                diagnostic_details=diagnostic_details,
+            )
             return None
 
         translation = transform.transform.translation

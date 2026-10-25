@@ -279,9 +279,12 @@ class SearchNodeCallbackTest(unittest.TestCase):
             def __init__(self):
                 self.calls = []
                 self.missing = set()
+                self.errors = {}
 
             def lookup_transform(self, target, source, stamp):
                 self.calls.append((target, source, stamp.nanoseconds))
+                if target in self.errors:
+                    raise self.errors[target]
                 if target in self.missing:
                     raise LookupError(target)
                 return types.SimpleNamespace(transform=types.SimpleNamespace(
@@ -503,6 +506,87 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.assertEqual(1, handle.cancel_count)
                 node._odom_info_callback(self.odom_info(10_000_000_000, lost=True))
                 self.assertEqual(1, handle.cancel_count)
+
+    def test_tf_lookup_failures_log_original_context_and_preserve_invalidation(self):
+        for target_frame, reason, expected_call_count in (
+            ("vo_odom", "vo_odom to base frame TF unavailable", 1),
+            ("map", "map to base frame TF unavailable", 2),
+        ):
+            with self.subTest(target_frame=target_frame):
+                node = self.make_localization_node()
+                warnings = []
+                node._logger.warning = warnings.append
+                node._localization_available = True
+                node._last_accepted_odom_stamp_ns = 9_900_000_000
+                candidate = self.candidate("active")
+                handle = FakeHandle()
+                node._active_goal = {
+                    "token": 71, "candidate": candidate,
+                    "identity": node._goal_identity(candidate, "map"),
+                    "epoch": 0, "is_retry": True, "handle": handle,
+                    "cancel_requested": False, "cancel_reason": None,
+                }
+                node._failed_attempts = {"prior": 2}
+                node._odom_info_callback(self.odom_info(9_900_000_000))
+                original_error = RuntimeError("complete TF failure detail")
+                node._tf_buffer.errors[target_frame] = original_error
+
+                self.assertIsNone(node._localization_pose("map"))
+
+                self.assertEqual(expected_call_count, len(node._tf_buffer.calls))
+                self.assertEqual(10_000_000_000,
+                                 node._localization_invalidated_at_ns)
+                self.assertTrue(node._active_goal["localization_invalidated"])
+                self.assertEqual(1, handle.cancel_count)
+                self.assertEqual({"prior": 2}, node._failed_attempts)
+                self.assertEqual(1, len(warnings))
+                warning = warnings[0]
+                self.assertIn(f"Search localization invalidated: {reason}", warning)
+                self.assertIn("selected_measurement_stamp_ns=9900000000", warning)
+                self.assertIn("requested_stamp_ns=9900000000", warning)
+                self.assertIn("ros_now_ns=10000000000", warning)
+                self.assertIn("age_ns=100000000", warning)
+                self.assertIn("max_age_ns=500000000", warning)
+                self.assertIn(f"target_frame='{target_frame}'", warning)
+                self.assertIn("source_frame='base_link'", warning)
+                self.assertIn("exception_class=RuntimeError", warning)
+                self.assertIn("exception_message='complete TF failure detail'", warning)
+
+    def test_tf_failure_warning_is_suppressed_for_repeated_same_reason(self):
+        node = self.make_localization_node()
+        warnings = []
+        node._logger.warning = warnings.append
+        node._localization_available = True
+        handle = FakeHandle()
+        node._active_goal = {
+            "token": 72, "candidate": self.candidate("active"),
+            "identity": node._goal_identity(self.candidate("active"), "map"),
+            "epoch": 0, "is_retry": False, "handle": handle,
+            "cancel_requested": False, "cancel_reason": None,
+        }
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        node._tf_buffer.missing.add("vo_odom")
+        self.assertIsNone(node._localization_pose("map"))
+        boundary = node._localization_invalidated_at_ns
+        self.assertEqual(1, len(warnings))
+
+        node._now_ns = 10_100_000_000
+        node._odom_info_callback(self.odom_info(10_050_000_000))
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual(boundary, node._localization_invalidated_at_ns)
+        self.assertEqual(1, handle.cancel_count)
+        self.assertEqual(1, len(warnings))
+
+    def test_successful_tf_lookups_emit_no_failure_diagnostic(self):
+        node = self.make_localization_node()
+        warnings = []
+        node._logger.warning = warnings.append
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+        self.assertEqual(2, len(node._tf_buffer.calls))
+        self.assertEqual([], warnings)
 
     def test_recovery_before_terminal_result_waits_then_fresh_data_allows_next_goal(self):
         node = self.make_localization_node()
