@@ -132,9 +132,9 @@ def _build_launch(context, *args, **kwargs):
     nav2_config = os.path.join(package_share, "config", "nav2_params.yaml")
     bt_path = os.path.join(package_share, "behavior_trees", "navigate_to_pose.xml")
     bt_through_poses_path = os.path.join(
-        get_package_share_directory("nav2_bt_navigator"),
+        package_share,
         "behavior_trees",
-        "navigate_through_poses_w_replanning_and_recovery.xml",
+        "navigate_through_poses_no_recovery.xml",
     )
     nav2_params = RewrittenYaml(
         source_file=nav2_config,
