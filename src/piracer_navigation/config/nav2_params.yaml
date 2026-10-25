@@ -206,8 +206,8 @@ velocity_smoother:
     feedback: OPEN_LOOP
     max_velocity: [0.05, 0.0, 0.2]
     min_velocity: [0.0, 0.0, -0.2]
-    max_accel: [0.05, 0.0, 0.02]
-    max_decel: [-0.10, 0.0, -0.02]
+    max_accel: [0.05, 0.0, 0.20]
+    max_decel: [-0.10, 0.0, -0.40]
     odom_topic: /visual_odom
     odom_duration: 0.10
     deadband_velocity: [0.0, 0.0, 0.0]
