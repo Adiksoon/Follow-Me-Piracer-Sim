@@ -33,5 +33,5 @@ ros2 run simulation_telemetry telemetry_recorder --ros-args \
 ```
 
 The defaults match this workspace: `/visual_odom`, `/sim012_target/odom`,
-`/piracer/cmd_vel`, `/sim012_target/cmd_vel`, the four `/piracer/sim_camera/*`
+`/piracer/cmd_vel`, `/sim012_target/cmd_vel`, the four `/sim_camera/*`
 image and CameraInfo topics, `/diagnostics`, and `/clock`.

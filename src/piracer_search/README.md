@@ -31,4 +31,4 @@ Run offline tests from the package directory:
 
     PYTHONPATH=. python3 -m unittest discover -s test -v
 
-`search.launch.py` starts Search by itself and defaults to `/map`.
+The full application starts Search through `piracer_state_manager/launch/search_state_manager.launch.py`.

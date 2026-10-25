@@ -1,0 +1,33 @@
+rtabmap:
+  ros__parameters:
+    use_sim_time: true
+
+    # Use the existing qualified Odometry topic; an empty frame selects topic input.
+    frame_id: "base_link"
+    odom_frame_id: ""
+    map_frame_id: "map"
+    publish_tf: true
+
+    # RGB + registered depth + color CameraInfo from the simulation camera.
+    subscribe_rgb: true
+    subscribe_depth: true
+    subscribe_rgbd: false
+    subscribe_stereo: false
+    subscribe_odom_info: false
+    rgbd_cameras: 1
+    approx_sync: true
+    approx_sync_max_interval: 0.020
+    topic_queue_size: 10
+    sync_queue_size: 10
+    qos_image: 0
+    qos_odom: 0
+    qos_camera_info: 0
+
+    # RTAB-Map core parameters are strings in this ROS wrapper.
+    "RGBD/CreateOccupancyGrid": "true"
+    "Grid/Sensor": "1"
+    "Grid/RangeMin": "0.05"
+    "Grid/RangeMax": "5.0"
+    "Grid/CellSize": "0.05"
+    "Grid/NormalsSegmentation": "true"
+    "Grid/MaxGroundAngle": "45"

@@ -155,12 +155,13 @@ class StateMachine:
         self.active = self.enabled
         if not self.enabled:
             return events
+        # usun po dodaniu reszty node
+        if self.state != SEARCH:
+            self._reset_state()
         if self.state == SEARCH:
-            self.window.append(bool(positive))
-            if sum(self.window) >= self.acquire_hits:
-                self._reset_state(ACQUIRE, now)
-                events.append("SEARCH_TO_ACQUIRE")
-        elif self.state == ACQUIRE:
+            return events
+
+        if self.state == ACQUIRE:
             self.hit_streak = self.hit_streak + 1 if positive else 0
             if self.hit_streak >= self.follow_confirm_hits:
                 self._reset_state(FOLLOW)

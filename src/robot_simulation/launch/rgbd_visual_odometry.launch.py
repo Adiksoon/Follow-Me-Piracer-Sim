@@ -36,15 +36,15 @@ def generate_launch_description():
         remappings=[
             (
                 "/visual_vo/rgb/image",
-                "/piracer/sim_camera/color/image_raw",
+                "/sim_camera/color/image_raw",
             ),
             (
                 "/visual_vo/depth/image",
-                "/piracer/sim_camera/depth/image_raw",
+                "/sim_camera/depth/image_raw",
             ),
             (
                 "/visual_vo/rgb/camera_info",
-                "/piracer/sim_camera/color/camera_info",
+                "/sim_camera/color/camera_info",
             ),
             ("/visual_vo/odom", "/visual_odom"),
         ],

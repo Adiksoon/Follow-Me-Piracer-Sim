@@ -94,3 +94,41 @@ def test_follow_publishes_proportional_command_for_fresh_base_link_point():
         node.stop_and_destroy()
         if not was_initialized and rclpy.ok():
             rclpy.shutdown()
+
+
+def test_disabled_follow_is_silent_and_disable_publishes_one_stop_command():
+    was_initialized = rclpy.ok()
+    if not was_initialized:
+        rclpy.init()
+    node = PiracerFollowNode()
+    spy = _PublisherSpy()
+    node._command_publisher = spy
+    try:
+        node._control_cycle()
+        assert spy.messages == []
+
+        enabled = node._set_enabled(SetBool.Request(data=True), SetBool.Response())
+        assert enabled.success
+        assert len(spy.messages) == 1
+
+        node._control_cycle()
+        assert len(spy.messages) == 2
+        assert spy.messages[-1].linear.x == 0.0
+        assert spy.messages[-1].angular.z == 0.0
+
+        disabled = node._set_enabled(SetBool.Request(data=False), SetBool.Response())
+        assert disabled.success
+        assert len(spy.messages) == 3
+        assert spy.messages[-1].linear.x == 0.0
+        assert spy.messages[-1].angular.z == 0.0
+
+        repeated_disable = node._set_enabled(
+            SetBool.Request(data=False), SetBool.Response()
+        )
+        assert repeated_disable.success
+        node._control_cycle()
+        assert len(spy.messages) == 3
+    finally:
+        node.stop_and_destroy()
+        if not was_initialized and rclpy.ok():
+            rclpy.shutdown()

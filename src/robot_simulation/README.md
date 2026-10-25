@@ -34,16 +34,32 @@ the adjacent production_world_preview_20261020_01 directory.
 After sourcing ROS 2 Humble and this workspace:
 
 ```bash
-ros2 launch robot_simulation piracer_sim.launch.py \
+ros2 launch robot_simulation piracer_sim_base.launch.py \
   gui:=true camera_enabled:=true camera_viewer_enabled:=true \
   visual_odometry_enabled:=false suitcase_control_gui:=false yolo_enabled:=false
 ```
 
 This opens Gazebo and one RGB camera viewer with the existing Ackermann command
 adapter and drive plugin. It does not start VO, YOLO, RViz, SLAM or Nav2 and sends
-no movement commands. The camera topic is /piracer/sim_camera/color/image_raw.
+no movement commands. The camera topic is /sim_camera/color/image_raw.
 The visual_odometry_enabled argument defaults to true to preserve the previous
 launch behavior; VO is always skipped when the camera is disabled.
+
+## Full program
+
+The one-command simulation, VO, RTAB-Map, Nav2, perception, and state-managed
+Search entrypoint is:
+
+```bash
+ros2 launch piracer_state_manager piracer_sim.launch.py
+```
+
+Gazebo starts paused by default. After inspecting the graph, press Play to
+advance simulation time and produce sensor data. The State Manager then enables
+Search after the first valid YOLO message. Once the map, frontier, and Nav2
+action are ready, Search may send a navigation goal and move the robot. Use
+`start_paused:=false` only when automatic startup without an inspection pause is
+intended. This launcher does not start RViz.
 
 ## DATA-01 suitcase dataset capture
 
@@ -75,14 +91,13 @@ DATA-01 camera session; it does not launch Gazebo itself. Diagnostic single
 captures use the separate `--diagnostic-single-shot` mode and require an
 explicit output directory.
 
-Current limitation (2026-10-22): DATA-01's approved production-world hash is
-pinned to `71111ed9cfd933117c3ac7013bed41c85d342eb5cc6b8e4e0eddbeeb5ae39c7e`,
-but the current `sala_laboratoryjna_production.world` has SHA-256
-`76570add543fbd17cbcd3030ab53e9306c0bec802805f965138390f84cfb1947`. The
-offline plan command rejects this world, and the DATA-01 launch has a matching
-pre-launch integrity check. The commands above describe the intended workflow;
-DATA-01 cannot currently use the production world until this pin is reconciled
-against the approved world revision. Do not bypass the check.
+DATA-01 pins the exact source worlds, suitcase mesh, and furniture models before
+planning or capture. After removing the unused world-level `gazebo_ros_state`
+plugin on 2026-10-25, the production world SHA-256 is
+`a2db8fa83e785b87629c93dd750ec76e4744f44113989ed68e1eee70cdefe188`. This is now
+the production-world pin in both `dataset_capture.launch.py` and
+`suitcase_dataset_generator.py`. The independent empty-world, mesh, and furniture
+hashes remain unchanged; all integrity checks stay enabled.
 
 ## Production classroom scene details
 
@@ -93,4 +108,7 @@ and procedural planter asset were authored locally for this scene; no external
 meshes or textures were copied. These details are intended to add visual
 texture for a future VO evaluation. Their appearance still needs author visual
 review, and no VO improvement has been established. Existing room collisions,
-furniture, suitcase, spawn positions, physics and plugins are unchanged.
+furniture, suitcase, spawn positions, and physics
+remain unchanged. The unused world-level gazebo_ros_state plugin in the
+piracer_ground_truth namespace was removed. The separate joint-state
+publisher in the PiRacer URDF remains.

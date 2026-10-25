@@ -14,8 +14,11 @@ Status: author-approved production default, recorded 2026-10-11.
   `verification/new_suitcase_preview_20261008/yolo_frames/production_scene_first_frame_20261009T122313Z.png`
 - Reference image SHA-256:
   `13cf36ce67893807922e89bcc9c88f616779ac5b975bc8e2e48922fe8ad44ef7`
-- Production world SHA-256:
+- World SHA-256 at the original author review (2026-10-11):
   `71111ed9cfd933117c3ac7013bed41c85d342eb5cc6b8e4e0eddbeeb5ae39c7e`
+- Current production source world SHA-256 (2026-10-25, after removing the unused
+  world-level `gazebo_ros_state` plugin):
+  `a2db8fa83e785b87629c93dd750ec76e4744f44113989ed68e1eee70cdefe188`
 - Suitcase DAE SHA-256:
   `e4d75b678e566289f15d58fdc7216c93f2199a34bb82377bd785d1e94a14f1ca`
 - Furniture model hashes:
@@ -59,7 +62,9 @@ shell red; attribution and the source archive are retained with the project.
 
 ## Verification boundary
 
-The production selection is tied to the exact saved frame and the copied world
-and asset hashes above. Source files and model references were checked
-offline; Gazebo was not started as part of recording this selection. This
-record does not claim a new runtime, physics, or YOLO-quality measurement.
+The original production selection is tied to the exact saved frame and the
+2026-10-11 world and asset hashes above. The current source hash is recorded
+separately because the unused world-level state plugin was removed on
+2026-10-25. Source files and model references were checked offline; Gazebo was
+not started as part of recording either hash. This record does not claim a new
+runtime, physics, or YOLO-quality measurement.

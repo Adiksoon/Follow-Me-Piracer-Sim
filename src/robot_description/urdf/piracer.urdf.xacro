@@ -14,8 +14,6 @@
     new author choice, not a study result or a measured physical OAK-D mount.
   -->
   <xacro:arg name="include_camera" default="false"/>
-  <xacro:arg name="steering_trace_enabled" default="false"/>
-  <xacro:arg name="steering_trace_path" default=""/>
   <!-- SYMULACJA_RGBD_PROTOTYPE_V1: 16:9 raster scaled from the unit's factory RGB calibration raster. -->
   <xacro:arg name="camera_x" default="0.236"/>
   <xacro:arg name="camera_y" default="0.0"/>
@@ -94,10 +92,14 @@
   <link name="left_steer">
     <pose>0 0 0 0 0 0</pose>
 
+    <!-- Approximate hub/knuckle assembly, not just the visible 2 mm shaft.
+         Simulation estimate, not a measured PiRacer part. The former 0.746 g
+         shaft had Izz=1.492e-9 between the chassis and a 68.563 g wheel,
+         creating a large inertia ratio across the ODE constraints. -->
     <inertial>
-      <mass value="0.000746"/>
+      <mass value="0.010"/>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <inertia ixx="3.08347e-08" ixy="0" ixz="0" iyy="3.08347e-08" iyz="0" izz="1.492e-09"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
     </inertial>
 
     <collision name="left_steer_collision">
@@ -119,10 +121,11 @@
   <link name="right_steer">
     <pose>0 0 0 0 0 0</pose>
 
+    <!-- Same approximate hub/knuckle inertia as the left side. -->
     <inertial>
-      <mass value="0.000746"/>
+      <mass value="0.010"/>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <inertia ixx="3.08347e-08" ixy="0" ixz="0" iyy="3.08347e-08" iyz="0" izz="1.492e-09"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
     </inertial>
 
     <collision name="right_steer_collision">
@@ -542,7 +545,7 @@
     <child link="left_steer"/>
     <axis xyz="0 0 1" rpy="0 0 0"/>
     <limit lower="-0.7853981633974483" upper="0.7853981633974483" effort="10000" velocity="1000"/>
-    <dynamics damping="0.0" friction="0.0"/>
+    <dynamics damping="0.001" friction="0.0"/>
   </joint>
 
   <!-- JOINT: right_steer -->
@@ -552,8 +555,19 @@
     <child link="right_steer"/>
     <axis xyz="0 0 1" rpy="0 0 0"/>
     <limit lower="-0.7853981633974483" upper="0.7853981633974483" effort="10000" velocity="1000"/>
-    <dynamics damping="0.0" friction="0.0"/>
+    <dynamics damping="0.001" friction="0.0"/>
   </joint>
+
+  <!-- ODE integrates steering damping implicitly. For the existing P=0.0064
+       and estimated wheel+knuckle yaw inertia 3.81e-5 kg m^2, critical damping
+       is about 0.001 N m s/rad. This is a starting estimate, not a LIVE result.
+       MuJoCo armature and servo/contact parameters are not transferred. -->
+  <gazebo reference="left_steer_joint">
+    <implicitSpringDamper>true</implicitSpringDamper>
+  </gazebo>
+  <gazebo reference="right_steer_joint">
+    <implicitSpringDamper>true</implicitSpringDamper>
+  </gazebo>
 
   <!-- JOINT: board -->
   <joint name="board_joint" type="fixed">
@@ -673,40 +687,39 @@
   </joint>
   </xacro:if>
 
-  <!-- PLUGIN: selected 1 kg low-speed drive candidate -->
+  <!--
+    PLUGIN: upstream ROS Humble GazeboRosAckermannDrive 3.9.0.
+    PID values below are provisional, untested starting estimates.
+    The upstream plugin changes the world friction model to cone_model on load.
+  -->
   <gazebo>
-    <plugin name="diff_drive_controller" filename="libgazebo_ros_diff_drive.so">
+    <plugin name="gazebo_ros_ackermann_drive" filename="libgazebo_ros_ackermann_drive.so">
       <ros>
         <namespace>/piracer</namespace>
-        <remapping>cmd_vel:=cmd_vel</remapping>
-        <remapping>odom:=/odom</remapping>
+        <remapping>cmd_vel:=ackermann_cmd_vel</remapping>
       </ros>
-      <update_rate>1000.0</update_rate>
-      <left_joint>rear_left_tire_joint</left_joint>
-      <right_joint>rear_right_tire_joint</right_joint>
-      <wheel_separation>0.171</wheel_separation>
-      <wheel_diameter>0.068</wheel_diameter>
-      <max_wheel_torque>0.0045</max_wheel_torque>
+      <update_rate>100.0</update_rate>
+      <front_left_joint>front_left_tire_joint</front_left_joint>
+      <front_right_joint>front_right_tire_joint</front_right_joint>
+      <rear_left_joint>rear_left_tire_joint</rear_left_joint>
+      <rear_right_joint>rear_right_tire_joint</rear_right_joint>
+      <left_steering_joint>left_steer_joint</left_steering_joint>
+      <right_steering_joint>right_steer_joint</right_steering_joint>
+      <max_speed>0.20</max_speed>
+      <max_steer>0.554</max_steer>
+      <left_steering_pid_gain>0.0064 0 0</left_steering_pid_gain>
+      <left_steering_i_range>0 0</left_steering_i_range>
+      <right_steering_pid_gain>0.0064 0 0</right_steering_pid_gain>
+      <right_steering_i_range>0 0</right_steering_i_range>
+      <linear_velocity_pid_gain>0.0031 0 0</linear_velocity_pid_gain>
+      <linear_velocity_i_range>0 0</linear_velocity_i_range>
       <publish_odom>false</publish_odom>
       <publish_odom_tf>false</publish_odom_tf>
       <publish_wheel_tf>false</publish_wheel_tf>
+      <publish_distance>false</publish_distance>
+      <publish_steerangle>false</publish_steerangle>
       <odometry_frame>odom</odometry_frame>
       <robot_base_frame>base_link</robot_base_frame>
-    </plugin>
-    <plugin name="piracer_kinematic_steering" filename="libpiracer_kinematic_steering.so">
-      <ros>
-        <namespace>/piracer</namespace>
-        <remapping>cmd_vel:=cmd_vel</remapping>
-      </ros>
-      <left_steering_joint>left_steer_joint</left_steering_joint>
-      <right_steering_joint>right_steer_joint</right_steering_joint>
-      <wheelbase_m>0.155</wheelbase_m>
-      <front_track_m>0.148</front_track_m>
-      <max_steering_angle_rad>0.7853981633974483</max_steering_angle_rad>
-      <max_steering_rate_radps>0.10</max_steering_rate_radps>
-      <xacro:if value="$(arg steering_trace_enabled)">
-        <trace_path>$(arg steering_trace_path)</trace_path>
-      </xacro:if>
     </plugin>
     <!-- Feed actual Gazebo joint positions to robot_state_publisher. Keep
          wheel TF publication disabled in the drive plugin so each link
@@ -757,7 +770,7 @@
       </camera>
       <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
         <ros>
-          <namespace>/piracer/sim_camera</namespace>
+          <namespace>/sim_camera</namespace>
           <remapping>sim_camera/image_raw:=color/image_raw</remapping>
           <remapping>sim_camera/camera_info:=color/camera_info</remapping>
           <remapping>sim_camera/depth/image_raw:=depth/image_raw</remapping>

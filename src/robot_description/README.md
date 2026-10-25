@@ -1,18 +1,61 @@
-# PiRacer robot description
+# Opis modelu PiRacer
 
-Current steering amendment (2026-10-18): the front-wheel limit is now 45 degrees
-as an approximate author-observed simulation assumption. The matching planning
-radius is 0.25 m. Historical RUN48/RUN49 results below apply to their recorded
-settings and do not qualify the new tighter-turn behavior or physical hardware.
+Pakiet `robot_description` zawiera opis URDF/Xacro modelu, siatki wizualne i
+teksty licencji. Nie uruchamia własnych węzłów. Pakiet `robot_simulation`
+składa symulację Gazebo, rozwija Xacro i spawnuje model.
 
-Pochodzenie: [PiRacer-Gazebo-Simulation](https://github.com/lalywr2000/PiRacer-Gazebo-Simulation), Sujong Ha (lalywr2000), MIT, przypięty upstream commit db9f49c85e4417ec3566d0d87702f49febbd3ee1. Oryginalny tekst licencji znajduje się w `third_party_licenses/PiRacer-Gazebo-Simulation-MIT.txt`.
+## Zawartość modelu
 
-Zachowano strukturę modelu Xacro i siedem upstreamowych meshy STL. Opis został dostosowany do pakietu `robot_description` i ramy `base_link`; kamera jest oznaczona jako przybliżenie symulacyjne, nie jako pomiar fizycznego montażu.
+- `urdf/piracer.urdf.xacro` opisuje podwozie PiRacera, koła, skręt i ramy
+  sensorów.
+- `meshes/` zawiera siedem upstreamowych siatek STL: `board`, `chassis`,
+  `cover`, `disk`, `motor`, `rpi` i `tire`.
+- `third_party_licenses/` zawiera oryginalny tekst licencji użytych zasobów.
+- Opcjonalna kamera RGB-D jest przybliżeniem renderowanym przez Gazebo. Nie
+  symuluje pomiaru stereo OAK-D ani fizycznego montażu kamery. Xacro domyślnie
+  jej nie dołącza; główny launch ustawia `camera_enabled:=true` domyślnie.
+  Obrazy są publikowane w przestrzeni `/sim_camera`.
 
-## Aktywny baseline produkcyjny symulacji
+Pojazd i siedem siatek pochodzą z
+[`PiRacer-Gazebo-Simulation`](https://github.com/lalywr2000/PiRacer-Gazebo-Simulation)
+autorstwa Sujong Ha, z licencją MIT i przypiętym commitem
+`db9f49c85e4417ec3566d0d87702f49febbd3ee1`. Lokalny tekst licencji znajduje
+się w `third_party_licenses/PiRacer-Gazebo-Simulation-MIT.txt`.
 
-`urdf/piracer.urdf.xacro` jest aktywnym baseline'em symulacyjnym PiRacera o masie 1 kg. Używa `gazebo_ros_diff_drive` do napędu tylnych kół oraz `piracer_kinematic_steering` do ograniczonego, kinematycznego sterowania przednimi kołami. Domyślny launch `ros2 launch robot_simulation piracer_sim.launch.py` uruchamia scenę `sala_laboratoryjna_production.world` i spawnuje model na wysokości `z=0.019 m`.
+## Napęd w bieżącym Xacro
 
-Status oznacza zatwierdzony punkt startowy do dalszego rozwoju Follow-Me, YOLO i visual odometry. RUN48 sprawdził ograniczoną jazdę do przodu i tyłu, skręt w obie strony, zatrzymania, kontakt czterech opon oraz brak LCP i wartości niefinitywnych. RUN49 potwierdził produkcyjny launch, RGB-D, wyjście `/visual_odom` i zatrzymanie po krótkiej komendzie ruchu. Astra wydała `PASS` na użycie tego wariantu jako baseline'u dla dalszego rozwoju.
+Bieżący plik modelu używa upstreamowego pluginu ROS Humble
+`gazebo_ros_ackermann_drive` z pakietu `gazebo_plugins`. Plugin steruje
+czterema kołami jezdnymi i dwoma przegubami skrętu. Przyjmuje komendę
+`/piracer/ackermann_cmd_vel`; launch symulacji uruchamia
+`ackermann_twist_adapter`, który przekształca standardową komendę
+`/cmd_vel` na format Ackermanna i publikuje wynik na
+`/piracer/ackermann_cmd_vel`.
 
-To zatwierdzenie dotyczy baseline'u **symulacyjnego**. Nie potwierdza dokładności visual odometry, jakości detekcji YOLO ani zachowania Follow-Me, a także nie kwalifikuje fizycznego PiRacera. Szczegóły i surowe wyniki pozostają w `verification/piracer_1kg_physics_stabilization_20261011/RUN48_diff_drive_steering_20261013/` oraz `verification/piracer_1kg_physics_stabilization_20261011/RUN49_production_integration_20261013/`.
+Ustawienia Xacro ograniczają prędkość do `0.20 m/s`, a kąt zadanego skrętu
+pluginu do `0.554 rad`. Mechaniczne granice przegubów skrętu wynoszą osobno
+`+/-0.785398 rad` (`+/-45°`). Wartości PID są wstępne i nie zostały
+zweryfikowane w runtime. Plugin Ackermanna nie publikuje odometrii ani TF;
+odometryczna ścieżka symulacji jest konfigurowana osobno przez
+`robot_simulation`.
+
+Suma jawnie przypisanych mas w rozwiniętym bieżącym URDF wynosi `1.018508 kg`.
+To wartość wynikająca z parametrów modelu, a nie pomiar masy fizycznego
+PiRacera.
+
+## Uruchomienie i zakres dowodów
+
+Domyślne polecenie uruchamiające model to:
+
+```bash
+ros2 launch robot_simulation piracer_sim_base.launch.py
+```
+
+Launch wybiera `sala_laboratoryjna_production.world` i domyślnie spawnuje
+pojazd na wysokości `z=0.019 m`. Szczegóły kompozycji symulacji należą do
+README pakietu `robot_simulation`.
+
+Raporty RUN48 i RUN49 dokumentują wcześniejsze, zapisane konfiguracje. Nie
+potwierdzają bieżącego Xacro z pluginem Ackermanna ani jego parametrów.
+Przytaczając te wyniki, należy podawać dokładną konfigurację z odpowiedniego
+raportu. Żaden z tych raportów nie kwalifikuje fizycznego pojazdu.

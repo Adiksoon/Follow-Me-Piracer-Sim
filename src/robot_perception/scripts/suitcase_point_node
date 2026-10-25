@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Publish one exact-stamp camera-frame point for the best valid detection."""
+
+import rclpy
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PointStamped
+from message_filters import Subscriber, TimeSynchronizer
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CameraInfo, Image
+from vision_msgs.msg import Detection2DArray
+
+from robot_perception.rgbd_geometry import estimate_detection_points
+from robot_perception.target_point import select_target_point
+
+
+class SuitcasePointNode(Node):
+    """Convert synchronized production detections and depth into one point."""
+
+    def __init__(self) -> None:
+        super().__init__("suitcase_point_node")
+        self.declare_parameter("detection_topic", "/yolo/detections")
+        self.declare_parameter("depth_topic", "/sim_camera/depth/image_raw")
+        self.declare_parameter(
+            "color_camera_info_topic", "/sim_camera/color/camera_info"
+        )
+        self.declare_parameter(
+            "depth_camera_info_topic", "/sim_camera/depth/camera_info"
+        )
+        self.declare_parameter("point_topic", "/piracer/follow/target_point")
+
+        self._bridge = CvBridge()
+        self._point_publisher = self.create_publisher(
+            PointStamped,
+            str(self.get_parameter("point_topic").value),
+            10,
+        )
+        qos = qos_profile_sensor_data
+        self._subscribers = [
+            Subscriber(
+                self,
+                Detection2DArray,
+                str(self.get_parameter("detection_topic").value),
+                qos_profile=qos,
+            ),
+            Subscriber(
+                self,
+                Image,
+                str(self.get_parameter("depth_topic").value),
+                qos_profile=qos,
+            ),
+            Subscriber(
+                self,
+                CameraInfo,
+                str(self.get_parameter("color_camera_info_topic").value),
+                qos_profile=qos,
+            ),
+            Subscriber(
+                self,
+                CameraInfo,
+                str(self.get_parameter("depth_camera_info_topic").value),
+                qos_profile=qos,
+            ),
+        ]
+        # Retain sensor stamps until delayed detections arrive; 39 covers the measured trace.
+        self._synchronizer = TimeSynchronizer(self._subscribers, 39)
+        self._synchronizer.registerCallback(self._on_bundle)
+
+    def _on_bundle(
+        self,
+        detections: Detection2DArray,
+        depth_image: Image,
+        color_info: CameraInfo,
+        depth_info: CameraInfo,
+    ) -> None:
+        estimates = estimate_detection_points(
+            detections,
+            depth_image,
+            color_info,
+            depth_info,
+            self._bridge,
+        )
+        point = select_target_point(estimates)
+        if point is not None:
+            self._point_publisher.publish(point)
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = None
+    try:
+        node = SuitcasePointNode()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

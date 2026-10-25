@@ -22,9 +22,6 @@ def _build_simulation(context):
     simulation_share = get_package_share_directory("robot_simulation")
     assets_share = get_package_share_directory("simulation_assets")
     gazebo_share = get_package_share_directory("gazebo_ros")
-    piracer_plugin_lib = os.path.join(
-        get_package_prefix("piracer_gazebo_plugins"), "lib"
-    )
 
     xacro_path = os.path.join(description_share, "urdf", "piracer.urdf.xacro")
     default_world_path = os.path.join(
@@ -33,10 +30,6 @@ def _build_simulation(context):
     world_path = LaunchConfiguration("world").perform(context) or default_world_path
     camera_enabled = LaunchConfiguration("camera_enabled").perform(context).lower()
     camera_update_rate = LaunchConfiguration("camera_update_rate").perform(context)
-    steering_trace_enabled = (
-        LaunchConfiguration("steering_trace_enabled").perform(context).lower()
-    )
-    steering_trace_path = LaunchConfiguration("steering_trace_path").perform(context)
     yolo_enabled = LaunchConfiguration("yolo_enabled").perform(context).lower()
     yolo_backend = LaunchConfiguration("yolo_backend").perform(context).strip().lower()
     robot_description = xacro.process_file(
@@ -44,8 +37,6 @@ def _build_simulation(context):
         mappings={
             "include_camera": camera_enabled,
             "camera_update_rate": camera_update_rate,
-            "steering_trace_enabled": steering_trace_enabled,
-            "steering_trace_path": steering_trace_path,
         },
     ).toxml()
 
@@ -53,7 +44,11 @@ def _build_simulation(context):
         PythonLaunchDescriptionSource(
             os.path.join(gazebo_share, "launch", "gzserver.launch.py")
         ),
-        launch_arguments={"world": world_path, "factory": "true"}.items(),
+        launch_arguments={
+            "world": world_path,
+            "factory": "true",
+            "pause": LaunchConfiguration("start_paused"),
+        }.items(),
     )
     gazebo_client = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -65,6 +60,14 @@ def _build_simulation(context):
         package="robot_state_publisher",
         executable="robot_state_publisher",
         parameters=[{"robot_description": robot_description, "use_sim_time": True}],
+    )
+    ackermann_command_adapter = Node(
+        package="piracer_gazebo_plugins",
+        executable="ackermann_twist_adapter",
+        namespace="piracer",
+        parameters=[{"wheelbase_m": 0.155}],
+        remappings=[("/piracer/cmd_vel", "/cmd_vel")],
+        output="screen",
     )
     spawn_model = Node(
         package="gazebo_ros",
@@ -81,7 +84,6 @@ def _build_simulation(context):
     suitcase_control_gui = Node(
         package="rqt_robot_steering",
         executable="rqt_robot_steering",
-        remappings=[("/cmd_vel", "/piracer/cmd_vel")],
         condition=IfCondition(LaunchConfiguration("suitcase_control_gui")),
         output="screen",
     )
@@ -210,8 +212,7 @@ def _build_simulation(context):
         SetEnvironmentVariable(
             "GAZEBO_PLUGIN_PATH",
             [
-                piracer_plugin_lib,
-                ":/opt/ros/humble/lib:",
+                "/opt/ros/humble/lib:",
                 EnvironmentVariable("GAZEBO_PLUGIN_PATH", default_value=""),
             ],
         ),
@@ -219,6 +220,7 @@ def _build_simulation(context):
         gazebo_client,
         state_publisher,
         spawn_model,
+        ackermann_command_adapter,
         visual_odometry,
         suitcase_control_gui,
         *yolo_nodes,
@@ -232,22 +234,21 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_enabled", default_value="true"),
         DeclareLaunchArgument("visual_odometry_enabled", default_value="true"),
         DeclareLaunchArgument("camera_update_rate", default_value="30.0"),
-        DeclareLaunchArgument("steering_trace_enabled", default_value="false"),
-        DeclareLaunchArgument("steering_trace_path", default_value=""),
         DeclareLaunchArgument("camera_viewer_enabled", default_value="true"),
         DeclareLaunchArgument("suitcase_control_gui", default_value="true"),
         DeclareLaunchArgument("yolo_enabled", default_value="false"),
         DeclareLaunchArgument("yolo_backend", default_value="yolox"),
         DeclareLaunchArgument("yolo_model_path", default_value=""),
         DeclareLaunchArgument("yolo_params_file", default_value=""),
-        DeclareLaunchArgument("yolo_image_topic", default_value="/piracer/sim_camera/color/image_raw"),
+        DeclareLaunchArgument("yolo_image_topic", default_value="/sim_camera/color/image_raw"),
         DeclareLaunchArgument("yolo_confidence", default_value="0.35"),
         DeclareLaunchArgument("yolo_nms_iou", default_value="0.5"),
         DeclareLaunchArgument("yolo_imgsz", default_value="640"),
         DeclareLaunchArgument("yolo_class_filter", default_value=""),
         DeclareLaunchArgument("yolo_opencv_num_threads", default_value="8"),
-        DeclareLaunchArgument("camera_view_topic", default_value="/piracer/sim_camera/color/image_raw"),
+        DeclareLaunchArgument("camera_view_topic", default_value="/sim_camera/color/image_raw"),
         DeclareLaunchArgument("world", default_value=""),
+        DeclareLaunchArgument("start_paused", default_value="false"),
         DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),
         DeclareLaunchArgument("robot_spawn_y", default_value="0.0"),
         DeclareLaunchArgument("robot_spawn_z", default_value="0.019"),

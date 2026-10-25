@@ -2,6 +2,7 @@
 /*
 !/.gitignore
 !/src/
+/artefakty/
 
 # Generated files inside source packages.
 **/__pycache__/

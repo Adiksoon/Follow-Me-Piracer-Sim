@@ -2,8 +2,8 @@ yolo11n_node:
   ros__parameters:
     backend: "opencv_dnn"
     model_path: "/home/zygar/dev_praca_inz/symulacja/verification/yolo11n_same_frame_20261008/weights/yolo11n.onnx"
-    image_topic: "/piracer/sim_camera/color/image_raw"
-    detection_topic: "/piracer/yolo/detections"
+    image_topic: "/sim_camera/color/image_raw"
+    detection_topic: "/yolo/detections"
     debug_image_topic: "/piracer/yolo/debug_image"
     imgsz: 640
     confidence: 0.35

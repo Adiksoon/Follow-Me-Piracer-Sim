@@ -8,15 +8,10 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    EmitEvent,
     ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
-    RegisterEventHandler,
 )
-from launch.conditions import IfCondition, UnlessCondition
-from launch.event_handlers import OnProcessExit
-from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -30,29 +25,11 @@ def _build_launch(context, *args, **kwargs):
 
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(simulation_share, "launch", "piracer_sim.launch.py")
+            os.path.join(simulation_share, "launch", "piracer_sim_base.launch.py")
         ),
         launch_arguments={
             "gui": LaunchConfiguration("gui"),
-            "world": LaunchConfiguration("world"),
-            "robot_spawn_x": LaunchConfiguration("robot_spawn_x"),
-            "robot_spawn_y": LaunchConfiguration("robot_spawn_y"),
-            "robot_spawn_yaw": LaunchConfiguration("robot_spawn_yaw"),
-            "camera_enabled": "true",
-            "camera_update_rate": "30.0",
-            "camera_viewer_enabled": "false",
-            "suitcase_control_gui": "false",
-            "yolo_enabled": "false",
-        }.items(),
-        condition=UnlessCondition(LaunchConfiguration("native_tf")),
-    )
-
-    native_simulation = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(simulation_share, "launch", "piracer_sim.launch.py")
-        ),
-        launch_arguments={
-            "gui": LaunchConfiguration("gui"),
+            "start_paused": LaunchConfiguration("start_paused"),
             "world": LaunchConfiguration("world"),
             "robot_spawn_x": LaunchConfiguration("robot_spawn_x"),
             "robot_spawn_y": LaunchConfiguration("robot_spawn_y"),
@@ -64,7 +41,6 @@ def _build_launch(context, *args, **kwargs):
             "yolo_enabled": "false",
             "visual_odometry_enabled": "false",
         }.items(),
-        condition=IfCondition(LaunchConfiguration("native_tf")),
     )
 
     native_visual_odometry = IncludeLaunchDescription(
@@ -72,16 +48,6 @@ def _build_launch(context, *args, **kwargs):
             os.path.join(simulation_share, "launch", "rgbd_visual_odometry.launch.py")
         ),
         launch_arguments={"publish_tf": "true"}.items(),
-        condition=IfCondition(LaunchConfiguration("native_tf")),
-    )
-
-    odom_bridge = Node(
-        package="piracer_navigation",
-        executable="odom_tf_bridge",
-        name="piracer_odom_tf_bridge",
-        output="screen",
-        parameters=[{"use_sim_time": True}],
-        condition=UnlessCondition(LaunchConfiguration("native_tf")),
     )
 
     scan_converter = Node(
@@ -101,8 +67,8 @@ def _build_launch(context, *args, **kwargs):
             }
         ],
         remappings=[
-            ("depth", "/piracer/sim_camera/depth/image_raw"),
-            ("depth_camera_info", "/piracer/sim_camera/depth/camera_info"),
+            ("depth", "/sim_camera/depth/image_raw"),
+            ("depth_camera_info", "/sim_camera/depth/camera_info"),
             ("scan", "/piracer/scan"),
         ],
     )
@@ -121,9 +87,9 @@ def _build_launch(context, *args, **kwargs):
         output="screen",
         parameters=[rtabmap_config, {"database_path": database_path}],
         remappings=[
-            ("rgb/image", "/piracer/sim_camera/color/image_raw"),
-            ("depth/image", "/piracer/sim_camera/depth/image_raw"),
-            ("rgb/camera_info", "/piracer/sim_camera/color/camera_info"),
+            ("rgb/image", "/sim_camera/color/image_raw"),
+            ("depth/image", "/sim_camera/depth/image_raw"),
+            ("rgb/camera_info", "/sim_camera/color/camera_info"),
             ("odom", "/visual_odom"),
             ("map", "/map"),
         ],
@@ -166,7 +132,9 @@ def _build_launch(context, *args, **kwargs):
     nav2_config = os.path.join(package_share, "config", "nav2_params.yaml")
     bt_path = os.path.join(package_share, "behavior_trees", "navigate_to_pose.xml")
     bt_through_poses_path = os.path.join(
-        package_share, "behavior_trees", "navigate_through_poses_no_recovery.xml"
+        get_package_share_directory("nav2_bt_navigator"),
+        "behavior_trees",
+        "navigate_through_poses_w_replanning_and_recovery.xml",
     )
     nav2_params = RewrittenYaml(
         source_file=nav2_config,
@@ -189,49 +157,15 @@ def _build_launch(context, *args, **kwargs):
             "use_composition": "False",
             "use_respawn": "False",
         }.items(),
-        condition=IfCondition(LaunchConfiguration("nav2_enabled")),
-    )
-
-    command_gate = Node(
-        package="piracer_navigation",
-        executable="command_gate",
-        name="piracer_command_gate",
-        output="screen",
-        parameters=[
-            {
-                "use_sim_time": False,
-                "nav_cmd_topic": "/cmd_vel",
-                "odom_valid_topic": "/piracer_navigation/odom_valid",
-                "scan_topic": "/piracer/scan",
-                "enable_topic": "/piracer_navigation/enable_motion",
-                "stop_topic": "/piracer_navigation/stop",
-                "output_topic": "/piracer/cmd_vel",
-            }
-        ],
-    )
-
-    stop_launch_on_gate_exit = RegisterEventHandler(
-        OnProcessExit(
-            target_action=command_gate,
-            on_exit=[
-                EmitEvent(
-                    event=Shutdown(reason="command gate exited; stop the owned session")
-                )
-            ],
-        )
     )
 
     return [
-        stop_launch_on_gate_exit,
         simulation,
-        native_simulation,
         native_visual_odometry,
-        odom_bridge,
         scan_converter,
         rtabmap,
         start_zone_map,
         nav2,
-        command_gate,
     ]
 
 
@@ -239,19 +173,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("gui", default_value="false"),
-            DeclareLaunchArgument(
-                "nav2_enabled",
-                default_value="true",
-                description="Start Nav2 servers; disable for isolated manual driving.",
-            ),
-            DeclareLaunchArgument(
-                "native_tf",
-                default_value="true",
-                description=(
-                    "Use RTAB-Map visual odometry for vo_odom to base_link TF "
-                    "and omit odom_tf_bridge."
-                ),
-            ),
+            DeclareLaunchArgument("start_paused", default_value="false"),
             DeclareLaunchArgument("world", default_value=""),
             DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),
             DeclareLaunchArgument("robot_spawn_y", default_value="0.0"),

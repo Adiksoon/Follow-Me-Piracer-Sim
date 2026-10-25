@@ -32,16 +32,16 @@ class SimulationTelemetry(Node):
         self.declare_parameter("robot_cmd_vel_topic", "/piracer/cmd_vel")
         self.declare_parameter("target_cmd_vel_topic", "/sim012_target/cmd_vel")
         self.declare_parameter(
-            "rgb_image_topic", "/piracer/sim_camera/color/image_raw"
+            "rgb_image_topic", "/sim_camera/color/image_raw"
         )
         self.declare_parameter(
-            "depth_image_topic", "/piracer/sim_camera/depth/image_raw"
+            "depth_image_topic", "/sim_camera/depth/image_raw"
         )
         self.declare_parameter(
-            "rgb_camera_info_topic", "/piracer/sim_camera/color/camera_info"
+            "rgb_camera_info_topic", "/sim_camera/color/camera_info"
         )
         self.declare_parameter(
-            "depth_camera_info_topic", "/piracer/sim_camera/depth/camera_info"
+            "depth_camera_info_topic", "/sim_camera/depth/camera_info"
         )
         self.declare_parameter("diagnostics_topic", "/diagnostics")
 

@@ -22,7 +22,7 @@ class StateManagerNode(Node):
     def __init__(self):
         super().__init__("piracer_state_manager")
         defaults = {
-            "detection_topic": "/piracer/yolo/detections",
+            "detection_topic": "/yolo/detections",
             "search_enable_service": "/search/enable",
             "acquire_enable_service": "/acquire/enable",
             "follow_enable_service": "/follow/enable",

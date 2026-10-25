@@ -24,7 +24,7 @@ from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 
 
-APPROVED_WORLD_SHA256 = "71111ed9cfd933117c3ac7013bed41c85d342eb5cc6b8e4e0eddbeeb5ae39c7e"
+APPROVED_WORLD_SHA256 = "a2db8fa83e785b87629c93dd750ec76e4744f44113989ed68e1eee70cdefe188"
 APPROVED_EMPTY_WORLD_SHA256 = "00738c78deca99ea6d770451a1664237ac335894c8297f91a9426084c526c321"
 _runtime_world_directories = []
 

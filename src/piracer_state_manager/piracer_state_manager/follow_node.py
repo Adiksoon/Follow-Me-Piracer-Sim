@@ -105,16 +105,18 @@ class PiracerFollowNode(Node):
         self._latest_target_received_monotonic = time.monotonic()
 
     def _set_enabled(self, request, response):
+        was_enabled = self._enabled
+        self._enabled = bool(request.data)
         if request.data:
-            self._enabled = True
             response.success = True
             response.message = "Follow enabled; waiting for a fresh target point"
-            self._publish_zero()
+            if not was_enabled:
+                self._publish_zero()
             return response
 
-        self._enabled = False
         self._clear_target()
-        self._publish_zero()
+        if was_enabled:
+            self._publish_zero()
         response.success = True
         response.message = "Follow disabled"
         return response
@@ -127,7 +129,10 @@ class PiracerFollowNode(Node):
         self._command_publisher.publish(Twist())
 
     def _control_cycle(self):
-        if not self._enabled or self._latest_target_point is None:
+        if not self._enabled:
+            return
+
+        if self._latest_target_point is None:
             self._publish_zero()
             return
 
@@ -169,8 +174,9 @@ class PiracerFollowNode(Node):
         self._command_publisher.publish(message)
 
     def stop_and_destroy(self):
+        if self._enabled:
+            self._publish_zero()
         self._enabled = False
-        self._publish_zero()
         self.destroy_node()
 
 
