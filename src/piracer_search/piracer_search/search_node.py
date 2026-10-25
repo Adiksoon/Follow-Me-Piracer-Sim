@@ -10,6 +10,7 @@ from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 from rtabmap_msgs.msg import OdomInfo
 from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -733,9 +734,12 @@ class SearchNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = SearchNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

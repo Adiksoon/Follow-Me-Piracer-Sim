@@ -64,14 +64,60 @@ class SearchNodeCallbackTest(unittest.TestCase):
         rclpy = types.ModuleType("rclpy")
         rclpy.__path__ = []
         rclpy.init = lambda **kwargs: None
-        rclpy.spin = lambda node: None
+        rclpy.spin = lambda node: lifecycle_events.append("rclpy_spin")
         rclpy.shutdown = lambda: None
         node_module = types.ModuleType("rclpy.node")
+        executor_module = types.ModuleType("rclpy.executors")
+        lifecycle_events = []
+
+        class FakeMultiThreadedExecutor:
+            instances = []
+            spin_error = None
+
+            def __init__(self, *, num_threads):
+                self.num_threads = num_threads
+                self.nodes = []
+                self.add_count = 0
+                self.__class__.instances.append(self)
+                lifecycle_events.append("executor_create")
+
+            def add_node(self, node):
+                self.nodes.append(node)
+                self.add_count += 1
+                lifecycle_events.append("executor_add_node")
+
+            def spin(self):
+                lifecycle_events.append("executor_spin")
+                if self.__class__.spin_error is not None:
+                    raise self.__class__.spin_error
+
+            def shutdown(self):
+                lifecycle_events.append("executor_shutdown")
+                return True
+
+        executor_module.MultiThreadedExecutor = FakeMultiThreadedExecutor
+        rclpy.executors = executor_module
+        rclpy.lifecycle_events = lifecycle_events
+
+        def fake_init(**kwargs):
+            lifecycle_events.append("rclpy_init")
+
+        def fake_shutdown():
+            lifecycle_events.append("rclpy_shutdown")
+
+        rclpy.init = fake_init
+        rclpy.shutdown = fake_shutdown
 
         class FakeNode:
             def __init__(self, name):
                 self.parameters = {}
                 self.subscriptions = []
+                self.services = []
+                self.timers = []
+                lifecycle_events.append("node_create")
+
+            def destroy_node(self):
+                lifecycle_events.append("node_destroy")
 
             def declare_parameter(self, name, value):
                 self.parameters[name] = value
@@ -79,9 +125,14 @@ class SearchNodeCallbackTest(unittest.TestCase):
             def get_parameter(self, name):
                 return types.SimpleNamespace(value=self.parameters[name])
 
-            def create_subscription(self, message_type, topic, callback, qos):
+            def create_subscription(self, message_type, topic, callback, qos,
+                                   **kwargs):
                 record = types.SimpleNamespace(
-                    message_type=message_type, topic=topic, callback=callback, qos=qos
+                    message_type=message_type, topic=topic, callback=callback,
+                    qos=qos,
+                    callback_group=kwargs.get(
+                        "callback_group", "default_mutually_exclusive"
+                    ),
                 )
                 self.subscriptions.append(record)
                 return record
@@ -89,11 +140,23 @@ class SearchNodeCallbackTest(unittest.TestCase):
             def create_publisher(self, *args):
                 return FakePublisher()
 
-            def create_service(self, *args):
-                return types.SimpleNamespace()
+            def create_service(self, *args, **kwargs):
+                record = types.SimpleNamespace(
+                    callback_group=kwargs.get(
+                        "callback_group", "default_mutually_exclusive"
+                    )
+                )
+                self.services.append(record)
+                return record
 
-            def create_timer(self, *args):
-                return types.SimpleNamespace()
+            def create_timer(self, *args, **kwargs):
+                record = types.SimpleNamespace(
+                    callback_group=kwargs.get(
+                        "callback_group", "default_mutually_exclusive"
+                    )
+                )
+                self.timers.append(record)
+                return record
 
             def get_clock(self):
                 return types.SimpleNamespace(
@@ -128,9 +191,13 @@ class SearchNodeCallbackTest(unittest.TestCase):
             history="keep_last", depth=5, reliability="best_effort", durability="volatile"
         )
         action_module = types.ModuleType("rclpy.action")
-        action_module.ActionClient = type("ActionClient", (), {
-            "__init__": lambda self, *args: None,
-        })
+        class FakeActionClient:
+            def __init__(self, *args, **kwargs):
+                self.callback_group = kwargs.get(
+                    "callback_group", "default_mutually_exclusive"
+                )
+
+        action_module.ActionClient = FakeActionClient
         time_module = types.ModuleType("rclpy.time")
         class FakeTime:
             def __init__(self, *, nanoseconds=0, clock_type="ros"):
@@ -177,9 +244,12 @@ class SearchNodeCallbackTest(unittest.TestCase):
         tf_module.ExtrapolationException = type("ExtrapolationException", (FakeTFException,), {})
         tf_module.TimeoutException = type("TimeoutException", (FakeTFException,), {})
         tf_module.Buffer = type("Buffer", (), {})
-        tf_module.TransformListener = type("TransformListener", (), {
-            "__init__": lambda self, *args: None,
-        })
+        class FakeTransformListener:
+            def __init__(self, *args, **kwargs):
+                self.spin_thread = kwargs.get("spin_thread", False)
+                self.group = "reentrant"
+
+        tf_module.TransformListener = FakeTransformListener
         marker_module = types.ModuleType("visualization_msgs.msg")
         marker_module.MarkerArray = type("MarkerArray", (), {"__init__": lambda self: setattr(self, "markers", [])})
         marker_parent = types.ModuleType("visualization_msgs")
@@ -198,6 +268,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         modules = {
             "rclpy": rclpy,
             "rclpy.node": node_module,
+            "rclpy.executors": executor_module,
             "rclpy.qos": qos_module,
             "rclpy.action": action_module,
             "rclpy.time": time_module,
@@ -221,6 +292,70 @@ class SearchNodeCallbackTest(unittest.TestCase):
         with patch.dict(sys.modules, modules):
             cls.module = importlib.import_module("piracer_search.search_node")
         cls.marker_helpers = marker_helpers
+
+    def test_main_uses_two_worker_executor_and_cleans_up_after_normal_spin(self):
+        # The executor class is imported into the production module; its event
+        # record is retained here even after the fixture restores sys.modules.
+        events = self.module.rclpy.lifecycle_events
+        events.clear()
+        self.module.MultiThreadedExecutor.instances.clear()
+        self.module.MultiThreadedExecutor.spin_error = None
+
+        self.module.main()
+
+        self.assertEqual(
+            ["rclpy_init", "node_create", "executor_create",
+             "executor_add_node", "executor_spin", "executor_shutdown",
+             "node_destroy", "rclpy_shutdown"],
+            events,
+        )
+        self.assertEqual(1, len(self.module.MultiThreadedExecutor.instances))
+        executor = self.module.MultiThreadedExecutor.instances[0]
+        self.assertEqual(2, executor.num_threads)
+        self.assertEqual(1, executor.add_count)
+        self.assertEqual(1, len(executor.nodes))
+
+    def test_main_cleans_up_after_exception_from_spin(self):
+        events = self.module.rclpy.lifecycle_events
+        events.clear()
+        self.module.MultiThreadedExecutor.instances.clear()
+        error = RuntimeError("spin failed")
+        self.module.MultiThreadedExecutor.spin_error = error
+
+        with self.assertRaisesRegex(RuntimeError, "spin failed"):
+            self.module.main()
+
+        self.assertEqual(
+            ["rclpy_init", "node_create", "executor_create",
+             "executor_add_node", "executor_spin", "executor_shutdown",
+             "node_destroy", "rclpy_shutdown"],
+            events,
+        )
+        self.assertEqual(1, len(self.module.MultiThreadedExecutor.instances))
+        executor = self.module.MultiThreadedExecutor.instances[0]
+        self.assertEqual(2, executor.num_threads)
+        self.assertEqual(1, executor.add_count)
+        self.assertEqual(1, len(executor.nodes))
+        self.module.MultiThreadedExecutor.spin_error = None
+
+    def test_search_entities_keep_existing_callback_groups_and_listener_spin(self):
+        node = self.module.SearchNode()
+        self.assertTrue(all(
+            subscription.callback_group == "default_mutually_exclusive"
+            for subscription in node.subscriptions
+        ))
+        self.assertTrue(all(
+            service.callback_group == "default_mutually_exclusive"
+            for service in node.services
+        ))
+        self.assertEqual(
+            "default_mutually_exclusive", node.timers[0].callback_group
+        )
+        self.assertEqual(
+            "default_mutually_exclusive", node._action.callback_group
+        )
+        self.assertEqual("reentrant", node._tf_listener.group)
+        self.assertFalse(node._tf_listener.spin_thread)
 
     def make_node(self):
         node = object.__new__(self.module.SearchNode)
