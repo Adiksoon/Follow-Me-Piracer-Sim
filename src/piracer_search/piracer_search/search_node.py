@@ -1,6 +1,7 @@
 """Search lifecycle, shared frontier evaluation, and Nav2 goal handoff."""
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
@@ -51,6 +52,31 @@ def _odom_info_subscription_qos():
     return qos_profile_sensor_data
 
 
+def _evaluate_frontier_snapshot(grid, robot_pose, camera, trace, tick_sequence):
+    """Pure computation: no node, action client or navigation state in the worker."""
+    span_id = None
+    error = None
+    if trace is not None:
+        try:
+            span_id, _ = trace.begin(
+                "search_computation", tick_sequence=tick_sequence,
+                operation="evaluate_search",
+            )
+        except Exception:
+            pass  # Optional tracing must not change the computation.
+    try:
+        return evaluate_search(grid, robot_pose, camera=camera)
+    except BaseException as exc:
+        error = exc
+        raise
+    finally:
+        if trace is not None and span_id is not None:
+            try:
+                trace.finish(span_id, error)
+            except Exception:
+                pass
+
+
 class SearchNode(Node):
     """Evaluate one map snapshot, visualize it, and own at most one Nav2 goal."""
 
@@ -75,6 +101,10 @@ class SearchNode(Node):
 
         self._enabled = False
         self._search_epoch = 0
+        self._localization_generation = 0
+        self._evaluation_executor = ThreadPoolExecutor(max_workers=1)
+        self._evaluation_future = None
+        self._evaluation_context = None
         self._map = None
         self._frontier_key = None
         self._failed_attempts = {}
@@ -175,6 +205,7 @@ class SearchNode(Node):
                 self._cancel_active_goal(reason)
 
     def _handle_clock_regression(self, now_ns):
+        self._localization_generation += 1
         if self._localization_trace_enabled:
             try:
                 self._internal_tf_trace.record(
@@ -202,6 +233,7 @@ class SearchNode(Node):
         self, reason, lost_stamp_ns=None, diagnostic_details=None,
         tf_failure_monotonic_ns=None,
     ):
+        self._localization_generation += 1
         was_available = self._localization_available
         boundaries = [self._localization_invalidated_at_ns, self._last_accepted_odom_stamp_ns]
         if lost_stamp_ns is not None and lost_stamp_ns > 0:
@@ -779,51 +811,69 @@ class SearchNode(Node):
         if robot_pose is None:
             return
         trace = getattr(self, "_internal_tf_trace", None)
-        grid_span = None
-        grid_error = None
+        if self._evaluation_future is None:
+            grid_span = None
+            grid_error = None
+            try:
+                if trace is not None:
+                    grid_span, _ = self._trace_begin_safe(
+                        trace, "search_computation",
+                        tick_sequence=tick_sequence, operation="grid",
+                    )
+                grid = self._grid()
+            except Exception as error:
+                grid_error = error
+                self.get_logger().debug(f"Search waits for current map/TF: {error}")
+                return
+            except BaseException as error:
+                grid_error = error
+                raise
+            finally:
+                if trace is not None and grid_span is not None:
+                    self._trace_finish_safe(trace, grid_span, grid_error)
+            # These values belong to this job only. The worker never sees self.
+            self._evaluation_context = {
+                "epoch": self._search_epoch,
+                "localization_generation": self._localization_generation,
+                "frame": self._map.header.frame_id,
+                "grid": grid,
+                "camera": dict(camera),
+            }
+            self._evaluation_future = self._evaluation_executor.submit(
+                _evaluate_frontier_snapshot, grid, tuple(robot_pose), dict(camera),
+                trace, tick_sequence,
+            )
+
+        # Do not wait in the callback group, or queue a second evaluation.
+        if not self._evaluation_future.done():
+            return
+        future = self._evaluation_future
+        context = self._evaluation_context
+        self._evaluation_future = None
+        self._evaluation_context = None
         try:
-            if trace is not None:
-                grid_span, _ = self._trace_begin_safe(
-                    trace,
-                    "search_computation", tick_sequence=tick_sequence, operation="grid"
-                )
-            grid = self._grid()
+            result = future.result()
         except Exception as error:
-            grid_error = error
+            self.get_logger().debug(f"Search evaluation failed: {error}")
+            return
+        try:
+            map_matches = context["grid"] == self._grid()
+        except Exception as error:
             self.get_logger().debug(f"Search waits for current map/TF: {error}")
             return
-        except BaseException as error:
-            grid_error = error
-            raise
-        finally:
-            if trace is not None and grid_span is not None:
-                self._trace_finish_safe(trace, grid_span, grid_error)
-
-        evaluation_span = None
-        evaluation_error = None
-        try:
-            if trace is not None:
-                evaluation_span, _ = self._trace_begin_safe(
-                    trace,
-                    "search_computation",
-                    tick_sequence=tick_sequence,
-                    operation="evaluate_search",
-                )
-            result = evaluate_search(grid, robot_pose, camera=camera)
-        except Exception as error:
-            evaluation_error = error
-            self.get_logger().debug(f"Search waits for current map/TF: {error}")
+        if (not self._enabled
+                or context["epoch"] != self._search_epoch
+                or context["localization_generation"] != self._localization_generation
+                or context["frame"] != self._map.header.frame_id
+                or context["camera"] != camera
+                or not map_matches):
             return
-        except BaseException as error:
-            evaluation_error = error
-            raise
-        finally:
-            if trace is not None and evaluation_span is not None:
-                self._trace_finish_safe(trace, evaluation_span, evaluation_error)
-
         if self._localization_pose(self._map.header.frame_id) is None:
             return
+        self._apply_search_result(result)
 
+    def _apply_search_result(self, result):
+        """Only the Search callback consumes results and changes navigation state."""
         candidates = {candidate["id"]: candidate for candidate in result["candidates"]}
         eligible_identities = {
             self._goal_identity(candidate, self._map.header.frame_id)
@@ -1203,6 +1253,7 @@ def main(args=None):
         executor.spin()
     finally:
         executor.shutdown()
+        node._evaluation_executor.shutdown(wait=True, cancel_futures=True)
         if node._localization_trace_enabled:
             try:
                 node._flush_pending_localization_trace_dump()

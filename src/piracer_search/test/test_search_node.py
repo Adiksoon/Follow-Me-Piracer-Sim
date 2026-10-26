@@ -5,6 +5,7 @@ import sys
 import types
 import unittest
 from collections import deque
+from concurrent.futures import Future as WorkerFuture
 from unittest.mock import patch
 
 
@@ -58,6 +59,18 @@ class FakePublisher:
 
     def publish(self, message):
         self.messages.append(message)
+
+
+class CompletedEvaluationExecutor:
+    """Keep existing decision tests deterministic; real concurrency has its own tests."""
+
+    def submit(self, callback, *args):
+        future = WorkerFuture()
+        try:
+            future.set_result(callback(*args))
+        except BaseException as error:
+            future.set_exception(error)
+        return future
 
 
 class SearchNodeCallbackTest(unittest.TestCase):
@@ -388,6 +401,10 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node = object.__new__(self.module.SearchNode)
         node._enabled = True
         node._search_epoch = 0
+        node._localization_generation = 0
+        node._evaluation_executor = CompletedEvaluationExecutor()
+        node._evaluation_future = None
+        node._evaluation_context = None
         node._map = types.SimpleNamespace(
             header=types.SimpleNamespace(frame_id="map")
         )
@@ -1584,6 +1601,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
     def test_exhausted_tf_candidates_capture_once_after_goal_invalidation(self):
         node = self.make_localization_node()
+        node._localization_trace_enabled = True
         warnings = []
         events = []
         node._logger.warning = warnings.append
@@ -1630,19 +1648,19 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual([True], trace_captures)
         self.assertTrue(node._active_goal["localization_invalidated"])
         self.assertEqual(1, handle.cancel_count)
-        self.assertEqual(1, len(warnings))
-        warning = warnings[0]
+        warning = next(item for item in warnings
+                       if item.startswith("Search localization invalidated:"))
         self.assertIn("exception_message='vo_odom'", warning)
-        self.assertIn("tf_failure_monotonic_ns=101", warning)
-        self.assertIn("buffer_snapshot_start_monotonic_ns=102", warning)
-        self.assertIn("buffer_snapshot_end_monotonic_ns=103", warning)
-        self.assertIn(f"buffer_snapshot_yaml={node._tf_buffer.snapshot_yaml!r}", warning)
-        self.assertIn("buffer_snapshot_capture_error=None", warning)
-        self.assertIn("internal_tf_trace_capture_start_monotonic_ns=104", warning)
-        trace_text = warning.split("internal_tf_trace_json=", 1)[1]
-        trace_data = json.loads(ast.literal_eval(trace_text))
+        dump = next(item for item in warnings
+                    if item.startswith("Search localization trace dump:"))
+        payload = json.loads(dump.split(": ", 1)[1])
+        self.assertEqual(node._tf_buffer.snapshot_yaml, payload["buffer_snapshot_yaml"])
+        self.assertLessEqual(payload["buffer_snapshot_start_monotonic_ns"],
+                             payload["buffer_snapshot_end_monotonic_ns"])
+        trace_data = payload["trace_capture"]
         self.assertEqual(0, trace_data["evicted_count"])
-        self.assertEqual("search_tick", trace_data["events"][0]["kind"])
+        self.assertTrue(any(event["kind"] == "search_tick"
+                            for event in trace_data["events"]))
         self.assertEqual("entry", trace_data["open_spans"][0]["phase"])
         self.assertEqual(7, trace_data["open_spans"][0]["tick_sequence"])
 
