@@ -74,6 +74,7 @@ def generate_launch_description():
                 PythonLaunchDescriptionSource(search_state_manager_launch),
                 launch_arguments={
                     "map_topic": LaunchConfiguration("map_topic"),
+                    "max_localization_age_sec": "1.0",
                     "use_sim_time": "true",
                 }.items(),
             ),

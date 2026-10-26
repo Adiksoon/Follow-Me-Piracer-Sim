@@ -9,7 +9,9 @@ The node subscribes to its configured map topic and `/visual_vo/odom_info`. It
 uses the newest eligible positive OdomInfo as a health sample and checks the
 latest `vo_odom -> base_link` transform and latest full `map -> base_link`
 transform independently. The selected Info and both returned transform stamps
-must each be no more than 0.5 seconds old. After localization loss, Info and
+must each be no older than the configured maximum age, which defaults to 0.5
+seconds. The full Gazebo simulation sets Search's maximum age to 1.0 second;
+other launch paths retain the 0.5 second default. After localization loss, Info and
 both transform streams must each advance beyond the recovery barrier before
 localization is accepted. The maximum age is available as the
 `max_localization_age_sec` parameter. The node owns one `NavigateToPose`

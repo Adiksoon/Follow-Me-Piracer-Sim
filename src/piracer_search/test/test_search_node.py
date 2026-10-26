@@ -444,8 +444,12 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._localization_pose = lambda frame: (1.0, 2.0, 0.5)
         return node
 
-    def make_localization_node(self):
+    def make_localization_node(self, max_age_sec=0.5):
         node = self.make_node()
+        get_parameter = node.get_parameter
+        node.get_parameter = lambda name: types.SimpleNamespace(
+            value=max_age_sec
+        ) if name == "max_localization_age_sec" else get_parameter(name)
         del node._localization_pose
 
         class TFBuffer:
@@ -776,6 +780,57 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.assertIsNone(node._last_accepted_odom_stamp_ns)
                 self.assertIsNone(node._last_accepted_native_tf_stamp_ns)
                 self.assertIsNone(node._last_accepted_full_tf_stamp_ns)
+
+    def test_one_second_limit_accepts_run18_shaped_730ms_tf_and_exact_boundary(self):
+        node = self.make_localization_node(max_age_sec=1.0)
+        node._tf_buffer.stamps.update({"vo_odom": 9_270_000_000,
+                                       "map": 9_270_000_000})
+        node._odom_info_callback(self.odom_info(9_837_000_000))
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+        node = self.make_localization_node()
+        node._tf_buffer.stamps.update({"vo_odom": 9_270_000_000,
+                                       "map": 9_270_000_000})
+        node._odom_info_callback(self.odom_info(9_837_000_000))
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertIn("older than max_localization_age_sec",
+                      node._localization_reason)
+
+        node = self.make_localization_node(max_age_sec=1.0)
+        node._tf_buffer.stamps.update({"vo_odom": 9_000_000_000,
+                                       "map": 9_000_000_000})
+        node._odom_info_callback(self.odom_info(9_900_000_000))
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+
+    def test_one_second_limit_rejects_tf_1001ms_old_in_both_roles(self):
+        for target in ("vo_odom", "map"):
+            with self.subTest(target=target):
+                node = self.make_localization_node(max_age_sec=1.0)
+                node._tf_buffer.stamps.update({"vo_odom": 9_500_000_000,
+                                               "map": 9_500_000_000})
+                node._tf_buffer.stamps[target] = 8_999_000_000
+                node._odom_info_callback(self.odom_info(9_900_000_000))
+                self.assertIsNone(node._localization_pose("map"))
+                self.assertIn("older than max_localization_age_sec",
+                              node._localization_reason)
+
+    def test_one_second_limit_does_not_delay_lost_info_cancellation(self):
+        node = self.make_localization_node(max_age_sec=1.0)
+        node._localization_available = True
+        node._tf_buffer.stamps.update({"vo_odom": 9_950_000_000,
+                                       "map": 9_950_000_000})
+        handle = FakeHandle()
+        candidate = self.candidate("active")
+        node._active_goal = {
+            "token": 91, "candidate": candidate,
+            "identity": node._goal_identity(candidate, "map"),
+            "epoch": 0, "is_retry": False, "handle": handle,
+            "cancel_requested": False, "cancel_reason": None,
+        }
+        node._odom_info_callback(self.odom_info(9_950_000_000, lost=True))
+        self.assertEqual(1, handle.cancel_count)
+        self.assertTrue(node._active_goal["localization_invalidated"])
+        self.assertEqual([], node._tf_buffer.calls)
 
     def test_native_and_full_tf_zero_future_and_regressing_stamps_reject(self):
         cases = (
