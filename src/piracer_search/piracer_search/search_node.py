@@ -12,6 +12,7 @@ from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 from rtabmap_msgs.msg import OdomInfo
 from rclpy.action import ActionClient
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
@@ -98,8 +99,10 @@ class SearchNode(Node):
         self._tf_listener = SearchTransformListener(
             self._tf_buffer, self, self._internal_tf_trace
         )
+        self._search_callback_group = MutuallyExclusiveCallbackGroup()
         self._action = ActionClient(
-            self, NavigateToPose, self.get_parameter("navigate_to_pose_action").value
+            self, NavigateToPose, self.get_parameter("navigate_to_pose_action").value,
+            callback_group=self._search_callback_group,
         )
         self._markers = self.create_publisher(
             MarkerArray, self.get_parameter("marker_topic").value, 10
@@ -109,17 +112,22 @@ class SearchNode(Node):
             self.get_parameter("map_topic").value,
             self._map_callback,
             _map_subscription_qos(),
+            callback_group=self._search_callback_group,
         )
         self._odom_info_subscription = self.create_subscription(
             OdomInfo,
             self.get_parameter("odom_info_topic").value,
             self._odom_info_callback,
             _odom_info_subscription_qos(),
+            callback_group=self._search_callback_group,
         )
         self._start_stop = self.create_service(
-            SetBool, self.get_parameter("start_stop_service").value, self._set_search
+            SetBool, self.get_parameter("start_stop_service").value, self._set_search,
+            callback_group=self._search_callback_group,
         )
-        self._timer = self.create_timer(1.0, self._search_tick)
+        self._timer = self.create_timer(
+            1.0, self._search_tick, callback_group=self._search_callback_group
+        )
         self.get_logger().info(
             "Search localization max age: "
             f"{float(self.get_parameter('max_localization_age_sec').value):.3f} s"

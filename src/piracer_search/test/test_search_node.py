@@ -70,7 +70,13 @@ class SearchNodeCallbackTest(unittest.TestCase):
         rclpy.shutdown = lambda: None
         node_module = types.ModuleType("rclpy.node")
         executor_module = types.ModuleType("rclpy.executors")
+        callback_groups_module = types.ModuleType("rclpy.callback_groups")
         lifecycle_events = []
+
+        class FakeMutuallyExclusiveCallbackGroup:
+            pass
+
+        callback_groups_module.MutuallyExclusiveCallbackGroup = FakeMutuallyExclusiveCallbackGroup
 
         class FakeMultiThreadedExecutor:
             instances = []
@@ -99,6 +105,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         executor_module.MultiThreadedExecutor = FakeMultiThreadedExecutor
         rclpy.executors = executor_module
+        rclpy.callback_groups = callback_groups_module
         rclpy.lifecycle_events = lifecycle_events
 
         def fake_init(**kwargs):
@@ -112,6 +119,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         class FakeNode:
             def __init__(self, name):
+                self.default_callback_group = object()
                 self.parameters = {}
                 self.subscriptions = []
                 self.services = []
@@ -133,7 +141,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
                     message_type=message_type, topic=topic, callback=callback,
                     qos=qos,
                     callback_group=kwargs.get(
-                        "callback_group", "default_mutually_exclusive"
+                        "callback_group", self.default_callback_group
                     ),
                 )
                 self.subscriptions.append(record)
@@ -145,7 +153,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             def create_service(self, *args, **kwargs):
                 record = types.SimpleNamespace(
                     callback_group=kwargs.get(
-                        "callback_group", "default_mutually_exclusive"
+                        "callback_group", self.default_callback_group
                     )
                 )
                 self.services.append(record)
@@ -154,7 +162,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             def create_timer(self, *args, **kwargs):
                 record = types.SimpleNamespace(
                     callback_group=kwargs.get(
-                        "callback_group", "default_mutually_exclusive"
+                        "callback_group", self.default_callback_group
                     )
                 )
                 self.timers.append(record)
@@ -196,7 +204,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         class FakeActionClient:
             def __init__(self, *args, **kwargs):
                 self.callback_group = kwargs.get(
-                    "callback_group", "default_mutually_exclusive"
+                    "callback_group", args[0].default_callback_group
                 )
 
         action_module.ActionClient = FakeActionClient
@@ -288,6 +296,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "rclpy": rclpy,
             "rclpy.node": node_module,
             "rclpy.executors": executor_module,
+            "rclpy.callback_groups": callback_groups_module,
             "rclpy.qos": qos_module,
             "rclpy.action": action_module,
             "rclpy.time": time_module,
@@ -357,22 +366,21 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, len(executor.nodes))
         self.module.MultiThreadedExecutor.spin_error = None
 
-    def test_search_entities_keep_existing_callback_groups_and_listener_spin(self):
+    def test_search_entities_share_explicit_group_separate_from_clock_default(self):
         node = self.module.SearchNode()
+        group = node._search_callback_group
+        self.assertIsInstance(group, self.module.MutuallyExclusiveCallbackGroup)
+        self.assertIsNot(group, node.default_callback_group)
         self.assertTrue(all(
-            subscription.callback_group == "default_mutually_exclusive"
+            subscription.callback_group is group
             for subscription in node.subscriptions
         ))
         self.assertTrue(all(
-            service.callback_group == "default_mutually_exclusive"
+            service.callback_group is group
             for service in node.services
         ))
-        self.assertEqual(
-            "default_mutually_exclusive", node.timers[0].callback_group
-        )
-        self.assertEqual(
-            "default_mutually_exclusive", node._action.callback_group
-        )
+        self.assertIs(group, node.timers[0].callback_group)
+        self.assertIs(group, node._action.callback_group)
         self.assertEqual("reentrant", node._tf_listener.group)
         self.assertFalse(node._tf_listener.spin_thread)
 
