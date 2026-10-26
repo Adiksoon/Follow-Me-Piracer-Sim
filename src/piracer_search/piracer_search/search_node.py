@@ -80,6 +80,10 @@ def _evaluate_frontier_snapshot(grid, robot_pose, camera, trace, tick_sequence):
                 pass
 
 
+# Experimental future-input bound explicitly approved in CP-SEARCH-28.
+TF_FUTURE_LEAD_NS = 100_000_000
+
+
 class SearchNode(Node):
     """Evaluate one map snapshot, visualize it, and own at most one Nav2 goal."""
 
@@ -538,7 +542,7 @@ class SearchNode(Node):
             context["selected_odom_age_ns"] = info_age_ns
         info_details = (
             f"selected_info_stamp_ns={info_stamp_ns}, info_age_ns={info_age_ns}, "
-            f"requested_stamp_ns=0, requested_time='latest', "
+            f"requested_stamp_ns={now_ns}, requested_time='ros_now', "
             f"target_frame='vo_odom', source_frame={base_frame!r}, "
             f"actual_tf_stamp_ns=None, actual_tf_age_ns=None, "
             f"validation_ros_now_ns={now_ns}, max_age_ns={max_age_ns}"
@@ -553,21 +557,44 @@ class SearchNode(Node):
             return None
 
         transform_records = []
-        for target_frame in ("vo_odom", map_frame):
+        ros_time = Time(nanoseconds=now_ns, clock_type=self.get_clock().clock_type)
+        # Query poses first, then bound both edges after concurrent TF insertions.
+        requests = (
+            ("vo_odom", base_frame, ros_time, "actual_validation_lookup"),
+            (map_frame, base_frame, ros_time, "actual_validation_lookup"),
+            ("vo_odom", base_frame, Time(), "post_lookup_edge_probe"),
+            (map_frame, "vo_odom", Time(), "post_lookup_edge_probe"),
+        )
+        for target_frame, source_frame, query_time, lookup_kind in requests:
             reason = f"{target_frame} to base frame TF unavailable"
+            failure_origin = "lookup"
+            transform = None
             try:
                 lookup_started_ns = time.monotonic_ns()
                 transform = self._tf_buffer.lookup_transform(
-                    target_frame, base_frame, Time()
+                    target_frame, source_frame, query_time
                 )
+                if (lookup_kind == "post_lookup_edge_probe"
+                        and self._stamp_ns(transform) > now_ns + TF_FUTURE_LEAD_NS):
+                    failure_origin = "future_input_policy"
+                    raise ExtrapolationException(
+                        "Search TF input exceeds the approved 100 ms future limit: "
+                        f"{target_frame} <- {source_frame}, "
+                        f"lead_ns={self._stamp_ns(transform) - now_ns}"
+                    )
             except Exception as exc:
                 caught_monotonic_ns = time.monotonic_ns()
                 if context is not None:
                     context["final_ros_now_ns"] = now_ns
                     context["lookup_results"].append({
                         "target_frame": target_frame,
-                        "source_frame": base_frame,
-                        "lookup_kind": "actual_validation_lookup",
+                        "source_frame": source_frame,
+                        "lookup_kind": lookup_kind,
+                        "requested_stamp_ns": query_time.nanoseconds,
+                        "failure_origin": failure_origin,
+                        "returned_stamp_ns": (
+                            self._stamp_ns(transform) if transform is not None else None
+                        ),
                         "start_monotonic_ns": lookup_started_ns,
                         "end_monotonic_ns": caught_monotonic_ns,
                         "exception_class": type(exc).__name__,
@@ -588,7 +615,10 @@ class SearchNode(Node):
                 )
                 details = (
                     f"{info_details}, target_frame={target_frame!r}, "
-                    f"source_frame={base_frame!r}, actual_tf_stamp_ns=None, "
+                    f"source_frame={source_frame!r}, "
+                    f"requested_stamp_ns={query_time.nanoseconds}, "
+                    f"lookup_kind={lookup_kind!r}, failure_origin={failure_origin!r}, "
+                    f"actual_tf_stamp_ns=None, "
                     f"actual_tf_age_ns=None, rejection_reason='TF lookup failed', "
                     f"{prior_tf_details}, "
                     f"exception_class={type(exc).__name__}, "
@@ -604,14 +634,16 @@ class SearchNode(Node):
             if context is not None:
                 context["lookup_results"].append({
                     "target_frame": target_frame,
-                    "source_frame": base_frame,
-                    "lookup_kind": "actual_validation_lookup",
+                    "source_frame": source_frame,
+                    "lookup_kind": lookup_kind,
+                    "requested_stamp_ns": query_time.nanoseconds,
                     "start_monotonic_ns": lookup_started_ns,
                     "end_monotonic_ns": time.monotonic_ns(),
                     "stamp_ns": self._stamp_ns(transform),
                     "age_ns": now_ns - self._stamp_ns(transform),
                 })
-            transform_records.append((target_frame, transform))
+            if lookup_kind == "actual_validation_lookup":
+                transform_records.append((target_frame, transform))
 
         native_transform = transform_records[0][1]
         full_transform = transform_records[1][1]
@@ -679,7 +711,7 @@ class SearchNode(Node):
                 details = (
                     f"selected_info_stamp_ns={info_stamp_ns}, "
                     f"info_age_ns={validation_now_ns - info_stamp_ns}, "
-                    f"requested_stamp_ns=0, requested_time='latest', "
+                    f"requested_stamp_ns={now_ns}, requested_time='ros_now', "
                     f"target_frame={target_frame!r}, source_frame={base_frame!r}, "
                     f"actual_tf_stamp_ns={stamp_ns if role != 'OdomInfo' else None}, "
                     f"actual_tf_age_ns={age_ns if role != 'OdomInfo' else None}, "

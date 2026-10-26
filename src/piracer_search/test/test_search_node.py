@@ -507,6 +507,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.missing = set()
                 self.errors = {}
                 self.stamps = {}
+                self.timed_stamps = {}
                 self.stamp_sequences = {}
                 self.sequence_indexes = {}
                 self.snapshot_calls = 0
@@ -529,6 +530,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
                     self.sequence_indexes[target] = index + 1
                 else:
                     stamp_ns = self.stamps.get(target, node._now_ns - 100_000_000)
+                stamp_ns = self.timed_stamps.get((target, stamp.nanoseconds), stamp_ns)
                 return types.SimpleNamespace(
                     header=types.SimpleNamespace(stamp=types.SimpleNamespace(
                         sec=stamp_ns // 1_000_000_000,
@@ -543,6 +545,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             def clear(self):
                 self.calls.clear()
                 self.stamps.clear()
+                self.timed_stamps.clear()
                 self.stamp_sequences.clear()
                 self.sequence_indexes.clear()
 
@@ -916,8 +919,10 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._odom_info_callback(self.odom_info(future_stamp))
 
         self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
-        self.assertEqual([("vo_odom", "base_link", 0),
-                          ("map", "base_link", 0)], node._tf_buffer.calls)
+        self.assertEqual([("vo_odom", "base_link", node._now_ns),
+                          ("map", "base_link", node._now_ns),
+                          ("vo_odom", "base_link", 0),
+                          ("map", "vo_odom", 0)], node._tf_buffer.calls)
         node._now_ns = 10_100_000_000
         self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
         self.assertEqual(0, node._tf_buffer.calls[-1][2])
@@ -940,6 +945,41 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertIsNone(node._localization_pose("map"))
         self.assertFalse(node._localization_available)
 
+    def test_current_time_lookup_and_post_lookup_future_input_bound(self):
+        for lead_ns, accepted in ((41_000_000, True), (100_000_000, True),
+                                  (100_000_001, False), (1_100_000_000, False)):
+            for edge in ("vo_odom", "map"):
+                with self.subTest(lead_ns=lead_ns, edge=edge):
+                    node = self.make_localization_node(max_age_sec=1.0)
+                    node._localization_trace_enabled = True
+                    node._odom_info_callback(self.odom_info(9_900_000_000))
+                    node._tf_buffer.timed_stamps.update({
+                        ("vo_odom", node._now_ns): node._now_ns,
+                        ("map", node._now_ns): node._now_ns,
+                    })
+                    node._tf_buffer.stamps[edge] = node._now_ns + lead_ns
+                    handle = FakeHandle()
+                    node._active_goal = {"handle": handle, "cancel_requested": False,
+                                         "cancel_reason": None}
+                    result = node._localization_pose("map")
+                    self.assertEqual(accepted, result is not None)
+                    self.assertEqual(0 if accepted else 1, handle.cancel_count)
+                    self.assertEqual([
+                        ("vo_odom", "base_link", node._now_ns),
+                        ("map", "base_link", node._now_ns),
+                    ], node._tf_buffer.calls[:2])
+                    if accepted:
+                        self.assertEqual([
+                            ("vo_odom", "base_link", 0),
+                            ("map", "vo_odom", 0),
+                        ], node._tf_buffer.calls[2:])
+                        self.assertEqual(node._now_ns, node._last_accepted_native_tf_stamp_ns)
+                    else:
+                        decision = next(e for e in node._internal_tf_trace.capture()["events"]
+                                        if e["kind"] == "localization_validation")
+                        self.assertEqual("future_input_policy",
+                                         decision["lookups"][-1]["failure_origin"])
+
     def test_run17_shaped_fresh_info_and_older_fresh_tf_are_accepted(self):
         node = self.make_localization_node()
         node._now_ns = 7_000_000_000
@@ -950,8 +990,10 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._odom_info_callback(self.odom_info(6_888_000_000))
 
         self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
-        self.assertEqual([("vo_odom", "base_link", 0),
-                          ("map", "base_link", 0)], node._tf_buffer.calls)
+        self.assertEqual([("vo_odom", "base_link", node._now_ns),
+                          ("map", "base_link", node._now_ns),
+                          ("vo_odom", "base_link", 0),
+                          ("map", "vo_odom", 0)], node._tf_buffer.calls)
         self.assertEqual(6_888_000_000, node._last_accepted_odom_stamp_ns)
         self.assertEqual(6_521_000_000, node._last_accepted_native_tf_stamp_ns)
         self.assertEqual(6_600_000_000, node._last_accepted_full_tf_stamp_ns)
@@ -1064,7 +1106,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         )
 
         self.assertIsNone(node._localization_pose("map"))
-        self.assertEqual([("vo_odom", "base_link", 0)], node._tf_buffer.calls)
+        self.assertEqual([("vo_odom", "base_link", node._now_ns)], node._tf_buffer.calls)
         self.assertIsNone(node._last_accepted_odom_stamp_ns)
         self.assertIsNone(node._last_accepted_native_tf_stamp_ns)
         self.assertIsNone(node._last_accepted_full_tf_stamp_ns)
@@ -1088,7 +1130,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertFalse(odom["callback_entry_is_dds_arrival"])
         self.assertTrue(decision["valid"])
         self.assertEqual(9_900_000_000, decision["selected_odom_stamp_ns"])
-        self.assertEqual(2, len(decision["lookups"]))
+        self.assertEqual(4, len(decision["lookups"]))
         self.assertEqual("actual_validation_lookup", decision["lookups"][0]["lookup_kind"])
         counts, _ = node._internal_tf_trace.counts()
         self.assertEqual(1, counts["odom_info_callback"])
@@ -1314,7 +1356,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         )
 
         self.assertIsNone(node._localization_pose("map"))
-        self.assertEqual(2, len(node._tf_buffer.calls))
+        self.assertEqual(4, len(node._tf_buffer.calls))
         self.assertEqual(0, node._tf_buffer.snapshot_calls)
         self.assertTrue(node._localization_reason.startswith("OdomInfo"))
 
@@ -1368,8 +1410,10 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertEqual(9_900_000_000, node._last_accepted_odom_stamp_ns)
         self.assertEqual([
+            ("vo_odom", "base_link", node._now_ns),
+            ("map", "base_link", node._now_ns),
             ("vo_odom", "base_link", 0),
-            ("map", "base_link", 0),
+            ("map", "vo_odom", 0),
         ], node._tf_buffer.calls)
 
     def test_each_expected_tf2_availability_exception_invalidates(self):
@@ -1380,8 +1424,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
             self.module.TimeoutException,
         )
         for target, expected_calls in (
-            ("vo_odom", [("vo_odom", "base_link", 0)]),
-            ("map", [("vo_odom", "base_link", 0), ("map", "base_link", 0)]),
+            ("vo_odom", [("vo_odom", "base_link", 10_000_000_000)]),
+            ("map", [("vo_odom", "base_link", 10_000_000_000), ("map", "base_link", 10_000_000_000)]),
         ):
             for exception_type in expected_exceptions:
                 with self.subTest(target=target,
@@ -1420,7 +1464,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.assertEqual(1, len(warnings))
                 self.assertEqual(0, node._tf_buffer.snapshot_calls)
                 self.assertIn("selected_info_stamp_ns=9950000000", warnings[0])
-                self.assertIn("requested_stamp_ns=0", warnings[0])
+                self.assertIn("requested_stamp_ns=10000000000", warnings[0])
                 self.assertIn("exception_class=RuntimeError", warnings[0])
 
     def test_lost_info_creates_strict_recovery_barrier(self):
@@ -1518,7 +1562,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node = self.make_localization_node()
         node._odom_info_callback(self.odom_info(9_900_000_000))
         self.assertIsNotNone(node._localization_pose("map"))
-        self.assertEqual(2, len(node._tf_buffer.calls))
+        self.assertEqual(4, len(node._tf_buffer.calls))
         node._now_ns = 1_000_000_000
         self.assertIsNone(node._localization_pose("map"))
         self.assertEqual([], list(node._odom_info))
@@ -1619,7 +1663,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 warning = warnings[0]
                 self.assertIn(f"Search localization invalidated: {reason}", warning)
                 self.assertIn("selected_info_stamp_ns=9900000000", warning)
-                self.assertIn("requested_stamp_ns=0", warning)
+                self.assertIn("requested_stamp_ns=10000000000", warning)
                 self.assertIn("validation_ros_now_ns=10000000000", warning)
                 self.assertIn("info_age_ns=100000000", warning)
                 self.assertIn("actual_tf_stamp_ns=None", warning)
@@ -1819,7 +1863,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
 
-        self.assertEqual(2, len(node._tf_buffer.calls))
+        self.assertEqual(4, len(node._tf_buffer.calls))
         self.assertEqual(0, node._tf_buffer.snapshot_calls)
         self.assertEqual([], warnings)
 
