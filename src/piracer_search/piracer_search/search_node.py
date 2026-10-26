@@ -1,6 +1,7 @@
 """Search lifecycle, shared frontier evaluation, and Nav2 goal handoff."""
 
 from collections import deque
+import json
 import math
 import time
 
@@ -23,17 +24,16 @@ from rclpy.qos import (
 from rclpy.time import Time
 from std_srvs.srv import SetBool
 from tf2_ros import (
-    Buffer,
     ConnectivityException,
     ExtrapolationException,
     LookupException,
     TimeoutException,
-    TransformListener,
 )
 from visualization_msgs.msg import MarkerArray
 
 from .search_markers import _candidate_markers, _stale_marker_deletions
 from .search_algorithm import evaluate_search
+from .tf_timing import InternalTfTrace, SearchTfBuffer, SearchTransformListener
 
 
 def _map_subscription_qos():
@@ -91,8 +91,11 @@ class SearchNode(Node):
         self._localization_reason = None
         self._tf_snapshot_attempted = False
 
-        self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self._internal_tf_trace = InternalTfTrace()
+        self._tf_buffer = SearchTfBuffer(self._internal_tf_trace)
+        self._tf_listener = SearchTransformListener(
+            self._tf_buffer, self, self._internal_tf_trace
+        )
         self._action = ActionClient(
             self, NavigateToPose, self.get_parameter("navigate_to_pose_action").value
         )
@@ -193,6 +196,21 @@ class SearchNode(Node):
                 f"buffer_snapshot_yaml={snapshot_yaml!r}, "
                 f"buffer_snapshot_capture_error={capture_error!r}"
             )
+            try:
+                trace_capture = self._internal_tf_trace.capture()
+                trace_details = (
+                    f"internal_tf_trace_capture_start_monotonic_ns="
+                    f"{trace_capture['capture_start_monotonic_ns']}, "
+                    f"internal_tf_trace_capture_end_monotonic_ns="
+                    f"{trace_capture['capture_end_monotonic_ns']}, "
+                    f"internal_tf_trace_evicted_count={trace_capture['evicted_count']}, "
+                    f"internal_tf_trace_oldest_retained_monotonic_ns="
+                    f"{trace_capture['oldest_retained_monotonic_ns']}, "
+                    f"internal_tf_trace_json={json.dumps(trace_capture, separators=(',', ':'))!r}"
+                )
+            except Exception as exc:
+                trace_details = f"internal_tf_trace_capture_error={type(exc).__name__}: {str(exc)!r}"
+            snapshot_details += "; " + trace_details
             if diagnostic_details is None:
                 diagnostic_details = snapshot_details
             else:
@@ -368,6 +386,20 @@ class SearchNode(Node):
         }
 
     def _search_tick(self):
+        trace = getattr(self, "_internal_tf_trace", None)
+        if trace is None:
+            return self._search_tick_body(None)
+        span_id, tick_sequence = trace.begin("search_tick")
+        error = None
+        try:
+            return self._search_tick_body(tick_sequence)
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            trace.finish(span_id, error)
+
+    def _search_tick_body(self, tick_sequence):
         if not self._enabled or self._map is None:
             return
 
@@ -380,15 +412,46 @@ class SearchNode(Node):
         robot_pose = self._localization_pose(self._map.header.frame_id)
         if robot_pose is None:
             return
+        trace = getattr(self, "_internal_tf_trace", None)
+        grid_span = None
+        grid_error = None
         try:
-            result = evaluate_search(
-                self._grid(),
-                robot_pose,
-                camera=camera,
-            )
+            if trace is not None:
+                grid_span, _ = trace.begin(
+                    "search_computation", tick_sequence=tick_sequence, operation="grid"
+                )
+            grid = self._grid()
         except Exception as error:
+            grid_error = error
             self.get_logger().debug(f"Search waits for current map/TF: {error}")
             return
+        except BaseException as error:
+            grid_error = error
+            raise
+        finally:
+            if trace is not None and grid_span is not None:
+                trace.finish(grid_span, grid_error)
+
+        evaluation_span = None
+        evaluation_error = None
+        try:
+            if trace is not None:
+                evaluation_span, _ = trace.begin(
+                    "search_computation",
+                    tick_sequence=tick_sequence,
+                    operation="evaluate_search",
+                )
+            result = evaluate_search(grid, robot_pose, camera=camera)
+        except Exception as error:
+            evaluation_error = error
+            self.get_logger().debug(f"Search waits for current map/TF: {error}")
+            return
+        except BaseException as error:
+            evaluation_error = error
+            raise
+        finally:
+            if trace is not None and evaluation_span is not None:
+                trace.finish(evaluation_span, evaluation_error)
 
         if self._localization_pose(self._map.header.frame_id) is None:
             return

@@ -1,4 +1,6 @@
 import importlib
+import ast
+import json
 import sys
 import types
 import unittest
@@ -243,11 +245,28 @@ class SearchNodeCallbackTest(unittest.TestCase):
         tf_module.ConnectivityException = type("ConnectivityException", (FakeTFException,), {})
         tf_module.ExtrapolationException = type("ExtrapolationException", (FakeTFException,), {})
         tf_module.TimeoutException = type("TimeoutException", (FakeTFException,), {})
-        tf_module.Buffer = type("Buffer", (), {})
-        class FakeTransformListener:
+        class FakeTFBuffer:
             def __init__(self, *args, **kwargs):
+                self.set_calls = []
+                self.set_error = None
+
+            def set_transform(self, transform, authority):
+                self.set_calls.append((transform, authority))
+                if self.set_error is not None:
+                    raise self.set_error
+
+        tf_module.Buffer = FakeTFBuffer
+        class FakeTransformListener:
+            def callback(self, data):
+                self.callback_calls += 1
+                for transform in data.transforms:
+                    self.buffer.set_transform(transform, "default_authority")
+
+            def __init__(self, buffer, *args, **kwargs):
+                self.buffer = buffer
                 self.spin_thread = kwargs.get("spin_thread", False)
                 self.group = "reentrant"
+                self.callback_calls = 0
 
         tf_module.TransformListener = FakeTransformListener
         marker_module = types.ModuleType("visualization_msgs.msg")
@@ -377,6 +396,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._challenger_epoch = None
         node._challenger_count = 0
         node._published_marker_keys = set()
+        node._internal_tf_trace = self.module.InternalTfTrace()
         node._odom_info = deque(maxlen=10)
         node._localization_available = False
         node._localization_invalidated_at_ns = None
@@ -453,6 +473,161 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._tf_buffer = TFBuffer()
         node._tf_buffer.expected_exception = self.module.ExtrapolationException
         return node
+
+    def test_internal_tf_trace_is_bounded_and_reports_open_and_exceptional_spans(self):
+        trace = self.module.InternalTfTrace(capacity=3)
+        with patch.object(self.module.time, "monotonic_ns", side_effect=range(10, 30)):
+            tick, _ = trace.begin("search_tick")
+            trace.finish(tick)
+            failed, _ = trace.begin("search_computation", operation="grid")
+            trace.finish(failed, ValueError("grid failed"))
+            opened, _ = trace.begin(
+                "native_tf_callback", thread_id=17, stamp_ns_list=[123]
+            )
+            snapshot = trace.capture()
+            snapshot["open_spans"][0]["stamp_ns_list"][0] = 999
+            copied_again = trace.capture()
+
+        self.assertEqual(2, snapshot["evicted_count"])
+        self.assertEqual(3, len(snapshot["events"]))
+        self.assertEqual(snapshot["events"][0]["monotonic_ns"],
+                         snapshot["oldest_retained_monotonic_ns"])
+        self.assertEqual("exception", snapshot["events"][1]["phase"])
+        self.assertEqual("ValueError", snapshot["events"][1]["exception_class"])
+        self.assertEqual("grid failed", snapshot["events"][1]["exception_message"])
+        self.assertEqual(opened, snapshot["open_spans"][0]["span_id"])
+        self.assertEqual("entry", snapshot["open_spans"][0]["phase"])
+        self.assertEqual(17, snapshot["open_spans"][0]["thread_id"])
+        self.assertEqual(123, copied_again["open_spans"][0]["stamp_ns_list"][0])
+
+    def test_native_listener_and_setter_delegate_once_and_record_stamps(self):
+        trace = self.module.InternalTfTrace()
+        buffer = self.module.SearchTfBuffer(trace)
+        listener = self.module.SearchTransformListener(buffer, object(), trace)
+
+        def transform(parent, child, stamp):
+            return types.SimpleNamespace(
+                header=types.SimpleNamespace(
+                    frame_id=parent,
+                    stamp=types.SimpleNamespace(
+                        sec=stamp // 1_000_000_000,
+                        nanosec=stamp % 1_000_000_000,
+                    ),
+                ),
+                child_frame_id=child,
+            )
+
+        native = transform("/vo_odom", "base_link", 8_123_456_789)
+        other = transform("map", "camera", 9_000_000_000)
+        with patch.object(self.module.time, "monotonic_ns", side_effect=[10, 11, 12, 13]):
+            listener.callback(types.SimpleNamespace(transforms=[native, other]))
+
+        self.assertEqual(1, listener.callback_calls)
+        self.assertEqual([(native, "default_authority"), (other, "default_authority")],
+                         buffer.set_calls)
+        events = trace.capture()["events"]
+        self.assertEqual(
+            [
+                ("native_tf_callback", "entry"),
+                ("native_tf_set_transform", "entry"),
+                ("native_tf_set_transform", "return"),
+                ("native_tf_callback", "exit"),
+            ],
+            [(event["kind"], event["phase"]) for event in events],
+        )
+        self.assertEqual([8_123_456_789], events[0]["stamp_ns_list"])
+        self.assertEqual(8_123_456_789, events[1]["stamp_ns"])
+        self.assertEqual([10, 11, 12, 13], [event["monotonic_ns"] for event in events])
+        self.assertEqual(events[0]["thread_id"], events[3]["thread_id"])
+        self.assertEqual(events[1]["thread_id"], events[2]["thread_id"])
+
+    def test_native_setter_exception_is_recorded_and_propagated_once(self):
+        trace = self.module.InternalTfTrace()
+        buffer = self.module.SearchTfBuffer(trace)
+        listener = self.module.SearchTransformListener(buffer, object(), trace)
+        buffer.set_error = RuntimeError("setter failure")
+        native = types.SimpleNamespace(
+            header=types.SimpleNamespace(
+                frame_id="vo_odom",
+                stamp=types.SimpleNamespace(sec=8, nanosec=5),
+            ),
+            child_frame_id="base_link",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "setter failure"):
+            listener.callback(types.SimpleNamespace(transforms=[native]))
+
+        self.assertEqual(1, listener.callback_calls)
+        self.assertEqual(1, len(buffer.set_calls))
+        events = trace.capture()["events"]
+        self.assertEqual(
+            [("native_tf_callback", "entry"),
+             ("native_tf_set_transform", "entry"),
+             ("native_tf_set_transform", "exception"),
+             ("native_tf_callback", "exception")],
+            [(event["kind"], event["phase"]) for event in events],
+        )
+        self.assertEqual("RuntimeError", events[2]["exception_class"])
+        self.assertEqual("setter failure", events[3]["exception_message"])
+
+    def test_search_tick_records_grid_and_evaluation_separately_and_closes(self):
+        node = self.make_node()
+        with patch.object(self.module, "evaluate_search", side_effect=ValueError("bad map")):
+            node._search_tick()
+
+        events = node._internal_tf_trace.capture()["events"]
+        self.assertEqual(
+            [
+                ("search_tick", "entry"),
+                ("search_computation", "entry", "grid"),
+                ("search_computation", "exit", "grid"),
+                ("search_computation", "entry", "evaluate_search"),
+                ("search_computation", "exception", "evaluate_search"),
+                ("search_tick", "exit"),
+            ],
+            [
+                (event["kind"], event["phase"], event.get("operation"))
+                if event["kind"] == "search_computation"
+                else (event["kind"], event["phase"])
+                for event in events
+            ],
+        )
+        self.assertEqual([], node._internal_tf_trace.capture()["open_spans"])
+
+    def test_base_exceptions_close_grid_and_evaluation_spans(self):
+        for operation in ("grid", "evaluate_search"):
+            with self.subTest(operation=operation):
+                node = self.make_node()
+                if operation == "grid":
+                    def interrupted_grid():
+                        raise KeyboardInterrupt()
+
+                    node._grid = interrupted_grid
+                    context = patch.object(self.module, "evaluate_search")
+                else:
+                    context = patch.object(
+                        self.module,
+                        "evaluate_search",
+                        side_effect=KeyboardInterrupt(),
+                    )
+                with context, self.assertRaises(KeyboardInterrupt):
+                    node._search_tick()
+
+                captured = node._internal_tf_trace.capture()
+                computation = [
+                    event for event in captured["events"]
+                    if event["kind"] == "search_computation"
+                    and event["operation"] == operation
+                ]
+                self.assertEqual([], captured["open_spans"])
+                self.assertEqual("entry", computation[0]["phase"])
+                self.assertEqual("exception", computation[1]["phase"])
+                self.assertEqual("KeyboardInterrupt", computation[1]["exception_class"])
+                tick_exit = next(
+                    event for event in captured["events"]
+                    if event["kind"] == "search_tick" and event["phase"] == "exception"
+                )
+                self.assertIsNotNone(tick_exit)
 
     @staticmethod
     def odom_info(stamp_ns, lost=False):
@@ -924,6 +1099,11 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._logger.warning = warnings.append
         node._localization_available = True
         node._last_accepted_odom_stamp_ns = 9_900_000_000
+        trace_captures = []
+        trace_capture = node._internal_tf_trace.capture
+        node._internal_tf_trace.capture = lambda: (
+            trace_captures.append(True) or trace_capture()
+        )
         handle = FakeHandle()
         candidate = self.candidate("active")
         node._active_goal = {
@@ -933,6 +1113,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "cancel_requested": False, "cancel_reason": None,
         }
         node._odom_info_callback(self.odom_info(9_900_000_000))
+        node._internal_tf_trace.begin("search_tick", tick_sequence=7)
         node._tf_buffer.missing.add("vo_odom")
         node._tf_buffer.snapshot_yaml = (
             "base_link:\n  parent: 'vo_odom'\n"
@@ -951,11 +1132,12 @@ class SearchNodeCallbackTest(unittest.TestCase):
             return all_frames_as_yaml()
         node._tf_buffer.all_frames_as_yaml = capture_yaml
 
-        with patch.object(self.module.time, "monotonic_ns", side_effect=[101, 102, 103]):
+        with patch.object(self.module.time, "monotonic_ns", side_effect=range(101, 140)):
             self.assertIsNone(node._localization_pose("map"))
 
         self.assertEqual(["challenger_reset", "cancel_started", "buffer_snapshot"], events)
         self.assertEqual(1, node._tf_buffer.snapshot_calls)
+        self.assertEqual([True], trace_captures)
         self.assertTrue(node._active_goal["localization_invalidated"])
         self.assertEqual(1, handle.cancel_count)
         self.assertEqual(1, len(warnings))
@@ -966,9 +1148,21 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertIn("buffer_snapshot_end_monotonic_ns=103", warning)
         self.assertIn(f"buffer_snapshot_yaml={node._tf_buffer.snapshot_yaml!r}", warning)
         self.assertIn("buffer_snapshot_capture_error=None", warning)
+        self.assertIn("internal_tf_trace_capture_start_monotonic_ns=104", warning)
+        trace_text = warning.split("internal_tf_trace_json=", 1)[1]
+        trace_data = json.loads(ast.literal_eval(trace_text))
+        self.assertEqual(0, trace_data["evicted_count"])
+        self.assertEqual("search_tick", trace_data["events"][0]["kind"])
+        self.assertEqual("entry", trace_data["open_spans"][0]["phase"])
+        self.assertEqual(7, trace_data["open_spans"][0]["tick_sequence"])
 
     def test_older_successful_tf_fallback_does_not_capture(self):
         node = self.make_localization_node()
+        trace_captures = []
+        trace_capture = node._internal_tf_trace.capture
+        node._internal_tf_trace.capture = lambda: (
+            trace_captures.append(True) or trace_capture()
+        )
         node._localization_available = True
         node._odom_info_callback(self.odom_info(9_900_000_000))
         node._odom_info_callback(self.odom_info(9_950_000_000))
@@ -979,6 +1173,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
         self.assertEqual(3, len(node._tf_buffer.calls))
         self.assertEqual(0, node._tf_buffer.snapshot_calls)
+        self.assertEqual([], trace_captures)
         self.assertTrue(node._localization_available)
 
     def test_non_tf_invalidations_and_startup_tf_warning_do_not_capture(self):
@@ -1010,7 +1205,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._tf_buffer.missing.add("vo_odom")
         node._tf_buffer.snapshot_error = RuntimeError("yaml unavailable")
 
-        with patch.object(self.module.time, "monotonic_ns", side_effect=[201, 202, 203]):
+        with patch.object(self.module.time, "monotonic_ns", side_effect=range(201, 240)):
             self.assertIsNone(node._localization_pose("map"))
 
         self.assertFalse(node._localization_available)
@@ -1021,7 +1216,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._localization_available = True
         node._now_ns += 100_000_000
         node._odom_info_callback(self.odom_info(10_050_000_000))
-        with patch.object(self.module.time, "monotonic_ns", side_effect=[301, 302, 303]):
+        with patch.object(self.module.time, "monotonic_ns", side_effect=range(301, 340)):
             self.assertIsNone(node._localization_pose("map"))
         self.assertEqual(1, node._tf_buffer.snapshot_calls)
         self.assertEqual(2, len(warnings))
