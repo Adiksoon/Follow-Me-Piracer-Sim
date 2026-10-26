@@ -87,6 +87,8 @@ class SearchNode(Node):
         self._localization_available = False
         self._localization_invalidated_at_ns = None
         self._last_accepted_odom_stamp_ns = None
+        self._last_accepted_native_tf_stamp_ns = None
+        self._last_accepted_full_tf_stamp_ns = None
         self._last_ros_time_ns = None
         self._localization_reason = None
         self._tf_snapshot_attempted = False
@@ -155,6 +157,8 @@ class SearchNode(Node):
         self._localization_available = False
         self._localization_invalidated_at_ns = None
         self._last_accepted_odom_stamp_ns = None
+        self._last_accepted_native_tf_stamp_ns = None
+        self._last_accepted_full_tf_stamp_ns = None
         self._mark_owned_goal_localization_invalidated("clock_regression")
         self._reset_challenger()
         if was_available or self._localization_reason != "ROS clock moved backwards":
@@ -237,6 +241,11 @@ class SearchNode(Node):
 
     def _localization_pose(self, map_frame):
         now_ns = self._current_ros_time_ns()
+        max_age_ns = round(
+            float(self.get_parameter("max_localization_age_sec").value)
+            * 1_000_000_000
+        )
+        base_frame = self.get_parameter("base_frame").value
         eligible = [
             message for message in self._odom_info
             if 0 < self._stamp_ns(message) <= now_ns
@@ -246,95 +255,186 @@ class SearchNode(Node):
                  or self._stamp_ns(message) >= self._last_accepted_odom_stamp_ns)
         ]
         if not eligible:
+            queued_stamps = [
+                self._stamp_ns(message) for message in self._odom_info
+                if self._stamp_ns(message) > 0
+            ]
+            selected_stamp_ns = max(queued_stamps, default=None)
+            info_age_ns = (
+                now_ns - selected_stamp_ns
+                if selected_stamp_ns is not None else None
+            )
+            if selected_stamp_ns is None:
+                rejection_reason = "no positive OdomInfo sample"
+            elif selected_stamp_ns > now_ns:
+                rejection_reason = "OdomInfo stamp is in the future"
+            elif (self._localization_invalidated_at_ns is not None
+                  and selected_stamp_ns <= self._localization_invalidated_at_ns):
+                rejection_reason = "OdomInfo does not exceed localization barrier"
+            elif (self._last_accepted_odom_stamp_ns is not None
+                  and selected_stamp_ns < self._last_accepted_odom_stamp_ns):
+                rejection_reason = "OdomInfo timestamp regressed"
+            else:
+                rejection_reason = "no eligible OdomInfo sample"
+            details = (
+                f"selected_info_stamp_ns={selected_stamp_ns}, "
+                f"info_age_ns={info_age_ns}, requested_stamp_ns=0, "
+                f"requested_time='latest', target_frame='vo_odom', "
+                f"source_frame={base_frame!r}, actual_tf_stamp_ns=None, "
+                f"actual_tf_age_ns=None, validation_ros_now_ns={now_ns}, "
+                f"max_age_ns={max_age_ns}, rejection_reason={rejection_reason!r}"
+            )
             if self._localization_available:
-                self._invalidate_localization("no current OdomInfo")
-            return None
-
-        max_age_ns = round(float(self.get_parameter("max_localization_age_sec").value) * 1_000_000_000)
-        candidates = []
-        for message in sorted(eligible, key=self._stamp_ns, reverse=True):
-            stamp_ns = self._stamp_ns(message)
-            age_ns = now_ns - stamp_ns
-            if age_ns <= max_age_ns:
-                candidates.append((stamp_ns, age_ns))
-
-        if not candidates:
-            self._invalidate_localization("OdomInfo is older than max_localization_age_sec")
-            return None
-
-        base_frame = self.get_parameter("base_frame").value
-        first_failure = None
-        for stamp_ns, age_ns in candidates:
-            measurement_time = Time(
-                nanoseconds=stamp_ns,
-                clock_type=self.get_clock().clock_type,
-            )
-            candidate_transform = None
-            candidate_failed = False
-            for target_frame, reason in (
-                ("vo_odom", "vo_odom to base frame TF unavailable"),
-                (map_frame, "map to base frame TF unavailable"),
-            ):
-                try:
-                    candidate_transform = self._tf_buffer.lookup_transform(
-                        target_frame, base_frame, measurement_time
-                    )
-                except Exception as exc:
-                    availability_exception = isinstance(exc, (
-                        LookupException,
-                        ConnectivityException,
-                        ExtrapolationException,
-                        TimeoutException,
-                    ))
-                    failure_monotonic_ns = (
-                        time.monotonic_ns() if availability_exception else None
-                    )
-                    diagnostic_details = (
-                        f"selected_measurement_stamp_ns={stamp_ns}, "
-                        f"requested_stamp_ns={measurement_time.nanoseconds}, "
-                        f"ros_now_ns={now_ns}, age_ns={age_ns}, max_age_ns={max_age_ns}, "
-                        f"target_frame={target_frame!r}, source_frame={base_frame!r}, "
-                        f"exception_class={type(exc).__name__}, "
-                        f"exception_message={str(exc)!r}"
-                    )
-                    if availability_exception:
-                        if first_failure is None:
-                            first_failure = (
-                                reason, diagnostic_details, failure_monotonic_ns
-                            )
-                        candidate_failed = True
-                        break
-                    self._invalidate_localization(
-                        reason, diagnostic_details=diagnostic_details
-                    )
-                    return None
-                if target_frame == map_frame:
-                    transform = candidate_transform
-            if not candidate_failed:
-                translation = transform.transform.translation
-                rotation = transform.transform.rotation
-                yaw = math.atan2(
-                    2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
-                    1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+                self._invalidate_localization(
+                    "no current OdomInfo", diagnostic_details=details
                 )
-                was_available = self._localization_available
-                self._localization_available = True
-                self._localization_invalidated_at_ns = None
-                self._last_accepted_odom_stamp_ns = stamp_ns
-                self._localization_reason = None
-                if not was_available:
-                    self.get_logger().info("Search localization is available")
-                return translation.x, translation.y, yaw
+            return None
 
-        if first_failure is not None:
-            reason, diagnostic_details, failure_monotonic_ns = first_failure
+        info_message = max(eligible, key=self._stamp_ns)
+        info_stamp_ns = self._stamp_ns(info_message)
+        info_age_ns = now_ns - info_stamp_ns
+        info_details = (
+            f"selected_info_stamp_ns={info_stamp_ns}, info_age_ns={info_age_ns}, "
+            f"requested_stamp_ns=0, requested_time='latest', "
+            f"target_frame='vo_odom', source_frame={base_frame!r}, "
+            f"actual_tf_stamp_ns=None, actual_tf_age_ns=None, "
+            f"validation_ros_now_ns={now_ns}, max_age_ns={max_age_ns}"
+        )
+        if info_age_ns > max_age_ns:
             self._invalidate_localization(
-                reason, diagnostic_details=diagnostic_details,
-                tf_failure_monotonic_ns=failure_monotonic_ns,
+                "OdomInfo is older than max_localization_age_sec",
+                diagnostic_details=info_details + ", rejection_reason='stale OdomInfo'",
             )
             return None
 
-        return None
+        transform_records = []
+        for target_frame in ("vo_odom", map_frame):
+            reason = f"{target_frame} to base frame TF unavailable"
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    target_frame, base_frame, Time()
+                )
+            except Exception as exc:
+                caught_monotonic_ns = time.monotonic_ns()
+                availability_exception = isinstance(exc, (
+                    LookupException,
+                    ConnectivityException,
+                    ExtrapolationException,
+                    TimeoutException,
+                ))
+                prior_tf_details = ", ".join(
+                    f"{prior_target}_tf_stamp_ns={self._stamp_ns(prior_transform)}, "
+                    f"{prior_target}_tf_age_ns="
+                    f"{now_ns - self._stamp_ns(prior_transform)}"
+                    for prior_target, prior_transform in transform_records
+                )
+                details = (
+                    f"{info_details}, target_frame={target_frame!r}, "
+                    f"source_frame={base_frame!r}, actual_tf_stamp_ns=None, "
+                    f"actual_tf_age_ns=None, rejection_reason='TF lookup failed', "
+                    f"{prior_tf_details}, "
+                    f"exception_class={type(exc).__name__}, "
+                    f"exception_message={str(exc)!r}"
+                )
+                self._invalidate_localization(
+                    reason, diagnostic_details=details,
+                    tf_failure_monotonic_ns=(
+                        caught_monotonic_ns if availability_exception else None
+                    ),
+                )
+                return None
+            transform_records.append((target_frame, transform))
+
+        native_transform = transform_records[0][1]
+        full_transform = transform_records[1][1]
+        validation_now_ns = self.get_clock().now().nanoseconds
+        last_ros_time_ns = self._last_ros_time_ns
+        if (validation_now_ns < now_ns
+                or (last_ros_time_ns is not None
+                    and validation_now_ns < last_ros_time_ns)):
+            self._handle_clock_regression(validation_now_ns)
+            self._last_ros_time_ns = validation_now_ns
+            return None
+
+        self._last_ros_time_ns = validation_now_ns
+        current_barrier_ns = self._localization_invalidated_at_ns
+        accepted_info_ns = self._last_accepted_odom_stamp_ns
+        current_eligible = [
+            self._stamp_ns(message) for message in self._odom_info
+            if 0 < self._stamp_ns(message) <= validation_now_ns
+            and (current_barrier_ns is None
+                 or self._stamp_ns(message) > current_barrier_ns)
+            and (accepted_info_ns is None
+                 or self._stamp_ns(message) >= accepted_info_ns)
+        ]
+
+        checks = (
+            ("OdomInfo", info_stamp_ns, self._last_accepted_odom_stamp_ns),
+            ("native TF", self._stamp_ns(native_transform),
+             self._last_accepted_native_tf_stamp_ns),
+            ("full TF", self._stamp_ns(full_transform),
+             self._last_accepted_full_tf_stamp_ns),
+        )
+        for role, stamp_ns, accepted_stamp_ns in checks:
+            age_ns = validation_now_ns - stamp_ns
+            reason = None
+            if stamp_ns == 0:
+                reason = f"{role} stamp is zero"
+            elif stamp_ns > validation_now_ns:
+                reason = f"{role} stamp is in the future"
+            elif age_ns > max_age_ns:
+                reason = f"{role} is older than max_localization_age_sec"
+            elif (current_barrier_ns is not None
+                  and stamp_ns <= current_barrier_ns):
+                reason = f"{role} does not exceed localization invalidation barrier"
+            elif accepted_stamp_ns is not None and stamp_ns < accepted_stamp_ns:
+                reason = f"{role} timestamp regressed"
+            elif role == "OdomInfo" and info_stamp_ns != max(current_eligible, default=None):
+                reason = "selected OdomInfo is no longer newest eligible sample"
+            if role == "OdomInfo" and info_stamp_ns not in current_eligible:
+                reason = reason or "selected OdomInfo is no longer eligible"
+            if reason is not None:
+                target_frame = "vo_odom" if role == "native TF" else map_frame
+                native_stamp_ns = self._stamp_ns(native_transform)
+                full_stamp_ns = self._stamp_ns(full_transform)
+                details = (
+                    f"selected_info_stamp_ns={info_stamp_ns}, "
+                    f"info_age_ns={validation_now_ns - info_stamp_ns}, "
+                    f"requested_stamp_ns=0, requested_time='latest', "
+                    f"target_frame={target_frame!r}, source_frame={base_frame!r}, "
+                    f"actual_tf_stamp_ns={stamp_ns if role != 'OdomInfo' else None}, "
+                    f"actual_tf_age_ns={age_ns if role != 'OdomInfo' else None}, "
+                    f"native_tf_stamp_ns={native_stamp_ns}, "
+                    f"native_tf_age_ns={validation_now_ns - native_stamp_ns}, "
+                    f"full_tf_stamp_ns={full_stamp_ns}, "
+                    f"full_tf_age_ns={validation_now_ns - full_stamp_ns}, "
+                    f"validation_ros_now_ns={validation_now_ns}, "
+                    f"max_age_ns={max_age_ns}, rejection_reason={reason!r}"
+                )
+                self._invalidate_localization(
+                    reason, diagnostic_details=details,
+                    tf_failure_monotonic_ns=(
+                        None if role == "OdomInfo" else time.monotonic_ns()
+                    ),
+                )
+                return None
+
+        translation = full_transform.transform.translation
+        rotation = full_transform.transform.rotation
+        yaw = math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        )
+        was_available = self._localization_available
+        self._localization_available = True
+        self._localization_invalidated_at_ns = None
+        self._last_accepted_odom_stamp_ns = info_stamp_ns
+        self._last_accepted_native_tf_stamp_ns = self._stamp_ns(native_transform)
+        self._last_accepted_full_tf_stamp_ns = self._stamp_ns(full_transform)
+        self._localization_reason = None
+        if not was_available:
+            self.get_logger().info("Search localization is available")
+        return translation.x, translation.y, yaw
 
     def _set_search(self, request, response):
         if request.data:

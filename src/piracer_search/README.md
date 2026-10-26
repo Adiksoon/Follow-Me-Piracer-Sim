@@ -6,11 +6,13 @@ GAIN_COST_VISIBLE_OPAQUE_W050 rule. Grid path cost is a ranking estimate;
 Nav2 plans the route and handles obstacle and costmap feasibility.
 
 The node subscribes to its configured map topic and `/visual_vo/odom_info`. It
-uses the newest positive odometry information no more than 0.5 seconds old and
-checks `vo_odom -> base_link` and `map -> base_link` at that measurement time
-before evaluating or sending a goal. A localization loss cancels an owned goal;
-recovery requires a newer odometry measurement. The maximum age is available as
-the `max_localization_age_sec` parameter. The node owns one `NavigateToPose`
+uses the newest eligible positive OdomInfo as a health sample and checks the
+latest `vo_odom -> base_link` transform and latest full `map -> base_link`
+transform independently. The selected Info and both returned transform stamps
+must each be no more than 0.5 seconds old. After localization loss, Info and
+both transform streams must each advance beyond the recovery barrier before
+localization is accepted. The maximum age is available as the
+`max_localization_age_sec` parameter. The node owns one `NavigateToPose`
 action client. `/search/enable`
 (std_srvs/SetBool) starts or stops Search. While enabled, it periodically
 ranks candidates, publishes the six highest-scoring markers on
