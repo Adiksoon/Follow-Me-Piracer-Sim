@@ -2,9 +2,12 @@
 
 from collections import deque
 from copy import deepcopy
-from threading import Lock, get_ident
+from threading import Lock, Thread, get_ident
 import time
 
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
+from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.time import Time
 
 from tf2_ros import Buffer, TransformListener
@@ -263,3 +266,53 @@ class SearchTransformListener(TransformListener):
                 reporter(operation, exc)
             except Exception:
                 pass
+
+
+class SearchTfReceiver:
+    """Own a TF-only node/executor; share only the existing thread-safe buffer."""
+
+    def __init__(self, buffer, trace, error_reporter, *, context, namespace,
+                 use_sim_time):
+        self.executor = self.listener = self.thread = None
+        self._closed = False
+        # Do not inherit the launch's __node:=piracer_search remapping.
+        self.node = Node(
+            "piracer_search_tf_listener", context=context, namespace=namespace,
+            use_global_arguments=False, enable_rosout=False,
+            start_parameter_services=False,
+            parameter_overrides=[Parameter("use_sim_time", value=use_sim_time)],
+        )
+        try:
+            self.executor = SingleThreadedExecutor(context=context)
+            self.executor.add_node(self.node)
+            self.listener = SearchTransformListener(
+                buffer, self.node, trace, error_reporter
+            )
+            self.thread = Thread(
+                target=self._spin, name="piracer-search-tf", daemon=False
+            )
+        except BaseException:
+            self.close()
+            raise
+
+    def start(self):
+        self.thread.start()
+
+    def _spin(self):
+        try:
+            self.executor.spin()
+        except ExternalShutdownException:
+            pass  # The shared ROS context may already be shut down by SIGINT.
+
+    def close(self):
+        if self._closed:
+            return
+        if self.executor is not None:
+            self.executor.shutdown()
+        if self.thread is not None and self.thread.ident is not None:
+            self.thread.join()
+        if self.listener is not None:
+            self.listener.unregister()
+        self.node.executor = None
+        self.node.destroy_node()
+        self._closed = True

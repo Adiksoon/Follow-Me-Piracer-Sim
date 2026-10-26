@@ -117,6 +117,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 return True
 
         executor_module.MultiThreadedExecutor = FakeMultiThreadedExecutor
+        executor_module.SingleThreadedExecutor = object
+        executor_module.ExternalShutdownException = type("ExternalShutdownException", (Exception,), {})
         rclpy.executors = executor_module
         rclpy.callback_groups = callback_groups_module
         rclpy.lifecycle_events = lifecycle_events
@@ -129,15 +131,23 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         rclpy.init = fake_init
         rclpy.shutdown = fake_shutdown
+        utilities_module = types.ModuleType("rclpy.utilities")
+        utilities_module.try_shutdown = fake_shutdown
+        parameter_module = types.ModuleType("rclpy.parameter")
+        parameter_module.Parameter = object
 
         class FakeNode:
             def __init__(self, name):
+                self.context = object()
                 self.default_callback_group = object()
-                self.parameters = {}
+                self.parameters = {"use_sim_time": True}
                 self.subscriptions = []
                 self.services = []
                 self.timers = []
                 lifecycle_events.append("node_create")
+
+            def get_namespace(self):
+                return "/"
 
             def destroy_node(self):
                 lifecycle_events.append("node_destroy")
@@ -308,6 +318,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
         modules = {
             "rclpy": rclpy,
             "rclpy.node": node_module,
+            "rclpy.utilities": utilities_module,
+            "rclpy.parameter": parameter_module,
             "rclpy.executors": executor_module,
             "rclpy.callback_groups": callback_groups_module,
             "rclpy.qos": qos_module,
@@ -332,6 +344,22 @@ class SearchNodeCallbackTest(unittest.TestCase):
         }
         with patch.dict(sys.modules, modules):
             cls.module = importlib.import_module("piracer_search.search_node")
+            cls.tf_module = importlib.import_module("piracer_search.tf_timing")
+        class FakeTfReceiver:
+            def __init__(self, buffer, trace, error_reporter, **kwargs):
+                self.node = object()
+                self.listener = FakeTransformListener(buffer, self.node)
+                self.context = kwargs["context"]
+                self.namespace = kwargs["namespace"]
+                self.use_sim_time = kwargs["use_sim_time"]
+
+            def start(self):
+                lifecycle_events.append("tf_receiver_start")
+
+            def close(self):
+                lifecycle_events.append("tf_receiver_close")
+
+        cls.module.SearchTfReceiver = FakeTfReceiver
         cls.marker_helpers = marker_helpers
 
     def test_main_uses_two_worker_executor_and_cleans_up_after_normal_spin(self):
@@ -346,8 +374,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertEqual(
             ["rclpy_init", "node_create", "executor_create",
-             "executor_add_node", "executor_spin", "executor_shutdown",
-             "node_destroy", "rclpy_shutdown"],
+             "executor_add_node", "tf_receiver_start", "executor_spin", "executor_shutdown",
+             "tf_receiver_close", "node_destroy", "rclpy_shutdown"],
             events,
         )
         self.assertEqual(1, len(self.module.MultiThreadedExecutor.instances))
@@ -368,8 +396,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertEqual(
             ["rclpy_init", "node_create", "executor_create",
-             "executor_add_node", "executor_spin", "executor_shutdown",
-             "node_destroy", "rclpy_shutdown"],
+             "executor_add_node", "tf_receiver_start", "executor_spin", "executor_shutdown",
+             "tf_receiver_close", "node_destroy", "rclpy_shutdown"],
             events,
         )
         self.assertEqual(1, len(self.module.MultiThreadedExecutor.instances))
@@ -396,6 +424,9 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertIs(group, node._action.callback_group)
         self.assertEqual("reentrant", node._tf_listener.group)
         self.assertFalse(node._tf_listener.spin_thread)
+        self.assertIs(node.context, node._tf_receiver.context)
+        self.assertTrue(node._tf_receiver.use_sim_time)
+        self.assertEqual("/", node._tf_receiver.namespace)
 
     def make_node(self):
         node = object.__new__(self.module.SearchNode)

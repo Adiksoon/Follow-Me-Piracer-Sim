@@ -15,7 +15,7 @@ from nav_msgs.msg import OccupancyGrid
 from rtabmap_msgs.msg import OdomInfo
 from rclpy.action import ActionClient
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -25,6 +25,7 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from rclpy.time import Time
+from rclpy.utilities import try_shutdown
 from std_srvs.srv import SetBool
 from tf2_ros import (
     ConnectivityException,
@@ -36,7 +37,9 @@ from visualization_msgs.msg import MarkerArray
 
 from .search_markers import _candidate_markers, _stale_marker_deletions
 from .search_algorithm import evaluate_search
-from .tf_timing import InternalTfTrace, SearchTfBuffer, SearchTransformListener
+from .tf_timing import (
+    InternalTfTrace, SearchTfBuffer, SearchTfReceiver, SearchTransformListener,
+)
 
 
 def _map_subscription_qos():
@@ -139,9 +142,6 @@ class SearchNode(Node):
             self._internal_tf_trace, self._localization_trace_enabled,
             self._trace_error,
         )
-        self._tf_listener = SearchTransformListener(
-            self._tf_buffer, self, self._internal_tf_trace, self._trace_error
-        )
         self._search_callback_group = MutuallyExclusiveCallbackGroup()
         self._action = ActionClient(
             self, NavigateToPose, self.get_parameter("navigate_to_pose_action").value,
@@ -178,6 +178,13 @@ class SearchNode(Node):
             "Search localization max age: "
             f"{float(self.get_parameter('max_localization_age_sec').value):.3f} s"
         )
+
+        self._tf_receiver = SearchTfReceiver(
+            self._tf_buffer, self._internal_tf_trace, self._trace_error,
+            context=self.context, namespace=self.get_namespace(),
+            use_sim_time=bool(self.get_parameter("use_sim_time").value),
+        )
+        self._tf_listener = self._tf_receiver.listener
 
     def _map_callback(self, message):
         self._map = message
@@ -1247,12 +1254,18 @@ class SearchNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = SearchNode()
-    executor = MultiThreadedExecutor(num_threads=2)
-    executor.add_node(node)
+    executor = None
     try:
+        executor = MultiThreadedExecutor(num_threads=2)
+        executor.add_node(node)
+        node._tf_receiver.start()
         executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        executor.shutdown()
+        if executor is not None:
+            executor.shutdown()
+        node._tf_receiver.close()
         node._evaluation_executor.shutdown(wait=True, cancel_futures=True)
         if node._localization_trace_enabled:
             try:
@@ -1272,7 +1285,7 @@ def main(args=None):
             except Exception as exc:
                 node._trace_error("shutdown_dump", exc)
         node.destroy_node()
-        rclpy.shutdown()
+        try_shutdown()
 
 
 if __name__ == "__main__":
