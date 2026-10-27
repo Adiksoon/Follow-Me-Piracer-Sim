@@ -1,6 +1,7 @@
 import importlib
 import ast
 import json
+import math
 import sys
 import types
 import unittest
@@ -89,7 +90,17 @@ class SearchNodeCallbackTest(unittest.TestCase):
         class FakeMutuallyExclusiveCallbackGroup:
             pass
 
+        class FakeGuardCondition:
+            def __init__(self, callback, callback_group):
+                self.callback = callback
+                self.callback_group = callback_group
+                self.trigger_count = 0
+
+            def trigger(self):
+                self.trigger_count += 1
+
         callback_groups_module.MutuallyExclusiveCallbackGroup = FakeMutuallyExclusiveCallbackGroup
+        node_module.FakeGuardCondition = FakeGuardCondition
 
         class FakeMultiThreadedExecutor:
             instances = []
@@ -144,6 +155,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.subscriptions = []
                 self.services = []
                 self.timers = []
+                self.guards = []
                 lifecycle_events.append("node_create")
 
             def get_namespace(self):
@@ -172,6 +184,11 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
             def create_publisher(self, *args):
                 return FakePublisher()
+
+            def create_guard_condition(self, callback, *, callback_group):
+                guard = node_module.FakeGuardCondition(callback, callback_group)
+                self.guards.append(guard)
+                return guard
 
             def create_service(self, *args, **kwargs):
                 record = types.SimpleNamespace(
@@ -352,6 +369,11 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.context = kwargs["context"]
                 self.namespace = kwargs["namespace"]
                 self.use_sim_time = kwargs["use_sim_time"]
+                self.received_odom_info = []
+                self.odom_info_wakeup = kwargs["odom_info_wakeup"]
+
+            def receive_odom_info(self, message):
+                self.received_odom_info.append(message)
 
             def start(self):
                 lifecycle_events.append("tf_receiver_start")
@@ -415,6 +437,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertTrue(all(
             subscription.callback_group is group
             for subscription in node.subscriptions
+            if subscription is not node._odom_info_subscription
         ))
         self.assertTrue(all(
             service.callback_group is group
@@ -427,6 +450,14 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertIs(node.context, node._tf_receiver.context)
         self.assertTrue(node._tf_receiver.use_sim_time)
         self.assertEqual("/", node._tf_receiver.namespace)
+        self.assertIsInstance(node._odom_info_callback_group,
+                              self.module.MutuallyExclusiveCallbackGroup)
+        self.assertIsNot(group, node._odom_info_callback_group)
+        self.assertIsNot(node.default_callback_group, node._odom_info_callback_group)
+        self.assertIs(node._odom_info_callback_group,
+                      node._odom_info_subscription.callback_group)
+        self.assertIs(group, node._odom_info_wakeup.callback_group)
+        self.assertIs(node._odom_info_wakeup, node._tf_receiver.odom_info_wakeup)
 
     def make_node(self):
         node = object.__new__(self.module.SearchNode)
@@ -441,6 +472,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         )
         node._frontier_key = ((1, 2),)
         node._failed_attempts = {}
+        node._exhausted_candidates = set()
         node._completed_candidates = set()
         node._retry_target = None
         node._replacement_target = None
@@ -455,11 +487,14 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._internal_tf_trace = self.module.InternalTfTrace()
         node._localization_trace_enabled = False
         node._odom_info = deque(maxlen=10)
+        node._last_processed_odom_info_sequence = 0
         node._localization_available = False
         node._localization_invalidated_at_ns = None
         node._last_accepted_odom_stamp_ns = None
         node._last_accepted_full_tf_stamp_ns = None
+        node._tf_future_lead_ns = 100_000_000
         node._last_ros_time_ns = None
+        node._clock_epoch = 0
         node._localization_reason = None
         node._tf_snapshot_attempted = False
         node._now_ns = 10_000_000_000
@@ -477,7 +512,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "camera.max_range_m": 5.0,
             "base_frame": "base_link",
             "max_localization_age_sec": 0.5,
-            "odom_info_topic": "/visual_vo/odom_info",
+            "odom_info_topic": "/visual_vo/odom_info_lite",
+            "tf_future_lead_sec": 0.1,
             "goal_switch_margin": 0.10,
         }
         node.get_parameter = lambda name: types.SimpleNamespace(value=params[name])
@@ -906,13 +942,57 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
     def test_search_node_declares_and_wires_project_odom_info_topic(self):
         node = self.module.SearchNode()
-        self.assertEqual("/visual_vo/odom_info",
+        self.assertEqual("/visual_vo/odom_info_lite",
                          node.get_parameter("odom_info_topic").value)
-        odom_subscription = next(
-            subscription for subscription in node.subscriptions
-            if subscription.message_type is self.module.OdomInfo
-        )
-        self.assertEqual("/visual_vo/odom_info", odom_subscription.topic)
+        self.assertEqual("/visual_vo/odom_info_lite",
+                         node._odom_info_subscription.topic)
+        self.assertIs(self.module.OdomInfo,
+                      node._odom_info_subscription.message_type)
+        self.assertIs(self.module.qos_profile_sensor_data,
+                      node._odom_info_subscription.qos)
+        self.assertIn(node._odom_info_subscription, node.subscriptions)
+        self.assertFalse(hasattr(node._tf_receiver, "odom_info_subscription"))
+        self.assertEqual(100_000_000, node._tf_future_lead_ns)
+
+    def test_tf_future_lead_rejects_nonfinite_or_negative_configuration(self):
+        base_node = self.module.SearchNode.__mro__[1]
+        original_declare = base_node.declare_parameter
+        for invalid in (-0.1, float("nan"), float("inf")):
+            with self.subTest(value=invalid):
+                def declare_with_invalid_value(fake_node, name, default):
+                    original_declare(fake_node, name, default)
+                    if name == "tf_future_lead_sec":
+                        fake_node.parameters[name] = invalid
+
+                with patch.object(base_node, "declare_parameter",
+                                  declare_with_invalid_value):
+                    with self.assertRaisesRegex(
+                            ValueError, "finite and non-negative"):
+                        self.module.SearchNode()
+
+    def test_odom_info_reception_only_delegates_without_validation(self):
+        node = self.module.SearchNode()
+        message = self.odom_info(9_950_000_000, lost=True)
+        with patch.object(node, "_odom_info_callback") as validate:
+            node._odom_info_subscription.callback(message)
+        self.assertEqual([message], node._tf_receiver.received_odom_info)
+        validate.assert_not_called()
+        self.assertEqual([], list(node._odom_info))
+
+    def test_odom_subscription_failure_closes_already_created_tf_helper(self):
+        events = self.module.rclpy.lifecycle_events
+        events.clear()
+        original = self.module.Node.create_subscription
+
+        def create(node, message_type, topic, callback, qos, **kwargs):
+            if topic == "/visual_vo/odom_info_lite":
+                raise RuntimeError("subscription failed")
+            return original(node, message_type, topic, callback, qos, **kwargs)
+
+        with patch.object(self.module.Node, "create_subscription", create):
+            with self.assertRaisesRegex(RuntimeError, "subscription failed"):
+                self.module.SearchNode()
+        self.assertEqual(1, events.count("tf_receiver_close"))
 
     def test_future_sample_does_not_hide_latest_nonfuture_sample(self):
         node = self.make_localization_node()
@@ -1082,16 +1162,13 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertEqual(outcomes[0], outcomes[1])
         self.assertEqual((1.0, 2.0, 0.0), outcomes[1])
-        odom = next(event for event in traced if event["kind"] == "odom_info_callback")
         decision = next(event for event in traced if event["kind"] == "localization_validation")
-        self.assertEqual("queued", odom["disposition"])
-        self.assertFalse(odom["callback_entry_is_dds_arrival"])
         self.assertTrue(decision["valid"])
         self.assertEqual(9_900_000_000, decision["selected_odom_stamp_ns"])
         self.assertEqual(1, len(decision["lookups"]))
         self.assertEqual("actual_validation_lookup", decision["lookups"][0]["lookup_kind"])
         counts, _ = node._internal_tf_trace.counts()
-        self.assertEqual(1, counts["odom_info_callback"])
+        self.assertEqual(0, counts["odom_info_callback"])
         self.assertEqual(1, counts["localization_validation"])
 
     def test_localization_trace_records_stale_info_and_exact_tf_lookup_error(self):
@@ -1449,6 +1526,125 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(9_950_000_000, node._tf_buffer.stamps["vo_odom"])
         self.assertEqual(9_950_000_000, node._tf_buffer.stamps["map"])
         self.assertEqual([], node._tf_buffer.calls)
+
+    def test_tf_executor_loss_handoff_cannot_be_overwritten_by_healthy_sample(self):
+        node = self.make_localization_node()
+        handoff = self.tf_module.OdomInfoHandoff()
+
+        class Receiver:
+            def odom_info_snapshot(self):
+                return handoff.snapshot()
+
+            def acknowledge_odom_info_loss(self, sequence):
+                handoff.acknowledge_loss(sequence)
+
+            def invalidate_odom_info(self, barrier_stamp_ns, *, after_sequence):
+                handoff.invalidate(barrier_stamp_ns, after_sequence=after_sequence)
+
+        node._tf_receiver = Receiver()
+        node._localization_available = True
+        handle = FakeHandle()
+        candidate = self.candidate("active")
+        node._active_goal = {
+            "token": 91, "candidate": candidate,
+            "identity": node._goal_identity(candidate, "map"),
+            "epoch": 0, "is_retry": False, "handle": handle,
+            "cancel_requested": False, "cancel_reason": None,
+        }
+        handoff.add(9_900_000_000, "vo_odom", False)
+        lost, _ = handoff.add(9_950_000_000, "vo_odom", True)
+        healthy, _ = handoff.add(10_000_000_001, "vo_odom", False)
+
+        node._drain_odom_info_snapshot()
+
+        self.assertEqual(1, handle.cancel_count)
+        self.assertTrue(node._active_goal["localization_invalidated"])
+        self.assertEqual(10_000_000_000, node._localization_invalidated_at_ns)
+        self.assertEqual([healthy.sequence], [sample.sequence for sample in node._odom_info])
+        self.assertEqual(healthy.stamp_ns, node._stamp_ns(node._odom_info[-1]))
+        self.assertEqual(lost.sequence, node._last_processed_odom_info_sequence - 1)
+        self.assertIsNone(handoff.snapshot()[1])
+
+    def test_handoff_preserves_latest_temporally_eligible_odom_info(self):
+        node = self.make_localization_node()
+        handoff = self.tf_module.OdomInfoHandoff()
+
+        class Receiver:
+            def odom_info_snapshot(self):
+                return handoff.snapshot()
+
+        node._tf_receiver = Receiver()
+        handoff.add(9_800_000_000, "vo_odom", False)
+        handoff.add(10_100_000_000, "vo_odom", False)
+        handoff.add(9_900_000_000, "vo_odom", False)
+
+        node._drain_odom_info_snapshot()
+
+        self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
+        self.assertEqual(9_900_000_000, node._last_accepted_odom_stamp_ns)
+
+    def test_clock_regression_clears_pending_handoff_epoch(self):
+        node = self.make_localization_node()
+        handoff = self.tf_module.OdomInfoHandoff()
+
+        class Receiver:
+            def odom_info_snapshot(self):
+                return handoff.snapshot()
+
+            def reset_odom_info(self):
+                return handoff.reset()
+
+        node._tf_receiver = Receiver()
+        old, _ = handoff.add(10_500_000_000, "vo_odom", False)
+        node._last_ros_time_ns = 10_000_000_000
+        node._now_ns = 1_000_000_000
+
+        node._drain_odom_info_snapshot()
+
+        self.assertEqual(((), None, old.sequence), handoff.snapshot())
+        self.assertEqual(old.sequence, node._last_processed_odom_info_sequence)
+        self.assertEqual([], list(node._odom_info))
+
+    def test_clock_regression_during_snapshot_drain_discards_old_epoch_batch(self):
+        node = self.make_localization_node()
+        handoff = self.tf_module.OdomInfoHandoff()
+        old, _ = handoff.add(9_850_000_000, "vo_odom", False)
+        node._last_ros_time_ns = 10_000_000_000
+        node._now_ns = 10_000_000_000
+
+        class Receiver:
+            def odom_info_snapshot(self):
+                snapshot = handoff.snapshot()
+                node._now_ns = 9_900_000_000
+                return snapshot
+
+            def reset_odom_info(self):
+                return handoff.reset()
+
+        node._tf_receiver = Receiver()
+        node._drain_odom_info_snapshot()
+
+        self.assertEqual(1, node._clock_epoch)
+        self.assertEqual([], list(node._odom_info))
+        self.assertEqual(old.sequence, node._last_processed_odom_info_sequence)
+        self.assertEqual(((), None, old.sequence), handoff.snapshot())
+        self.assertIsNone(node._localization_pose("map"))
+
+    def test_clock_regression_during_lost_invalidation_keeps_reset_clear(self):
+        node = self.make_localization_node()
+        node._last_ros_time_ns = 10_000_000_000
+        node._localization_available = True
+        times = iter((10_000_000_000, 9_900_000_000))
+        node.get_clock = lambda: types.SimpleNamespace(
+            now=lambda: types.SimpleNamespace(nanoseconds=next(times))
+        )
+
+        node._odom_info_callback(self.odom_info(9_950_000_000, lost=True))
+
+        self.assertEqual(1, node._clock_epoch)
+        self.assertFalse(node._localization_available)
+        self.assertIsNone(node._localization_invalidated_at_ns)
+        self.assertEqual([], list(node._odom_info))
 
     def test_lost_transition_uses_ros_now_and_duplicate_lost_can_raise_by_stamp(self):
         node = self.make_localization_node()
@@ -1887,6 +2083,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
     def test_search_evaluates_once_for_goal_and_markers_from_nav2_map(self):
         node = self.make_node()
+        log_messages = []
+        node._logger.info = log_messages.append
         first = self.candidate("best", 0.5, 3.0)
         second = self.candidate("second", 0.2, 4.0)
         result = self.result([first, second])
@@ -1903,8 +2101,48 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual("sim-stamp", goal.pose.header.stamp)
         self.assertEqual(3.0, goal.pose.pose.position.x)
         self.assertEqual("/share/search_navigate_to_pose.xml", goal.behavior_tree)
+        self.assertTrue(any(
+            "Search goal submitted: token=1 candidate=best frame=map "
+            "stamp=10.000000000 x=3.000000 y=2.000000 yaw=0.000000" in message
+            for message in log_messages
+        ))
         self.assertIs(seen[0][0][0], first)
         self.assertIs(seen[0][1], first)
+
+    def test_goal_planning_yaw_uses_current_position_without_mutating_candidate(self):
+        for robot_pose, target, expected_yaw in (
+            ((1.0, 2.0, 0.7), (3.0, 3.0), math.atan2(1.0, 2.0)),
+            ((2.0, 1.0, -0.7), (1.0, 3.0), math.atan2(2.0, -1.0)),
+            ((1.0, 2.0, 0.7), (0.0, 0.0), math.atan2(-2.0, -1.0)),
+            ((1.0, 2.0, 0.7), (3.0, 0.0), math.atan2(-2.0, 2.0)),
+        ):
+            with self.subTest(robot_pose=robot_pose, target=target):
+                node = self.make_node()
+                node._localization_pose = lambda frame: robot_pose
+                candidate = self.candidate("observation")
+                candidate["pose_world"] = [*target, math.pi / 2]
+                before = list(candidate["pose_world"])
+                identity = node._goal_identity(candidate, "map")
+
+                self.assertTrue(node._send_goal(candidate, "/tree.xml"))
+
+                q = node._action.sent[0][0].pose.pose.orientation
+                self.assertAlmostEqual(expected_yaw, 2.0 * math.atan2(q.z, q.w))
+                self.assertAlmostEqual(1.0, q.z * q.z + q.w * q.w)
+                self.assertEqual(before, candidate["pose_world"])
+                self.assertEqual(identity, node._pending_goal["identity"])
+
+    def test_goal_at_current_position_retains_robot_heading(self):
+        node = self.make_node()
+        node._localization_pose = lambda frame: (1.0, 2.0, -0.7)
+        candidate = self.candidate("here")
+        candidate["pose_world"] = [1.0, 2.0, math.pi / 2]
+
+        self.assertTrue(node._send_goal(candidate, "/tree.xml"))
+
+        q = node._action.sent[0][0].pose.pose.orientation
+        self.assertAlmostEqual(-0.7, 2.0 * math.atan2(q.z, q.w))
+        self.assertAlmostEqual(1.0, q.z * q.z + q.w * q.w)
 
     def test_rejected_candidate_gets_one_retry_then_next_ranked_candidate(self):
         node = self.make_node()
@@ -1922,30 +2160,28 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(2, node._failed_attempts[first_identity])
         self.assertEqual("second", node._next_ranked_candidate(result)["id"])
 
-    def test_aborted_goal_gets_one_retry_and_success_exhausts_candidate(self):
+    def test_aborted_goal_exhausts_candidate_after_one_failure(self):
         node = self.make_node()
         first, second = self.candidate("first", 0.5), self.candidate("second", 0.2)
         result = self.result([first, second])
-        for expected in ("first", "first"):
-            candidate = node._next_ranked_candidate(result)
-            self.assertEqual(expected, candidate["id"])
-            handle = FakeHandle()
-            node._active_goal = {
-                "token": len(node._failed_attempts) + 1,
-                "candidate": candidate, "handle": handle,
-                "cancel_requested": False, "cancel_reason": None,
-            }
-            token = node._active_goal["token"]
-            node._goal_result(Future(types.SimpleNamespace(status=6)), token)
+        candidate = node._next_ranked_candidate(result)
+        self.assertEqual("first", candidate["id"])
+        handle = FakeHandle()
+        node._active_goal = {
+            "token": 1, "candidate": candidate, "handle": handle,
+            "cancel_requested": False, "cancel_reason": None,
+        }
+        node._goal_result(Future(types.SimpleNamespace(status=6)), 1)
         first_identity = node._goal_identity(first, "map")
-        self.assertEqual(2, node._failed_attempts[first_identity])
+        self.assertEqual(1, node._failed_attempts[first_identity])
+        self.assertIn(first_identity, node._exhausted_candidates)
         self.assertEqual("second", node._next_ranked_candidate(result)["id"])
 
         node._active_goal = {
-            "token": 10, "candidate": second, "handle": FakeHandle(),
+            "token": 2, "candidate": second, "handle": FakeHandle(),
             "cancel_requested": False, "cancel_reason": None,
         }
-        node._goal_result(Future(types.SimpleNamespace(status=4)), 10)
+        node._goal_result(Future(types.SimpleNamespace(status=4)), 2)
         self.assertIn(node._goal_identity(second, "map"), node._completed_candidates)
         self.assertIsNone(node._next_ranked_candidate(result))
 
@@ -1961,6 +2197,22 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, handle.cancel_count)
         node._goal_result(Future(types.SimpleNamespace(status=5)), 7)
         self.assertNotIn(node._goal_identity(candidate, "map"), node._failed_attempts)
+        self.assertNotIn(node._goal_identity(candidate, "map"), node._exhausted_candidates)
+
+    def test_localization_invalidated_abort_does_not_exhaust_candidate(self):
+        node = self.make_node()
+        candidate = self.candidate("invalidated")
+        node._active_goal = {
+            "token": 9, "candidate": candidate, "handle": FakeHandle(),
+            "cancel_requested": True, "cancel_reason": "localization_invalidated",
+            "localization_invalidated": True,
+        }
+
+        node._goal_result(Future(types.SimpleNamespace(status=6)), 9)
+
+        identity = node._goal_identity(candidate, "map")
+        self.assertNotIn(identity, node._failed_attempts)
+        self.assertNotIn(identity, node._exhausted_candidates)
 
     def test_aborted_result_after_cancel_request_consumes_failure_attempt(self):
         node = self.make_node()
@@ -1992,9 +2244,11 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node = self.make_node()
         retry = node._goal_identity(self.candidate("retry"), "map")
         done = node._goal_identity(self.candidate("done"), "map")
-        replacement = node._goal_identity(self.candidate("replacement"), "map")
+        replacement_candidate = self.candidate("replacement")
+        replacement = node._goal_identity(replacement_candidate, "map")
         node._enabled = False
         node._failed_attempts[retry] = 1
+        node._exhausted_candidates.add(replacement)
         node._completed_candidates.add(done)
         node._retry_target = retry
         node._replacement_target = replacement
@@ -2008,11 +2262,16 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertTrue(response.success)
         self.assertEqual({}, node._failed_attempts)
+        self.assertEqual(set(), node._exhausted_candidates)
         self.assertEqual(set(), node._completed_candidates)
         self.assertIsNone(node._retry_target)
         self.assertIsNone(node._replacement_target)
         self.assertIsNone(node._challenger_identity)
         self.assertEqual(0, node._challenger_count)
+        self.assertEqual(
+            "replacement",
+            node._next_ranked_candidate(self.result([replacement_candidate]))["id"],
+        )
 
     def test_better_candidate_preempts_only_after_two_margin_wins(self):
         node = self.make_node()
@@ -2191,7 +2450,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, node._failed_attempts[identity])
         self.assertEqual("challenger", node._next_ranked_candidate(evaluation)["id"])
 
-    def test_challenger_streak_survives_first_failure_and_applies_to_retry(self):
+    def test_aborted_candidate_is_not_retried_after_challenger_streak(self):
         node = self.make_node()
         first = self.candidate("first", 0.20)
         challenger = self.candidate("challenger", 0.31)
@@ -2208,17 +2467,45 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._consider_goal_switch(evaluation, by_id)
         node._goal_result(Future(types.SimpleNamespace(status=6)), 53)
         self.assertEqual(1, node._challenger_count)
-        self.assertEqual(identity, node._retry_target)
+        self.assertIn(identity, node._exhausted_candidates)
+        self.assertIsNone(node._retry_target)
+        self.assertEqual("challenger", node._next_ranked_candidate(evaluation)["id"])
 
-        retry_handle = FakeHandle()
+    def test_exhausted_identity_is_skipped_for_retry_replacement_and_ranking(self):
+        node = self.make_node()
+        exhausted = self.candidate("exhausted", 0.8)
+        available = self.candidate("available", 0.2)
+        identity = node._goal_identity(exhausted, "map")
+        node._exhausted_candidates.add(identity)
+        result = self.result([exhausted, available])
+
+        node._replacement_target = identity
+        self.assertEqual("available", node._next_ranked_candidate(result)["id"])
+        self.assertIsNone(node._replacement_target)
+        node._retry_target = identity
+        self.assertEqual("available", node._next_ranked_candidate(result)["id"])
+        self.assertIsNone(node._retry_target)
+
+    def test_exhausted_identity_is_skipped_as_challenger(self):
+        node = self.make_node()
+        current = self.candidate("current", 0.20)
+        exhausted = self.candidate("exhausted", 0.50)
+        challenger = self.candidate("challenger", 0.35)
+        exhausted_identity = node._goal_identity(exhausted, "map")
+        node._exhausted_candidates.add(exhausted_identity)
         node._active_goal = {
-            "token": 54, "candidate": first, "identity": identity,
-            "epoch": node._search_epoch, "is_retry": True, "handle": retry_handle,
-            "cancel_requested": False, "cancel_reason": None,
+            "token": 55, "candidate": current,
+            "identity": node._goal_identity(current, "map"),
+            "epoch": node._search_epoch, "is_retry": False,
+            "handle": FakeHandle(), "cancel_requested": False,
+            "cancel_reason": None,
         }
+        evaluation = self.result([current, exhausted, challenger])
+        by_id = {item["id"]: item for item in evaluation["candidates"]}
+
+        node._consider_goal_switch(evaluation, by_id)
         node._consider_goal_switch(evaluation, by_id)
 
-        self.assertEqual(1, retry_handle.cancel_count)
         self.assertEqual(node._goal_identity(challenger, "map"), node._replacement_target)
 
     def test_retry_disappearing_before_dispatch_is_abandoned_for_current_candidate(self):
@@ -2743,6 +3030,36 @@ class SearchNodeCallbackTest(unittest.TestCase):
             node._search_tick()
         self.assertEqual(1, node._failed_attempts[retry])
         self.assertIn(done, node._completed_candidates)
+
+    def test_frontier_change_retains_eligible_exhaustion_and_prunes_missing_identity(self):
+        node = self.make_node()
+        retained = self.candidate("retained")
+        missing = self.candidate("missing")
+        retained_identity = node._goal_identity(retained, "map")
+        missing_identity = node._goal_identity(missing, "map")
+        node._exhausted_candidates.update((retained_identity, missing_identity))
+        active = self.candidate("active")
+        node._active_goal = {
+            "token": 26, "candidate": active, "handle": FakeHandle(),
+            "cancel_requested": False, "cancel_reason": None,
+        }
+        first = self.result([active, retained])
+        first["frontier_cells"] = [[3, 4]]
+
+        with patch.object(self.module, "evaluate_search", return_value=first):
+            node._search_tick()
+
+        self.assertIn(retained_identity, node._exhausted_candidates)
+        self.assertNotIn(missing_identity, node._exhausted_candidates)
+
+        node._exhausted_candidates.add(missing_identity)
+        second = self.result([active, retained])
+        second["frontier_cells"] = [[5, 6]]
+        with patch.object(self.module, "evaluate_search", return_value=second):
+            node._search_tick()
+
+        self.assertIn(retained_identity, node._exhausted_candidates)
+        self.assertNotIn(missing_identity, node._exhausted_candidates)
 
     def test_explicit_empty_frontier_cells_resets_retry_and_completion_history(self):
         node = self.make_node()

@@ -75,6 +75,7 @@ def generate_launch_description():
                 launch_arguments={
                     "map_topic": LaunchConfiguration("map_topic"),
                     "max_localization_age_sec": "1.0",
+                    "tf_future_lead_sec": "0.2",
                     "use_sim_time": "true",
                 }.items(),
             ),

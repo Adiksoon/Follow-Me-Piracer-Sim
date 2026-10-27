@@ -2,7 +2,7 @@
   <BehaviorTree ID="MainTree">
     <Sequence>
       <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="Hybrid" />
-      <FollowPath path="{path}" controller_id="FollowPath" />
+      <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker" />
     </Sequence>
   </BehaviorTree>
 </root>

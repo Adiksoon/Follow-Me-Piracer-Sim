@@ -37,6 +37,14 @@ def test_child_launch_defaults_to_half_second_and_types_parameter_as_float():
         and entity.name == "max_localization_age_sec"
     )
     assert perform_substitutions(LaunchContext(), argument.default_value) == "0.5"
+    future_lead_argument = next(
+        entity for entity in description.entities
+        if isinstance(entity, DeclareLaunchArgument)
+        and entity.name == "tf_future_lead_sec"
+    )
+    assert perform_substitutions(
+        LaunchContext(), future_lead_argument.default_value
+    ) == "0.1"
     search_node = next(
         entity for entity in description.entities
         if isinstance(entity, Node)
@@ -57,6 +65,21 @@ def test_child_launch_defaults_to_half_second_and_types_parameter_as_float():
     assert perform_substitutions(
         LaunchContext(), launch_configuration.variable_name
     ) == "max_localization_age_sec"
+    future_lead = parameters[
+        next(
+            key for key in parameters
+            if perform_substitutions(LaunchContext(), key) == "tf_future_lead_sec"
+        )
+    ]
+    assert isinstance(future_lead, ParameterValue)
+    assert future_lead.value_type is float
+    future_configuration = next(
+        substitution for substitution in future_lead.value
+        if isinstance(substitution, LaunchConfiguration)
+    )
+    assert perform_substitutions(
+        LaunchContext(), future_configuration.variable_name
+    ) == "tf_future_lead_sec"
 
 
 def test_full_simulation_forwards_one_second_to_search_child():
@@ -71,3 +94,4 @@ def test_full_simulation_forwards_one_second_to_search_child():
     )
     arguments = dict(include.launch_arguments)
     assert arguments["max_localization_age_sec"] == "1.0"
+    assert arguments["tf_future_lead_sec"] == "0.2"

@@ -25,6 +25,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("max_localization_age_sec", default_value="0.5"),
+        DeclareLaunchArgument("tf_future_lead_sec", default_value="0.1"),
         DeclareLaunchArgument(
             "camera_horizontal_fov_deg",
             default_value="65.36016047954865",
@@ -41,6 +42,10 @@ def generate_launch_description():
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
                 "max_localization_age_sec": ParameterValue(
                     LaunchConfiguration("max_localization_age_sec"),
+                    value_type=float,
+                ),
+                "tf_future_lead_sec": ParameterValue(
+                    LaunchConfiguration("tf_future_lead_sec"),
                     value_type=float,
                 ),
                 "camera.horizontal_fov_deg": LaunchConfiguration("camera_horizontal_fov_deg"),

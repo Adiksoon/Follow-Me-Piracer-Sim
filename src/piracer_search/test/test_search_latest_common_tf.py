@@ -39,7 +39,8 @@ class CountingBuffer:
 
 
 class RealTfLatestCommonTest(unittest.TestCase):
-    def make_node(self, trace=False, info_stamp=NOW - 50_000_000):
+    def make_node(self, trace=False, info_stamp=NOW - 50_000_000,
+                  tf_future_lead_sec=0.1):
         node = object.__new__(SearchNode)
         node._localization_trace_enabled = trace
         node._internal_tf_trace = InternalTfTrace()
@@ -49,6 +50,8 @@ class RealTfLatestCommonTest(unittest.TestCase):
         node._last_accepted_odom_stamp_ns = None
         node._last_accepted_full_tf_stamp_ns = None
         node._last_ros_time_ns = None
+        node._tf_future_lead_ns = round(tf_future_lead_sec * 1_000_000_000)
+        node._clock_epoch = 0
         node._localization_reason = None
         node._tf_snapshot_attempted = False
         node._pending_goal = None
@@ -93,6 +96,22 @@ class RealTfLatestCommonTest(unittest.TestCase):
                         self.assertEqual(NOW + offset, node._last_accepted_full_tf_stamp_ns)
                         self.assertAlmostEqual(0.75, result[0])
                     self.assertEqual(NOW + offset, node._stamp_ns(sample))
+
+    def test_simulation_200ms_future_tf_boundaries_with_real_tf2(self):
+        for offset, accepted in ((133_000_000, True), (200_000_000, True),
+                                 (200_000_001, False),
+                                 (-1_000_000_001, False)):
+            with self.subTest(offset=offset):
+                node, handle = self.make_node(tf_future_lead_sec=0.2)
+                self.static_map(node)
+                sample = transform("vo_odom", "base_link", NOW + offset, 0.75)
+                node._tf_buffer.inner.set_transform(sample, "offline")
+                result = node._localization_pose("map")
+                self.assertEqual(accepted, result is not None)
+                self.assertEqual(0 if accepted else 1, handle.count)
+                if accepted:
+                    self.assertEqual(NOW + offset,
+                                     node._last_accepted_full_tf_stamp_ns)
 
     def test_common_time_uses_future_interpolation_endpoint(self):
         node, _ = self.make_node()
