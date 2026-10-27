@@ -39,8 +39,11 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.58 0.52 0.42 1</ambient>
-            <diffuse>0.80 0.74 0.62 1</diffuse>
+            <script>
+              <uri>model://classroom_details/materials/scripts/cp46_floor.material</uri>
+              <uri>model://classroom_details/materials/textures</uri>
+              <name>PiRacer/CP46FloorTerrazzo</name>
+            </script>
           </material>
         </visual>
         <collision name="north_wall_collision">
