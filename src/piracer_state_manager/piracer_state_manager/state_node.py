@@ -165,6 +165,27 @@ class StateManagerNode(Node):
             pending = self.behavior_coordinator.pending
             if pending is not None and self._handoff_started_monotonic is not None:
                 elapsed = time.monotonic() - self._handoff_started_monotonic
+                if (
+                    elapsed >= 5.0
+                    and self.get_parameter("use_sim_time").value
+                    and pending == ("search", False)
+                    and all(value is None for value in self.behavior_coordinator.confirmed.values())
+                    and self._handoff_future is not None
+                    and not self._handoff_future.done()
+                ):
+                    # TYMCZASOWO: tylko na czas testowania SEARCH w symulacji; usunac po dopracowaniu startu stanow.
+                    old_future = self._handoff_future
+                    self._handoff_future = None
+                    self.behavior_clients["search"].remove_pending_request(old_future)
+                    self.behavior_coordinator.complete("search", False, False)
+                    old_future.cancel()
+                    self._handoff_started_monotonic = None
+                    self._handoff_wait_logged = False
+                    self._handoff_failure_logged = False
+                    self.get_logger().warning(
+                        "Timed out initial Search disable in simulation; retrying"
+                    )
+                    return
                 if elapsed >= 5.0 and not self._handoff_wait_logged:
                     done = None if self._handoff_future is None else self._handoff_future.done()
                     self.get_logger().warning(
@@ -210,6 +231,8 @@ class StateManagerNode(Node):
         )
 
     def _on_behavior_enable_result(self, behavior, enabled, future):
+        if future is not self._handoff_future:
+            return
         try:
             response = future.result()
         except Exception as exc:  # Service failures remain retryable on the next timer tick.
