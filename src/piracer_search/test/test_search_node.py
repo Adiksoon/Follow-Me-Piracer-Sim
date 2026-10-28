@@ -359,6 +359,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "action_msgs.msg": action_status,
             "piracer_search.search_markers": marker_helpers,
         }
+        cls.tf_exceptions = tf_module
         package = importlib.import_module("piracer_search")
         with (
             patch.dict(sys.modules, modules),
@@ -372,7 +373,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             cls.module = importlib.import_module("piracer_search.search_node")
             cls.tf_module = importlib.import_module("piracer_search.tf_timing")
         class FakeTfReceiver:
-            def __init__(self, buffer, trace, error_reporter, **kwargs):
+            def __init__(self, buffer, error_reporter, **kwargs):
                 self.node = object()
                 self.listener = FakeTransformListener(buffer, self.node)
                 self.context = kwargs["context"]
@@ -468,6 +469,17 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertIs(group, node._odom_info_wakeup.callback_group)
         self.assertIs(node._odom_info_wakeup, node._tf_receiver.odom_info_wakeup)
 
+    def test_receiver_errors_are_logged_without_diagnostic_mode(self):
+        node = self.make_node()
+        warnings = []
+        node._logger.warning = warnings.append
+
+        node._receiver_error("odom_info_wakeup", RuntimeError("trigger failed"))
+
+        self.assertEqual(1, len(warnings))
+        self.assertIn("odom_info_wakeup", warnings[0])
+        self.assertIn("RuntimeError: trigger failed", warnings[0])
+
     def make_node(self):
         node = object.__new__(self.module.SearchNode)
         node._enabled = True
@@ -479,7 +491,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._map = types.SimpleNamespace(
             header=types.SimpleNamespace(frame_id="map")
         )
-        node._frontier_key = ((1, 2),)
         node._last_cluster_ranking = None
         node._cluster_ranking_context = None
         node._next_goal_requested = False
@@ -495,8 +506,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._pending_goal = None
         node._active_goal = None
         node._published_marker_keys = set()
-        node._internal_tf_trace = self.module.InternalTfTrace()
-        node._localization_trace_enabled = False
         node._odom_info = deque(maxlen=10)
         node._last_processed_odom_info_sequence = 0
         node._localization_available = False
@@ -507,7 +516,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._last_ros_time_ns = None
         node._clock_epoch = 0
         node._localization_reason = None
-        node._tf_snapshot_attempted = False
         node._now_ns = 10_000_000_000
         node._goal_switch_deadline_ns = node._now_ns
         node._tf_buffer = type("TFBuffer", (), {"clear": lambda self: None})()
@@ -520,8 +528,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node.get_logger = lambda: node._logger
         params = {
             "behavior_tree": "/share/search_navigate_to_pose.xml",
-            "camera.horizontal_fov_deg": 65.0,
-            "camera.max_range_m": 5.0,
             "base_frame": "base_link",
             "max_localization_age_sec": 0.5,
             "odom_info_topic": "/visual_vo/odom_info_lite",
@@ -557,9 +563,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.timed_stamps = {}
                 self.stamp_sequences = {}
                 self.sequence_indexes = {}
-                self.snapshot_calls = 0
-                self.snapshot_error = None
-                self.snapshot_yaml = "base_link:\n  parent: 'vo_odom'\n"
 
             def lookup_transform(self, target, source, stamp):
                 self.calls.append((target, source, stamp.nanoseconds))
@@ -600,286 +603,13 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.stamp_sequences.clear()
                 self.sequence_indexes.clear()
 
-            def all_frames_as_yaml(self):
-                self.snapshot_calls += 1
-                if self.snapshot_error is not None:
-                    raise self.snapshot_error
-                return self.snapshot_yaml
 
         node._tf_buffer = TFBuffer()
-        node._tf_buffer.expected_exception = self.module.ExtrapolationException
+        node._tf_buffer.expected_exception = self.tf_exceptions.ExtrapolationException
         return node
 
-    def test_internal_tf_trace_is_bounded_and_reports_open_and_exceptional_spans(self):
-        trace = self.module.InternalTfTrace(capacity=3)
-        with patch.object(self.module.time, "monotonic_ns", side_effect=range(10, 30)):
-            tick, _ = trace.begin("search_tick")
-            trace.finish(tick)
-            failed, _ = trace.begin("search_computation", operation="grid")
-            trace.finish(failed, ValueError("grid failed"))
-            opened, _ = trace.begin(
-                "native_tf_callback", thread_id=17, stamp_ns_list=[123]
-            )
-            snapshot = trace.capture()
-            snapshot["open_spans"][0]["stamp_ns_list"][0] = 999
-            copied_again = trace.capture()
 
-        self.assertEqual(2, snapshot["evicted_count"])
-        self.assertEqual(3, len(snapshot["events"]))
-        self.assertEqual(snapshot["events"][0]["monotonic_ns"],
-                         snapshot["oldest_retained_monotonic_ns"])
-        self.assertEqual("exception", snapshot["events"][1]["phase"])
-        self.assertEqual("ValueError", snapshot["events"][1]["exception_class"])
-        self.assertEqual("grid failed", snapshot["events"][1]["exception_message"])
-        self.assertEqual(opened, snapshot["open_spans"][0]["span_id"])
-        self.assertEqual("entry", snapshot["open_spans"][0]["phase"])
-        self.assertEqual(17, snapshot["open_spans"][0]["thread_id"])
-        self.assertEqual(123, copied_again["open_spans"][0]["stamp_ns_list"][0])
-
-    def test_native_listener_and_setter_delegate_once_and_record_stamps(self):
-        trace = self.module.InternalTfTrace()
-        buffer = self.module.SearchTfBuffer(trace)
-        listener = self.module.SearchTransformListener(buffer, object(), trace)
-
-        def transform(parent, child, stamp):
-            return types.SimpleNamespace(
-                header=types.SimpleNamespace(
-                    frame_id=parent,
-                    stamp=types.SimpleNamespace(
-                        sec=stamp // 1_000_000_000,
-                        nanosec=stamp % 1_000_000_000,
-                    ),
-                ),
-                child_frame_id=child,
-            )
-
-        native = transform("/vo_odom", "base_link", 8_123_456_789)
-        other = transform("map", "camera", 9_000_000_000)
-        with patch.object(self.module.time, "monotonic_ns", side_effect=[10, 11, 12, 13]):
-            listener.callback(types.SimpleNamespace(transforms=[native, other]))
-
-        self.assertEqual(1, listener.callback_calls)
-        self.assertEqual([(native, "default_authority"), (other, "default_authority")],
-                         buffer.set_calls)
-        events = trace.capture()["events"]
-        self.assertEqual(
-            [
-                ("native_tf_callback", "entry"),
-                ("native_tf_set_transform", "entry"),
-                ("native_tf_set_transform", "return"),
-                ("native_tf_callback", "exit"),
-            ],
-            [(event["kind"], event["phase"]) for event in events],
-        )
-        self.assertEqual([8_123_456_789], events[0]["stamp_ns_list"])
-        self.assertEqual(8_123_456_789, events[1]["stamp_ns"])
-        self.assertEqual([10, 11, 12, 13], [event["monotonic_ns"] for event in events])
-        self.assertEqual(events[0]["thread_id"], events[3]["thread_id"])
-        self.assertEqual(events[1]["thread_id"], events[2]["thread_id"])
-
-    def test_native_setter_exception_is_recorded_and_propagated_once(self):
-        trace = self.module.InternalTfTrace()
-        buffer = self.module.SearchTfBuffer(trace)
-        listener = self.module.SearchTransformListener(buffer, object(), trace)
-        buffer.set_error = RuntimeError("setter failure")
-        native = types.SimpleNamespace(
-            header=types.SimpleNamespace(
-                frame_id="vo_odom",
-                stamp=types.SimpleNamespace(sec=8, nanosec=5),
-            ),
-            child_frame_id="base_link",
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "setter failure"):
-            listener.callback(types.SimpleNamespace(transforms=[native]))
-
-        self.assertEqual(1, listener.callback_calls)
-        self.assertEqual(1, len(buffer.set_calls))
-        events = trace.capture()["events"]
-        self.assertEqual(
-            [("native_tf_callback", "entry"),
-             ("native_tf_set_transform", "entry"),
-             ("native_tf_set_transform", "exception"),
-             ("native_tf_callback", "exception")],
-            [(event["kind"], event["phase"]) for event in events],
-        )
-        self.assertEqual("RuntimeError", events[2]["exception_class"])
-        self.assertEqual("setter failure", events[3]["exception_message"])
-
-    def test_enabled_native_setter_records_read_only_post_return_snapshot(self):
-        trace = self.module.InternalTfTrace()
-        buffer = self.module.SearchTfBuffer(trace, diagnostics_enabled=True)
-        listener = self.module.SearchTransformListener(buffer, object(), trace)
-        native = types.SimpleNamespace(
-            header=types.SimpleNamespace(
-                frame_id="vo_odom",
-                stamp=types.SimpleNamespace(sec=8, nanosec=5),
-            ),
-            child_frame_id="base_link",
-        )
-        with patch.object(
-            buffer, "lookup_transform", return_value=native, create=True
-        ) as lookup:
-            self.assertIsNone(buffer.set_transform(native, "authority"))
-
-        lookup.assert_called_once()
-        snapshot = next(
-            event for event in trace.capture()["events"]
-            if event["kind"] == "native_tf_set_transform_snapshot"
-        )
-        self.assertEqual("post_return_snapshot", snapshot["snapshot_kind"])
-        self.assertEqual("vo_odom", snapshot["target_frame"])
-        self.assertEqual("base_link", snapshot["source_frame"])
-        self.assertIn("not acceptance", snapshot["meaning"])
-        self.assertEqual(1, len(buffer.set_calls))
-
-    def test_post_return_lookup_failure_is_measured_not_trace_error(self):
-        trace = self.module.InternalTfTrace()
-        reported = []
-        buffer = self.module.SearchTfBuffer(
-            trace, diagnostics_enabled=True,
-            error_reporter=lambda *args: reported.append(args),
-        )
-        native = types.SimpleNamespace(
-            header=types.SimpleNamespace(
-                frame_id="vo_odom",
-                stamp=types.SimpleNamespace(sec=8, nanosec=5),
-            ),
-            child_frame_id="base_link",
-        )
-        with patch.object(
-            buffer, "lookup_transform",
-            side_effect=self.module.ExtrapolationException("not visible yet"),
-            create=True,
-        ):
-            self.assertIsNone(buffer.set_transform(native, "authority"))
-        snapshot = next(
-            event for event in trace.capture()["events"]
-            if event["kind"] == "native_tf_set_transform_snapshot"
-        )
-        self.assertEqual("ExtrapolationException", snapshot["exception_class"])
-        self.assertEqual(8_000_000_005, snapshot["incoming_stamp_ns"])
-        self.assertIsNotNone(snapshot["setter_span_id"])
-        self.assertEqual([], reported)
-
-    def test_snapshot_trace_record_failure_is_reported_without_propagating(self):
-        trace = self.module.InternalTfTrace()
-        reported = []
-        buffer = self.module.SearchTfBuffer(
-            trace, diagnostics_enabled=True,
-            error_reporter=lambda *args: reported.append(args),
-        )
-        native = types.SimpleNamespace(
-            header=types.SimpleNamespace(
-                frame_id="vo_odom",
-                stamp=types.SimpleNamespace(sec=8, nanosec=5),
-            ),
-            child_frame_id="base_link",
-        )
-        with patch.object(buffer, "lookup_transform", return_value=native, create=True):
-            with patch.object(trace, "record", side_effect=RuntimeError("trace write failed")):
-                self.assertIsNone(buffer.set_transform(native, "authority"))
-        self.assertEqual(1, len(buffer.set_calls))
-        self.assertEqual(1, len(reported))
-        self.assertEqual("post_return_snapshot_record", reported[0][0])
-
-    def test_disabled_native_setter_delegates_once_without_trace(self):
-        buffer = self.module.SearchTfBuffer(None, diagnostics_enabled=False)
-        native = types.SimpleNamespace(
-            header=types.SimpleNamespace(
-                frame_id="vo_odom",
-                stamp=types.SimpleNamespace(sec=8, nanosec=5),
-            ),
-            child_frame_id="base_link",
-        )
-        self.assertIsNone(buffer.set_transform(native, "authority"))
-        self.assertEqual([(native, "authority")], buffer.set_calls)
-
-    def test_trace_begin_and_finish_failures_do_not_change_tf_delegation(self):
-        native = types.SimpleNamespace(
-            header=types.SimpleNamespace(
-                frame_id="vo_odom",
-                stamp=types.SimpleNamespace(sec=8, nanosec=5),
-            ),
-            child_frame_id="base_link",
-        )
-        reported = []
-        begin_trace = self.module.InternalTfTrace()
-        begin_trace.begin = lambda *args, **kwargs: (_ for _ in ()).throw(
-            RuntimeError("begin diagnostic failed")
-        )
-        buffer = self.module.SearchTfBuffer(
-            begin_trace, error_reporter=lambda *args: reported.append(args)
-        )
-        self.assertIsNone(buffer.set_transform(native, "authority"))
-        self.assertEqual([(native, "authority")], buffer.set_calls)
-
-        finish_trace = self.module.InternalTfTrace()
-        finish_trace.finish = lambda *args, **kwargs: (_ for _ in ()).throw(
-            RuntimeError("finish diagnostic failed")
-        )
-        buffer = self.module.SearchTfBuffer(
-            finish_trace, error_reporter=lambda *args: reported.append(args)
-        )
-        self.assertIsNone(buffer.set_transform(native, "authority"))
-        self.assertEqual([(native, "authority")], buffer.set_calls)
-        self.assertEqual(2, len(reported))
-
-        listener_trace = self.module.InternalTfTrace()
-        listener = self.module.SearchTransformListener(
-            buffer, object(), listener_trace,
-            error_reporter=lambda *args: reported.append(args),
-        )
-        listener_trace.finish = lambda *args, **kwargs: (_ for _ in ()).throw(
-            RuntimeError("listener finish diagnostic failed")
-        )
-        listener.callback(types.SimpleNamespace(transforms=[native]))
-        self.assertEqual(1, listener.callback_calls)
-        self.assertEqual(4, len(reported))
-
-    def test_search_tick_runs_when_trace_begin_or_finish_fails(self):
-        for phase in ("begin", "finish"):
-            with self.subTest(phase=phase):
-                node = self.make_node()
-                node._localization_trace_enabled = True
-                if phase == "begin":
-                    node._internal_tf_trace.begin = lambda *args, **kwargs: (
-                        _ for _ in ()
-                    ).throw(RuntimeError("begin failed"))
-                else:
-                    node._internal_tf_trace.finish = lambda *args, **kwargs: (
-                        _ for _ in ()
-                    ).throw(RuntimeError("finish failed"))
-                body_calls = []
-                node._search_tick_body = lambda seq: body_calls.append(seq)
-                node._search_tick()
-                self.assertEqual(1, len(body_calls))
-
-    def test_search_tick_records_grid_and_evaluation_separately_and_closes(self):
-        node = self.make_node()
-        with patch.object(self.module, "evaluate_search", side_effect=ValueError("bad map")):
-            node._search_tick()
-
-        events = node._internal_tf_trace.capture()["events"]
-        self.assertEqual(
-            [
-                ("search_tick", "entry"),
-                ("search_computation", "entry", "grid"),
-                ("search_computation", "exit", "grid"),
-                ("search_computation", "entry", "evaluate_search"),
-                ("search_computation", "exception", "evaluate_search"),
-                ("search_tick", "exit"),
-            ],
-            [
-                (event["kind"], event["phase"], event.get("operation"))
-                if event["kind"] == "search_computation"
-                else (event["kind"], event["phase"])
-                for event in events
-            ],
-        )
-        self.assertEqual([], node._internal_tf_trace.capture()["open_spans"])
-
-    def test_base_exceptions_close_grid_and_evaluation_spans(self):
+    def test_base_exceptions_propagate_from_grid_and_evaluation(self):
         for operation in ("grid", "evaluate_search"):
             with self.subTest(operation=operation):
                 node = self.make_node()
@@ -897,22 +627,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
                     )
                 with context, self.assertRaises(KeyboardInterrupt):
                     node._search_tick()
-
-                captured = node._internal_tf_trace.capture()
-                computation = [
-                    event for event in captured["events"]
-                    if event["kind"] == "search_computation"
-                    and event["operation"] == operation
-                ]
-                self.assertEqual([], captured["open_spans"])
-                self.assertEqual("entry", computation[0]["phase"])
-                self.assertEqual("exception", computation[1]["phase"])
-                self.assertEqual("KeyboardInterrupt", computation[1]["exception_class"])
-                tick_exit = next(
-                    event for event in captured["events"]
-                    if event["kind"] == "search_tick" and event["phase"] == "exception"
-                )
-                self.assertIsNotNone(tick_exit)
 
     @staticmethod
     def odom_info(stamp_ns, lost=False):
@@ -1048,21 +762,19 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
     def test_latest_common_time_future_and_age_boundaries(self):
         for offset, accepted in ((41_000_000, True), (100_000_000, True),
-                                 (100_000_001, False), (-1_000_000_000, True),
-                                 (-1_000_000_001, False)):
-            for trace in (False, True):
-                with self.subTest(offset=offset, trace=trace):
-                    node = self.make_localization_node(max_age_sec=1.0)
-                    node._localization_trace_enabled = trace
-                    node._odom_info_callback(self.odom_info(9_900_000_000))
-                    node._tf_buffer.stamps['map'] = node._now_ns + offset
-                    handle = FakeHandle()
-                    node._active_goal = {'handle': handle, 'cancel_requested': False,
-                                         'cancel_reason': None}
-                    result = node._localization_pose('map')
-                    self.assertEqual(accepted, result is not None)
-                    self.assertEqual(0 if accepted else 1, handle.cancel_count)
-                    self.assertEqual([('map', 'base_link', 0)], node._tf_buffer.calls)
+                             (100_000_001, False), (-1_000_000_000, True),
+                             (-1_000_000_001, False)):
+            with self.subTest(offset=offset):
+                node = self.make_localization_node(max_age_sec=1.0)
+                node._odom_info_callback(self.odom_info(9_900_000_000))
+                node._tf_buffer.stamps['map'] = node._now_ns + offset
+                handle = FakeHandle()
+                node._active_goal = {'handle': handle, 'cancel_requested': False,
+                                     'cancel_reason': None}
+                result = node._localization_pose('map')
+                self.assertEqual(accepted, result is not None)
+                self.assertEqual(0 if accepted else 1, handle.cancel_count)
+                self.assertEqual([('map', 'base_link', 0)], node._tf_buffer.calls)
 
     def test_run17_shaped_fresh_info_and_older_fresh_tf_are_accepted(self):
         node = self.make_localization_node()
@@ -1161,7 +873,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node = self.make_localization_node()
         for stamp in (9_900_000_000, 9_950_000_000):
             node._odom_info_callback(self.odom_info(stamp))
-        node._tf_buffer.errors["vo_odom"] = self.module.ExtrapolationException(
+        node._tf_buffer.errors["vo_odom"] = self.tf_exceptions.ExtrapolationException(
             "latest native transform unavailable"
         )
 
@@ -1170,142 +882,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertIsNone(node._last_accepted_odom_stamp_ns)
         self.assertIsNone(node._last_accepted_full_tf_stamp_ns)
 
-    def test_localization_trace_is_opt_in_and_records_actual_success(self):
-        outcomes = []
-        traced = None
-        for enabled in (False, True):
-            node = self.make_localization_node()
-            node._localization_trace_enabled = enabled
-            node._odom_info_callback(self.odom_info(9_900_000_000))
-            outcomes.append(node._localization_pose("map"))
-            if enabled:
-                traced = node._internal_tf_trace.capture()["events"]
-
-        self.assertEqual(outcomes[0], outcomes[1])
-        self.assertEqual((1.0, 2.0, 0.0), outcomes[1])
-        decision = next(event for event in traced if event["kind"] == "localization_validation")
-        self.assertTrue(decision["valid"])
-        self.assertEqual(9_900_000_000, decision["selected_odom_stamp_ns"])
-        self.assertEqual(1, len(decision["lookups"]))
-        self.assertEqual("actual_validation_lookup", decision["lookups"][0]["lookup_kind"])
-        counts, _ = node._internal_tf_trace.counts()
-        self.assertEqual(0, counts["odom_info_callback"])
-        self.assertEqual(1, counts["localization_validation"])
-
-    def test_localization_trace_records_stale_info_and_exact_tf_lookup_error(self):
-        stale = self.make_localization_node()
-        stale._localization_trace_enabled = True
-        stale._odom_info_callback(self.odom_info(9_499_999_999))
-        self.assertIsNone(stale._localization_pose("map"))
-        stale_event = next(
-            event for event in stale._internal_tf_trace.capture()["events"]
-            if event["kind"] == "localization_validation"
-        )
-        self.assertFalse(stale_event["valid"])
-        self.assertEqual("stale OdomInfo", stale_event["reason"])
-        self.assertEqual(
-            [],
-            [item["lookup_kind"] for item in stale_event["lookups"]],
-        )
-
-        missing_tf = self.make_localization_node()
-        missing_tf._localization_trace_enabled = True
-        missing_tf._tf_buffer.errors["vo_odom"] = self.module.ExtrapolationException(
-            "latest native transform unavailable"
-        )
-        missing_tf._odom_info_callback(self.odom_info(9_900_000_000))
-        self.assertIsNone(missing_tf._localization_pose("map"))
-        tf_event = next(
-            event for event in missing_tf._internal_tf_trace.capture()["events"]
-            if event["kind"] == "localization_validation"
-        )
-        self.assertFalse(tf_event["valid"])
-        self.assertEqual("full TF lookup failed", tf_event["reason"])
-        self.assertEqual(
-            "ExtrapolationException",
-            tf_event["lookups"][0]["exception_class"],
-        )
-        self.assertEqual(
-            "latest native transform unavailable",
-            tf_event["lookups"][0]["exception_message"],
-        )
-
-    def test_localization_trace_on_off_equivalence_table(self):
-        def run_case(name, enabled):
-            node = self.make_localization_node()
-            node._localization_trace_enabled = enabled
-            handle = FakeHandle()
-            if name in ("stale_info", "stale_tf", "lost", "regressed"):
-                node._localization_available = True
-                node._active_goal = {
-                    "token": 1,
-                    "candidate": self.candidate("active"),
-                    "handle": handle,
-                    "cancel_requested": False,
-                    "cancel_reason": None,
-                }
-            result = None
-            if name == "fresh":
-                node._odom_info_callback(self.odom_info(9_900_000_000))
-                result = node._localization_pose("map")
-            elif name == "stale_info":
-                node._odom_info_callback(self.odom_info(9_400_000_000))
-                result = node._localization_pose("map")
-            elif name == "stale_tf":
-                node._tf_buffer.stamps["vo_odom"] = 8_000_000_000
-                node._odom_info_callback(self.odom_info(9_900_000_000))
-                result = node._localization_pose("map")
-            elif name == "lost":
-                node._odom_info_callback(self.odom_info(9_950_000_000, lost=True))
-            elif name == "future":
-                node._odom_info_callback(self.odom_info(10_100_000_000))
-                result = node._localization_pose("map")
-            elif name == "regressed":
-                node._last_ros_time_ns = 10_000_000_000
-                node._now_ns = 9_900_000_000
-                result = node._localization_pose("map")
-            active = node._active_goal
-            state = (
-                node._localization_available,
-                node._localization_invalidated_at_ns,
-                node._localization_reason,
-                node._last_accepted_odom_stamp_ns,
-                tuple(node._stamp_ns(msg) for msg in node._odom_info),
-                handle.cancel_count,
-                active.get("localization_invalidated") if active else None,
-                active.get("cancel_reason") if active else None,
-            )
-            return result, state
-
-        for scenario in (
-            "fresh", "stale_info", "stale_tf", "lost", "future", "regressed"
-        ):
-            with self.subTest(scenario=scenario):
-                self.assertEqual(
-                    run_case(scenario, False), run_case(scenario, True)
-                )
-
-    def test_invalidation_dump_follows_recorded_trigger_and_has_anchor(self):
-        node = self.make_localization_node()
-        node._localization_trace_enabled = True
-        node._localization_available = True
-        warnings = []
-        node._logger.warning = warnings.append
-        node._odom_info_callback(self.odom_info(9_499_999_999))
-        self.assertIsNone(node._localization_pose("map"))
-        dump_line = next(
-            line for line in warnings
-            if line.startswith("Search localization trace dump: ")
-        )
-        payload = json.loads(dump_line.removeprefix("Search localization trace dump: "))
-        event_kinds = [event["kind"] for event in payload["trace_capture"]["events"]]
-        self.assertEqual("localization_validation", event_kinds[-1])
-        for field in (
-            "clock_anchor_monotonic_before_ns",
-            "clock_anchor_system_time_ns",
-            "clock_anchor_monotonic_after_ns",
-        ):
-            self.assertIn(field, payload)
 
     def test_tf_stamps_at_barrier_reject_independently_then_newer_data_recovers(self):
         for stream in ("info", "native", "full"):
@@ -1365,7 +941,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "vo_odom": 10_050_000_000,
             "map": 10_050_000_000,
         })
-        node._tf_buffer.errors["map"] = self.module.ExtrapolationException(
+        node._tf_buffer.errors["map"] = self.tf_exceptions.ExtrapolationException(
             "full path unavailable"
         )
         self.assertIsNone(node._localization_pose("map"))
@@ -1393,7 +969,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual({}, node._tf_buffer.stamps)
         self.assertFalse(node._localization_available)
 
-    def test_info_expiring_after_lookups_does_not_capture_tf_diagnostics(self):
+    def test_info_expiring_after_lookup_invalidates_localization(self):
         node = self.make_localization_node()
         node._odom_info_callback(self.odom_info(9_900_000_000))
         node._localization_available = True
@@ -1407,7 +983,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertIsNone(node._localization_pose("map"))
         self.assertEqual(1, len(node._tf_buffer.calls))
-        self.assertEqual(0, node._tf_buffer.snapshot_calls)
         self.assertTrue(node._localization_reason.startswith("OdomInfo"))
 
     def test_positive_info_still_rejects_stale_future_and_regressing_samples(self):
@@ -1462,10 +1037,10 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
     def test_each_expected_tf2_availability_exception_invalidates(self):
         expected_exceptions = (
-            self.module.LookupException,
-            self.module.ConnectivityException,
-            self.module.ExtrapolationException,
-            self.module.TimeoutException,
+            self.tf_exceptions.LookupException,
+            self.tf_exceptions.ConnectivityException,
+            self.tf_exceptions.ExtrapolationException,
+            self.tf_exceptions.TimeoutException,
         )
         for target, expected_calls in (
             ("vo_odom", [("map", "base_link", 0)]),
@@ -1506,7 +1081,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
                                  node._localization_invalidated_at_ns)
                 self.assertEqual(reason, node._localization_reason)
                 self.assertEqual(1, len(warnings))
-                self.assertEqual(0, node._tf_buffer.snapshot_calls)
                 self.assertIn("selected_info_stamp_ns=9950000000", warnings[0])
                 self.assertIn("requested_stamp_ns=0", warnings[0])
                 self.assertIn("exception_class=RuntimeError", warnings[0])
@@ -1650,6 +1224,65 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(old.sequence, node._last_processed_odom_info_sequence)
         self.assertEqual(((), None, old.sequence), handoff.snapshot())
         self.assertIsNone(node._localization_pose("map"))
+
+    def test_delayed_old_loss_after_clock_reset_does_not_block_current_epoch(self):
+        for newer_loss in (False, True):
+            with self.subTest(newer_loss=newer_loss):
+                node = self.make_localization_node()
+                handoff = self.tf_module.OdomInfoHandoff()
+                node._tf_receiver = types.SimpleNamespace(
+                    odom_info_snapshot=handoff.snapshot,
+                    reset_odom_info=handoff.reset,
+                    acknowledge_odom_info_loss=handoff.acknowledge_loss,
+                    invalidate_odom_info=handoff.invalidate,
+                    set_odom_info_barrier=handoff.set_barrier,
+                )
+                node._last_ros_time_ns = 10_000_000_000
+                node._now_ns = 1_000_000_000
+                node._drain_odom_info_snapshot()
+                self.assertEqual(1, node._clock_epoch)
+
+                handoff.add(9_950_000_000, "vo_odom", True)
+                if newer_loss:
+                    # The sticky loss floor must not carry the old epoch
+                    # into a newer loss received before Search drains it.
+                    handoff.add(1_000_000_000, "vo_odom", True)
+                node._drain_odom_info_snapshot()
+                expected_barrier = 1_000_000_000 if newer_loss else None
+                self.assertEqual(expected_barrier, node._localization_invalidated_at_ns)
+                self.assertFalse(node._localization_available)
+                self.assertIsNone(handoff.snapshot()[1])
+
+                node._now_ns = 1_100_000_000
+                _, disposition = handoff.add(node._now_ns, "vo_odom", False)
+                self.assertEqual("queued", disposition)
+                node._drain_odom_info_snapshot()
+                node._tf_buffer.stamps.update({
+                    "vo_odom": node._now_ns, "map": node._now_ns,
+                })
+                self.assertIsNotNone(node._localization_pose("map"))
+                self.assertEqual(1_100_000_000, node._last_accepted_odom_stamp_ns)
+                self.assertIsNone(node._localization_invalidated_at_ns)
+
+    def test_delayed_old_loss_after_recovery_still_cancels_goal(self):
+        node = self.make_localization_node()
+        node._last_ros_time_ns = 10_000_000_000
+        node._now_ns = 1_000_000_000
+        node._current_ros_time_ns()
+        node._now_ns = 1_100_000_000
+        node._odom_info_callback(self.odom_info(node._now_ns))
+        self.assertIsNotNone(node._localization_pose("map"))
+        handle = FakeHandle()
+        node._active_goal = {
+            "handle": handle, "cancel_requested": False, "cancel_reason": None,
+        }
+
+        node._odom_info_callback(self.odom_info(9_950_000_000, lost=True))
+
+        self.assertEqual(1, handle.cancel_count)
+        self.assertFalse(node._localization_available)
+        self.assertTrue(node._active_goal["localization_invalidated"])
+        self.assertEqual(1_100_000_000, node._localization_invalidated_at_ns)
 
     def test_clock_regression_during_lost_invalidation_keeps_reset_clear(self):
         node = self.make_localization_node()
@@ -1837,19 +1470,13 @@ class SearchNodeCallbackTest(unittest.TestCase):
                 self.assertIn("exception_class=RuntimeError", warning)
                 self.assertIn("exception_message='complete TF failure detail'", warning)
 
-    def test_exhausted_tf_candidates_capture_once_after_goal_invalidation(self):
+    def test_tf_failure_invalidates_and_cancels_goal_with_warning(self):
         node = self.make_localization_node()
-        node._localization_trace_enabled = True
         warnings = []
         events = []
         node._logger.warning = warnings.append
         node._localization_available = True
         node._last_accepted_odom_stamp_ns = 9_900_000_000
-        trace_captures = []
-        trace_capture = node._internal_tf_trace.capture
-        node._internal_tf_trace.capture = lambda: (
-            trace_captures.append(True) or trace_capture()
-        )
         handle = FakeHandle()
         candidate = self.candidate("active")
         node._active_goal = {
@@ -1859,127 +1486,39 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "cancel_requested": False, "cancel_reason": None,
         }
         node._odom_info_callback(self.odom_info(9_900_000_000))
-        node._internal_tf_trace.begin("search_tick", tick_sequence=7)
         node._tf_buffer.missing.add("vo_odom")
-        node._tf_buffer.snapshot_yaml = (
-            "base_link:\n  parent: 'vo_odom'\n"
-            "vo_odom:\n  parent: 'map'\n"
-        )
         node._reset_challenger = lambda: events.append("challenger_reset")
         cancel_active_goal = node._cancel_active_goal
         node._cancel_active_goal = lambda reason: (
             events.append("cancel_started") or cancel_active_goal(reason)
         )
-        all_frames_as_yaml = node._tf_buffer.all_frames_as_yaml
-        def capture_yaml():
-            events.append("buffer_snapshot")
-            self.assertFalse(node._localization_available)
-            self.assertTrue(node._active_goal["cancel_requested"])
-            return all_frames_as_yaml()
-        node._tf_buffer.all_frames_as_yaml = capture_yaml
 
-        with patch.object(self.module.time, "monotonic_ns", side_effect=range(101, 140)):
-            self.assertIsNone(node._localization_pose("map"))
+        self.assertIsNone(node._localization_pose("map"))
 
-        self.assertEqual(["challenger_reset", "cancel_started", "buffer_snapshot"], events)
-        self.assertEqual(1, node._tf_buffer.snapshot_calls)
-        self.assertEqual([True], trace_captures)
+        self.assertEqual(["challenger_reset", "cancel_started"], events)
+        self.assertFalse(node._localization_available)
         self.assertTrue(node._active_goal["localization_invalidated"])
         self.assertEqual(1, handle.cancel_count)
-        warning = next(item for item in warnings
-                       if item.startswith("Search localization invalidated:"))
-        self.assertIn("exception_message='vo_odom'", warning)
-        dump = next(item for item in warnings
-                    if item.startswith("Search localization trace dump:"))
-        payload = json.loads(dump.split(": ", 1)[1])
-        self.assertEqual(node._tf_buffer.snapshot_yaml, payload["buffer_snapshot_yaml"])
-        self.assertLessEqual(payload["buffer_snapshot_start_monotonic_ns"],
-                             payload["buffer_snapshot_end_monotonic_ns"])
-        trace_data = payload["trace_capture"]
-        self.assertEqual(0, trace_data["evicted_count"])
-        self.assertTrue(any(event["kind"] == "search_tick"
-                            for event in trace_data["events"]))
-        self.assertEqual("entry", trace_data["open_spans"][0]["phase"])
-        self.assertEqual(7, trace_data["open_spans"][0]["tick_sequence"])
+        self.assertEqual(1, len(warnings))
+        self.assertTrue(warnings[0].startswith("Search localization invalidated:"))
+        self.assertIn("exception_message='vo_odom'", warnings[0])
 
-    def test_latest_tf_failure_does_not_fall_back_and_captures_once(self):
+    def test_latest_tf_failure_does_not_fall_back_to_older_info(self):
         node = self.make_localization_node()
-        node._localization_trace_enabled = True
-        trace_captures = []
-        trace_capture = node._internal_tf_trace.capture
-        node._internal_tf_trace.capture = lambda: (
-            trace_captures.append(True) or trace_capture()
-        )
         node._localization_available = True
         node._odom_info_callback(self.odom_info(9_900_000_000))
         node._odom_info_callback(self.odom_info(9_950_000_000))
         node._tf_buffer.errors["vo_odom"] = (
-            self.module.ExtrapolationException("newer unavailable")
+            self.tf_exceptions.ExtrapolationException("newer unavailable")
         )
 
         self.assertIsNone(node._localization_pose("map"))
         self.assertEqual(1, len(node._tf_buffer.calls))
-        self.assertEqual(1, node._tf_buffer.snapshot_calls)
-        self.assertEqual([True], trace_captures)
         self.assertFalse(node._localization_available)
 
-    def test_non_tf_invalidations_and_startup_tf_warning_do_not_capture(self):
-        node = self.make_localization_node()
-        node._localization_available = True
-        node._odom_info_callback(self.odom_info(10_000_000_000, lost=True))
-        self.assertEqual(0, node._tf_buffer.snapshot_calls)
-
-        node = self.make_localization_node()
-        node._localization_available = True
-        node._now_ns = 11_000_000_000
-        node._odom_info_callback(self.odom_info(9_000_000_000))
-        self.assertIsNone(node._localization_pose("map"))
-        self.assertEqual(0, node._tf_buffer.snapshot_calls)
-
-        node = self.make_localization_node()
-        node._odom_info_callback(self.odom_info(9_900_000_000))
-        node._tf_buffer.missing.add("vo_odom")
-        self.assertIsNone(node._localization_pose("map"))
-        self.assertFalse(node._localization_available)
-        self.assertEqual(0, node._tf_buffer.snapshot_calls)
-
-    def test_capture_failure_keeps_warning_and_one_shot_attempt(self):
-        node = self.make_localization_node()
-        node._localization_trace_enabled = True
-        warnings = []
-        node._logger.warning = warnings.append
-        node._localization_available = True
-        node._odom_info_callback(self.odom_info(9_900_000_000))
-        node._tf_buffer.missing.add("vo_odom")
-        node._tf_buffer.snapshot_error = RuntimeError("yaml unavailable")
-
-        with patch.object(self.module.time, "monotonic_ns", side_effect=range(201, 240)):
-            self.assertIsNone(node._localization_pose("map"))
-
-        self.assertFalse(node._localization_available)
-        self.assertTrue(node._tf_snapshot_attempted)
-        self.assertEqual(2, len(warnings), warnings)
-        dump_line = next(
-            line for line in warnings
-            if line.startswith("Search localization trace dump: ")
-        )
-        dump = json.loads(dump_line.removeprefix("Search localization trace dump: "))
-        self.assertEqual(
-            "RuntimeError: yaml unavailable",
-            dump["buffer_snapshot_capture_error"],
-        )
-
-        node._localization_available = True
-        node._now_ns += 100_000_000
-        node._odom_info_callback(self.odom_info(10_050_000_000))
-        with patch.object(self.module.time, "monotonic_ns", side_effect=range(301, 340)):
-            self.assertIsNone(node._localization_pose("map"))
-        self.assertEqual(1, node._tf_buffer.snapshot_calls)
-        self.assertEqual(3, len(warnings))
 
     def test_tf_failure_warning_is_suppressed_for_repeated_same_reason(self):
         node = self.make_localization_node()
-        node._localization_trace_enabled = True
         warnings = []
         node._logger.warning = warnings.append
         node._localization_available = True
@@ -1994,29 +1533,15 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._tf_buffer.missing.add("vo_odom")
         self.assertIsNone(node._localization_pose("map"))
         boundary = node._localization_invalidated_at_ns
-        self.assertEqual(2, len(warnings))
+        self.assertEqual(1, len(warnings))
 
         node._now_ns = 10_100_000_000
         node._odom_info_callback(self.odom_info(10_050_000_000))
         self.assertIsNone(node._localization_pose("map"))
         self.assertEqual(boundary, node._localization_invalidated_at_ns)
         self.assertEqual(1, handle.cancel_count)
-        self.assertEqual(2, len(warnings))
-        self.assertEqual(1, node._tf_buffer.snapshot_calls)
-        self.assertTrue(node._tf_snapshot_attempted)
+        self.assertEqual(1, len(warnings))
 
-    def test_snapshot_attempt_flag_survives_recovery_enable_and_clock_regression(self):
-        node = self.make_localization_node()
-        node._tf_snapshot_attempted = True
-        node._odom_info_callback(self.odom_info(9_900_000_000))
-        self.assertIsNotNone(node._localization_pose("map"))
-        self.assertTrue(node._tf_snapshot_attempted)
-
-        node._handle_clock_regression(1_000_000_000)
-        self.assertTrue(node._tf_snapshot_attempted)
-        response = types.SimpleNamespace(success=None, message="")
-        node._set_search(types.SimpleNamespace(data=True), response)
-        self.assertTrue(node._tf_snapshot_attempted)
 
     def test_successful_tf_lookups_emit_no_failure_diagnostic(self):
         node = self.make_localization_node()
@@ -2027,7 +1552,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual((1.0, 2.0, 0.0), node._localization_pose("map"))
 
         self.assertEqual(1, len(node._tf_buffer.calls))
-        self.assertEqual(0, node._tf_buffer.snapshot_calls)
         self.assertEqual([], warnings)
 
     def test_recovery_before_terminal_result_waits_then_fresh_data_allows_next_goal(self):
@@ -2480,6 +2004,22 @@ class SearchNodeCallbackTest(unittest.TestCase):
         identity = node._goal_identity(candidate, "map")
         self.assertNotIn(identity, node._failed_attempts)
         self.assertNotIn(identity, node._exhausted_candidates)
+
+    def test_localization_invalidated_success_does_not_complete_candidate(self):
+        node = self.make_node()
+        candidate = self.candidate("invalidated")
+        node._active_goal = {
+            "token": 10, "candidate": candidate, "handle": FakeHandle(),
+            "epoch": node._search_epoch, "cancel_requested": True,
+            "cancel_reason": "localization_invalidated",
+            "localization_invalidated": True,
+            "identity": node._goal_identity(candidate, "map"),
+        }
+
+        node._goal_result(Future(types.SimpleNamespace(status=4)), 10)
+
+        self.assertNotIn(node._goal_identity(candidate, "map"), node._completed_candidates)
+        self.assertIsNone(node._active_goal)
 
     def test_aborted_result_after_cancel_request_consumes_failure_attempt(self):
         node = self.make_node()
@@ -3225,7 +2765,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, node._failed_attempts[first_identity])
         self.assertEqual("second", node._next_ranked_candidate(self.result([second]))["id"])
 
-    def test_frontier_change_invalidates_missing_pending_retry_before_challenger_check(self):
+    def test_missing_pending_retry_is_invalidated_before_challenger_check(self):
         node = self.make_node()
         first, second = self.candidate("first"), self.candidate("second", 0.2, 2.0)
         identity = node._goal_identity(first, "map")
@@ -3234,7 +2774,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._send_goal(first, "/tree.xml")
         token = node._pending_goal["token"]
         result = self.result([second])
-        result["frontier_cells"] = [[4, 5]]
 
         with patch.object(self.module, "evaluate_search", return_value=result):
             node._search_tick()
@@ -3253,9 +2792,9 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertIsNotNone(node._active_goal)
         node._goal_result(Future(types.SimpleNamespace(status=5)), token)
         self.assertIsNone(node._active_goal)
-        self.assertNotIn(identity, node._failed_attempts)
+        self.assertEqual(1, node._failed_attempts[identity])
 
-    def test_frontier_change_rejected_pending_retry_releases_without_failure(self):
+    def test_rejected_pending_retry_releases_without_new_failure(self):
         node = self.make_node()
         first, second = self.candidate("first"), self.candidate("second", 0.2, 2.0)
         identity = node._goal_identity(first, "map")
@@ -3264,7 +2803,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._send_goal(first, "/tree.xml")
         token = node._pending_goal["token"]
         result = self.result([second])
-        result["frontier_cells"] = [[4, 5]]
 
         with patch.object(self.module, "evaluate_search", return_value=result):
             node._search_tick()
@@ -3272,7 +2810,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertIsNone(node._pending_goal)
         self.assertIsNone(node._retry_target)
-        self.assertNotIn(identity, node._failed_attempts)
+        self.assertEqual(1, node._failed_attempts[identity])
 
     def test_frontier_change_invalidates_missing_active_retry_but_not_first_attempt(self):
         second = self.candidate("second", 0.2, 2.0)
@@ -3693,37 +3231,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, node._failed_attempts[retry])
         self.assertIn(done, node._completed_candidates)
 
-    def test_frontier_change_retains_eligible_exhaustion_and_prunes_missing_identity(self):
-        node = self.make_node()
-        retained = self.candidate("retained")
-        missing = self.candidate("missing")
-        retained_identity = node._goal_identity(retained, "map")
-        missing_identity = node._goal_identity(missing, "map")
-        node._exhausted_candidates.update((retained_identity, missing_identity))
-        active = self.candidate("active")
-        node._active_goal = {
-            "token": 26, "candidate": active, "handle": FakeHandle(),
-            "cancel_requested": False, "cancel_reason": None,
-        }
-        first = self.result([active, retained])
-        first["frontier_cells"] = [[3, 4]]
-
-        with patch.object(self.module, "evaluate_search", return_value=first):
-            node._search_tick()
-
-        self.assertIn(retained_identity, node._exhausted_candidates)
-        self.assertNotIn(missing_identity, node._exhausted_candidates)
-
-        node._exhausted_candidates.add(missing_identity)
-        second = self.result([active, retained])
-        second["frontier_cells"] = [[5, 6]]
-        with patch.object(self.module, "evaluate_search", return_value=second):
-            node._search_tick()
-
-        self.assertIn(retained_identity, node._exhausted_candidates)
-        self.assertNotIn(missing_identity, node._exhausted_candidates)
-
-    def test_explicit_empty_frontier_cells_resets_retry_and_completion_history(self):
+    def test_explicit_empty_frontier_cells_preserves_retry_and_completion_history(self):
         node = self.make_node()
         node._failed_attempts["retry"] = 1
         node._completed_candidates.add("done")
@@ -3735,8 +3243,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
         result["frontier_cells"] = []
         with patch.object(self.module, "evaluate_search", return_value=result):
             node._search_tick()
-        self.assertEqual({}, node._failed_attempts)
-        self.assertEqual(set(), node._completed_candidates)
+        self.assertEqual({"retry": 1}, node._failed_attempts)
+        self.assertEqual({"done"}, node._completed_candidates)
 
     def test_failure_budget_survives_frontier_changes_until_second_failure(self):
         node = self.make_node()
@@ -3765,26 +3273,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
 
         self.assertEqual(2, node._failed_attempts[identity])
         self.assertEqual("second", node._next_ranked_candidate(second_result)["id"])
-
-    def test_frontier_change_prunes_lost_failure_and_preserves_eligible_replacement(self):
-        node = self.make_node()
-        lost = self.candidate("lost", 0.7)
-        replacement = self.candidate("replacement", 0.2, 2.0)
-        lost_identity = node._goal_identity(lost, "map")
-        replacement_identity = node._goal_identity(replacement, "map")
-        node._failed_attempts[lost_identity] = 1
-        node._retry_target = lost_identity
-        node._replacement_target = replacement_identity
-        node._action.ready = False
-        result = self.result([replacement])
-        result["frontier_cells"] = [[3, 4]]
-
-        with patch.object(self.module, "evaluate_search", return_value=result):
-            node._search_tick()
-
-        self.assertNotIn(lost_identity, node._failed_attempts)
-        self.assertIsNone(node._retry_target)
-        self.assertEqual(replacement_identity, node._replacement_target)
 
     def test_retry_identity_loss_without_frontier_change_cancels_owned_retry(self):
         node = self.make_node()

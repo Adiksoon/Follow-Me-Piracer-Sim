@@ -108,7 +108,7 @@ class TfReceiverTest(unittest.TestCase):
 
         for name, value in (("Node", FakeNode),
                             ("SingleThreadedExecutor", FakeExecutor),
-                            ("SearchTransformListener", FakeListener),
+                            ("TransformListener", FakeListener),
                             ("Parameter", FakeParameter)):
             patcher = patch.object(self.module, name, value)
             patcher.start()
@@ -116,9 +116,11 @@ class TfReceiverTest(unittest.TestCase):
 
     def receiver(self, sim_time=True):
         self.context = object()
-        self.buffer, self.trace, self.reporter = object(), object(), object()
+        self.buffer = object()
+        self.reported = []
+        self.reporter = lambda operation, error: self.reported.append((operation, error))
         receiver = self.module.SearchTfReceiver(
-            self.buffer, self.trace, self.reporter, context=self.context,
+            self.buffer, self.reporter, context=self.context,
             namespace="/test", use_sim_time=sim_time,
             odom_info_wakeup=self.wakeup,
         )
@@ -140,8 +142,8 @@ class TfReceiverTest(unittest.TestCase):
                 parameter, = self.node_options["parameter_overrides"]
                 self.assertEqual(("use_sim_time", sim_time), (parameter.name, parameter.value))
                 args, kwargs = self.listener_args
-                self.assertEqual((self.buffer, receiver.node, self.trace, self.reporter), args)
-                self.assertEqual({}, kwargs)  # Preserve native listener QoS/topics/spin_thread defaults.
+                self.assertEqual((self.buffer, receiver.node), args)
+                self.assertEqual({"spin_thread": False}, kwargs)  # Use only the owned executor.
                 self.assertEqual([], receiver.node.subscriptions)
                 self.assertFalse(hasattr(receiver, "odom_info_subscription"))
                 self.assertIsNone(receiver.thread.ident)
@@ -181,7 +183,7 @@ class TfReceiverTest(unittest.TestCase):
         self.assertIsNone(receiver.thread.ident)
 
     def test_partial_initialization_releases_created_node_and_executor(self):
-        for failing_part in ("SingleThreadedExecutor", "SearchTransformListener"):
+        for failing_part in ("SingleThreadedExecutor", "TransformListener"):
             with self.subTest(failing_part=failing_part):
                 self.events.clear()
                 with patch.object(self.module, failing_part, side_effect=ValueError("init failed")):
@@ -189,7 +191,7 @@ class TfReceiverTest(unittest.TestCase):
                         self.receiver()
                 self.assertEqual("node_destroy", self.events[-1])
                 self.assertEqual(1, self.events.count("node_destroy"))
-                self.assertEqual(failing_part == "SearchTransformListener",
+                self.assertEqual(failing_part == "TransformListener",
                                  "executor_shutdown" in self.events)
 
     def test_close_waits_for_active_callback_before_unregister_and_destroy(self):
@@ -213,7 +215,6 @@ class TfReceiverTest(unittest.TestCase):
 
     def test_odom_info_callback_hands_off_only_metadata_and_wakes_search(self):
         receiver = self.receiver()
-        receiver._trace = None
         message = types.SimpleNamespace(
             header=types.SimpleNamespace(
                 stamp=types.SimpleNamespace(sec=7, nanosec=25),
@@ -236,11 +237,39 @@ class TfReceiverTest(unittest.TestCase):
 
     def test_metadata_reception_after_close_does_not_wake_or_change_snapshot(self):
         receiver = self.receiver()
-        receiver._trace = None
         receiver.close()
         receiver.receive_odom_info(types.SimpleNamespace())
         self.assertEqual(((), None, 0), receiver.odom_info_snapshot())
         self.assertEqual(0, self.wakeup.trigger_count)
+
+    def test_wakeup_failure_reports_error_and_preserves_metadata(self):
+        receiver = self.receiver()
+        error = RuntimeError("trigger failed")
+        message = types.SimpleNamespace(
+            header=types.SimpleNamespace(
+                stamp=types.SimpleNamespace(sec=7, nanosec=0), frame_id="vo_odom",
+            ),
+            lost=True,
+        )
+        with patch.object(self.wakeup, "trigger", side_effect=error):
+            receiver.receive_odom_info(message)
+
+        self.assertEqual([("odom_info_wakeup", error)], self.reported)
+        self.assertTrue(receiver.odom_info_snapshot()[1].lost)
+
+    def test_handoff_reports_loss_and_preserves_later_recovery_sample(self):
+        handoff = self.module.OdomInfoHandoff(capacity=4)
+        self.assertEqual(2, len(handoff.add(10, "vo_odom", False)))
+        loss, disposition = handoff.add(11, "vo_odom", True)
+        self.assertEqual("lost", disposition)
+        handoff.add(12, "vo_odom", False)
+        samples, pending_loss, latest_sequence = handoff.snapshot()
+        self.assertEqual(3, latest_sequence)
+        self.assertEqual([3], [sample.sequence for sample in samples])
+        self.assertEqual(loss.sequence, pending_loss.sequence)
+        self.assertTrue(pending_loss.lost)
+        handoff.acknowledge_loss(loss.sequence)
+        self.assertIsNone(handoff.snapshot()[1])
 
     def test_concurrent_old_loss_acknowledgement_keeps_newer_loss(self):
         handoff = self.module.OdomInfoHandoff()

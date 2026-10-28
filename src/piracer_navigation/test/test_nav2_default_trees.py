@@ -6,6 +6,21 @@ import yaml
 ROOT = Path(__file__).parents[1]
 
 
+def test_default_navigate_to_pose_propagates_follow_path_success():
+    tree = ET.parse(ROOT / "behavior_trees/navigate_to_pose.xml")
+    assert tree.getroot().get("main_tree_to_execute") == "MainTree"
+    sequence = tree.find("./BehaviorTree[@ID='MainTree']/Sequence")
+    assert sequence is not None
+    assert [node.tag for node in sequence] == ["ComputePathToPose", "FollowPath"]
+    assert sequence[0].attrib == {
+        "goal": "{goal}", "path": "{path}", "planner_id": "Hybrid",
+    }
+    assert sequence[1].attrib == {
+        "path": "{path}", "controller_id": "FollowPath",
+        "goal_checker_id": "general_goal_checker",
+    }
+
+
 def test_through_poses_tree_has_no_unavailable_recovery_actions():
     path = ROOT / "behavior_trees/navigate_through_poses_no_recovery.xml"
     tree = ET.parse(path)

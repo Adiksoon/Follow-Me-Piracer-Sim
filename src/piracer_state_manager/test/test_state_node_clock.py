@@ -61,7 +61,7 @@ def test_clock_regression_drops_current_and_old_epoch_data_then_accepts_new_epoc
     clock.nanoseconds = 2_000_000_000; n._on_detections(detection(1_900_000_000))
     assert not n.machine.active and n.machine.state == SEARCH
     assert n.machine.last_receipt_time is None and n.machine.last_stamp is None
-    assert n.machine.data_paused and not n.machine.window
+    assert n.machine.data_paused
     clock.nanoseconds = 2_100_000_000
     n._on_detections(detection(9_900_000_000)); assert not n.machine.active
     n._on_detections(detection(1_900_000_000)); assert not n.machine.active

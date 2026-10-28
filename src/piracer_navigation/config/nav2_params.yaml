@@ -87,7 +87,7 @@ controller_server:
       xy_goal_tolerance: 0.15
     FollowPath:
       plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
-      desired_linear_vel: 0.05
+      desired_linear_vel: 0.10
       lookahead_dist: 0.25
       use_rotate_to_heading: false
       allow_reversing: false
@@ -212,7 +212,7 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: true
     feedback: OPEN_LOOP
-    max_velocity: [0.05, 0.0, 0.2]
+    max_velocity: [0.10, 0.0, 0.2]
     min_velocity: [0.0, 0.0, -0.2]
     max_accel: [0.05, 0.0, 0.20]
     max_decel: [-0.10, 0.0, -0.40]

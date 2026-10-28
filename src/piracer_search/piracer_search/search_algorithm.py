@@ -316,11 +316,8 @@ def _candidate_for(cluster_record, option, robot_pose, width, height, resolution
             "source_frontiers_world": cluster_record["frontiers_world"]}
 
 
-def evaluate_search(grid, robot_pose, *, camera=None):
-    """Rank frontier clusters by boundary-cell gain and BFS cluster-access distance.
-
-    ``camera`` remains accepted for caller compatibility; this evaluator does not raycast.
-    """
+def evaluate_search(grid, robot_pose):
+    """Rank frontier clusters by boundary-cell gain and BFS cluster-access distance."""
     if grid is None:
         return {"status": "WAITING_FOR_MAP", "candidates": [], "ranking": []}
     if robot_pose is None:

@@ -36,8 +36,8 @@ class SearchWorkerTest(unittest.TestCase):
         self.release.set()
         self.pool.shutdown(wait=True, cancel_futures=True)
 
-    def compute(self, grid, pose, *, camera):
-        self.calls.append((copy.deepcopy(grid), pose, dict(camera), threading.get_ident()))
+    def compute(self, grid, pose):
+        self.calls.append((copy.deepcopy(grid), pose, threading.get_ident()))
         self.started.set()
         if not self.release.wait(timeout=3.0):
             raise RuntimeError("offline worker was not released")
@@ -63,7 +63,7 @@ class SearchWorkerTest(unittest.TestCase):
             for _ in range(5):
                 self.node._search_tick()
             self.assertEqual(1, len(self.calls))
-            self.assertNotEqual(main_thread, self.calls[0][3])
+            self.assertNotEqual(main_thread, self.calls[0][2])
             self.assertEqual([], self.node._action.sent)
             self.finish(future)
         self.assertEqual(1, len(self.node._action.sent))
@@ -80,7 +80,7 @@ class SearchWorkerTest(unittest.TestCase):
             self.node._search_tick()
         self.assertEqual(1, len(self.node._action.sent))
 
-    def test_snapshot_does_not_share_map_origin_or_camera(self):
+    def test_snapshot_does_not_share_map_origin(self):
         grid = {"width": 1, "height": 1, "resolution": 1.0,
                 "origin": [0.0, 0.0, 0.0], "data": (0,)}
         # _grid creates fresh tuple/list values from the ROS message in production.
@@ -95,7 +95,7 @@ class SearchWorkerTest(unittest.TestCase):
 
     def test_invalidated_context_cannot_dispatch_even_after_recovery(self):
         for change in ("disable", "reenable", "loss_recovery", "clock_reset",
-                       "map", "frame", "camera"):
+                       "map", "frame"):
             with self.subTest(change=change):
                 node = self.fixture.make_node()
                 node._evaluation_executor = self.pool
@@ -121,12 +121,6 @@ class SearchWorkerTest(unittest.TestCase):
                         node._grid = lambda: {"changed": True}
                     elif change == "frame":
                         node._map.header.frame_id = "other_map"
-                    elif change == "camera":
-                        original = node.get_parameter
-                        node.get_parameter = lambda name: (
-                            type("Param", (), {"value": 4.0})()
-                            if name == "camera.max_range_m" else original(name)
-                        )
                     self.finish(future)
                     self.assertEqual([], node._action.sent)
                     self.assertEqual(1, len(self.calls))
@@ -161,7 +155,7 @@ class SearchWorkerTest(unittest.TestCase):
         self.assertEqual(1, len(self.node._action.sent))
 
     def test_worker_failure_is_discarded_without_navigation(self):
-        def broken(grid, pose, *, camera):
+        def broken(grid, pose):
             raise ValueError("bad snapshot")
         with patch.object(self.module, "evaluate_search", side_effect=broken):
             self.node._search_tick()
@@ -173,19 +167,18 @@ class SearchWorkerTest(unittest.TestCase):
 
     def test_pure_worker_has_no_node_reference_and_matches_algorithm(self):
         function = self.module._evaluate_frontier_snapshot
-        self.assertEqual(["grid", "robot_pose", "camera", "trace", "tick_sequence"],
+        self.assertEqual(["grid", "robot_pose"],
                          list(inspect.signature(function).parameters))
         grid = {"width": 6, "height": 6, "resolution": 1.0,
                 "origin": [0.0, 0.0, 0.0],
                 "data": tuple(0 if 1 <= x <= 4 and 1 <= y <= 4 else -1
                               for y in range(6) for x in range(6))}
         pose = (2.5, 2.5, 0.0)
-        camera = {"horizontal_fov_deg": 90.0, "max_range_m": 5.0}
-        original = copy.deepcopy((grid, pose, camera))
-        expected = self.module.evaluate_search(grid, pose, camera=camera)
-        actual = self.pool.submit(function, grid, pose, camera, None, 1).result(timeout=2.0)
+        original = copy.deepcopy((grid, pose))
+        expected = self.module.evaluate_search(grid, pose)
+        actual = self.pool.submit(function, grid, pose).result(timeout=2.0)
         self.assertEqual(expected, actual)
-        self.assertEqual(original, (grid, pose, camera))
+        self.assertEqual(original, (grid, pose))
 
 
 if __name__ == "__main__":

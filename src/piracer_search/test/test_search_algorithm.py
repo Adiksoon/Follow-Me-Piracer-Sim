@@ -75,7 +75,7 @@ class SearchAlgorithmTest(unittest.TestCase):
         rx, ry = case["robot"]["cell"]
         resolution = occupancy["resolution"]
         robot = ((rx + 0.5) * resolution, (ry + 0.5) * resolution, case["robot"]["yaw_world"])
-        result = evaluate_search(occupancy, robot, camera=case["camera"])
+        result = evaluate_search(occupancy, robot)
 
         # Preserve the hand-authored Goal02 frontier geometry while checking
         # the current cluster-access costs and ranking below.
@@ -94,14 +94,14 @@ class SearchAlgorithmTest(unittest.TestCase):
         self.assertTrue(all("cluster_access_distance_m" in c for c in result["candidates"]))
         self.assertEqual([c["id"] for c in result["candidates"]], result["ranking"])
 
-    def test_camera_ignored_cluster_scoring_and_world_metadata_revalidation(self):
+    def test_cluster_scoring_and_world_metadata_revalidation(self):
         w = h = 24; res = 0.05
         data = [100] * (w*h)
         for y in range(3, 21):
             for x in range(3, 21): data[y*w+x] = 0
         for x in (20, 19, 18): data[10*w+x] = -1
         grid = {"width":w,"height":h,"resolution":res,"origin":[0,0,0],"data":data}
-        result = evaluate_search(grid, (0.5,0.5,0), camera=None)
+        result = evaluate_search(grid, (0.5,0.5,0))
         self.assertTrue(result["clustered"])
         self.assertTrue(result["candidates"])
         c = result["candidates"][0]
@@ -183,7 +183,7 @@ class SearchAlgorithmTest(unittest.TestCase):
             data[y * width + x] = 0
         data[2 * width + 4] = -1
         grid = {"width": width, "height": height, "resolution": 1.0, "origin": [0, 0, 0], "data": data}
-        result = evaluate_search(grid, (2.5, 2.5, 0.0), camera={"horizontal_fov_deg": 90, "max_range_m": 1})
+        result = evaluate_search(grid, (2.5, 2.5, 0.0))
         self.assertEqual("NO_ADMISSIBLE_CANDIDATE", result["status"])
         self.assertEqual([], result["ranking"])
 
@@ -196,11 +196,11 @@ class SearchAlgorithmTest(unittest.TestCase):
         data[3 * width + 6] = -1
         data[2 * width + 3] = 50
         grid = {"width": width, "height": height, "resolution": 1.0, "origin": [0, 0, 0], "data": data}
-        result = evaluate_search(grid, (2.5, 3.5, 0.0), camera={"horizontal_fov_deg": 90, "max_range_m": 2})
+        result = evaluate_search(grid, (2.5, 3.5, 0.0))
         self.assertIn([3, 3], result["frontier_cells"])
         self.assertNotIn("x4_y3_d0", {item["id"] for item in result["candidates"]})
 
-    def test_missing_map_localization_or_camera_configuration(self):
+    def test_missing_map_or_localization(self):
         self.assertEqual("WAITING_FOR_MAP", evaluate_search(None, (0, 0, 0))["status"])
         grid = {"width": 3, "height": 3, "resolution": 1.0, "origin": [0, 0, 0], "data": [100] * 9}
         self.assertEqual("WAITING_FOR_LOCALIZATION", evaluate_search(grid, None)["status"])
@@ -358,9 +358,7 @@ class SearchAlgorithmTest(unittest.TestCase):
         grid = {"width": width, "height": height, "resolution": resolution,
                 "origin": [0.0, 0.0, 0.0], "data": data}
         robot_pose = ((5.5) * resolution, (7.5) * resolution, 0.0)
-        result = evaluate_search(
-            grid, robot_pose, camera={"horizontal_fov_deg": 90, "max_range_m": 5.0}
-        )
+        result = evaluate_search(grid, robot_pose)
 
         self.assertEqual(0.30, MAX_VIEWPOINT_SHIFT_M)
         self.assertEqual("RECOMMENDATION_AVAILABLE", result["status"])

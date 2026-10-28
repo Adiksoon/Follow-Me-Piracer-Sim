@@ -56,6 +56,23 @@ CP-00D.1 report and `verification/yolo11n_same_frame_20261008/weights/`.
 This package's new source remains MIT-licensed; the user-authorized academic
 model use does not change the repository-wide license.
 
+For a fresh checkout, obtain the retained COCO `yolo11n.onnx` separately from
+the project author or the project's external artifact archive; Git and the
+package build do not download or include it. Copy it to a persistent local
+path and verify its SHA-256:
+`ebc1c3f07246d5029ea165f30189a791a3140890f635a19c54547e3e4dae7c66`
+(10,701,966 bytes). The current host keeps this file at
+`/home/zygar/dev_praca_inz/symulacja/verification/yolo11n_same_frame_20261008/weights/yolo11n.onnx`.
+For the full-system `piracer_state_manager/piracer_sim.launch.py`, set
+`model_path` in `robot_perception/config/detector.yaml` to the local absolute
+path, then rebuild `robot_perception` and source the resulting install. That
+launcher reads the installed YAML and does not expose a `yolo_model_path`
+override. The base `piracer_sim_base.launch.py` supports `yolo_model_path` or
+`yolo_params_file` when using `yolo_backend:=yolo11n_dnn` and
+`yolo_enabled:=true`. Retain `class_filter: suitcase` for this COCO artifact
+and the compatible OpenCV environment described above. Do not add the weights
+to Git.
+
 Unit tests use synthetic tensors and in-memory messages. They are separate
 from the recorded real-model offline inference. No live ROS or Gazebo result is
 claimed by this checkpoint.

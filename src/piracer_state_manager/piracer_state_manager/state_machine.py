@@ -1,17 +1,11 @@
 """Small, ROS-independent SEARCH/ACQUIRE/FOLLOW state machine."""
 
-from collections import deque
 import math
 
 
 SEARCH = "SEARCH"
 ACQUIRE = "ACQUIRE"
 FOLLOW = "FOLLOW"
-
-
-def search_should_run(state, active):
-    """Return whether current manager output requests Search to run."""
-    return bool(active) and state == SEARCH
 
 
 class BehaviorEnableCoordinator:
@@ -93,13 +87,11 @@ class StateMachine:
         self.last_receipt_time = None
         self.last_stamp = None
         self.acquire_started = None
-        self.window = deque(maxlen=acquire_window)
         self.hit_streak = 0
         self.miss_streak = 0
 
     def _reset_state(self, state=SEARCH, now=None):
         self.state = state
-        self.window.clear()
         self.hit_streak = 0
         self.miss_streak = 0
         self.acquire_started = now if state == ACQUIRE else None
@@ -163,7 +155,7 @@ class StateMachine:
         self.active = self.enabled
         if not self.enabled:
             return events
-        # usun po dodaniu reszty node
+        # Hold transitions at SEARCH until ACQUIRE and FOLLOW are ready.
         if self.state != SEARCH:
             self._reset_state()
         if self.state == SEARCH:

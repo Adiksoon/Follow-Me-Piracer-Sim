@@ -7,7 +7,6 @@ from piracer_state_manager.state_machine import (
     SEARCH,
     BehaviorEnableCoordinator,
     StateMachine,
-    search_should_run,
 )
 
 
@@ -172,13 +171,6 @@ def test_source_stamps_must_be_strictly_increasing_and_valid():
     frame(machine, (12, 101), True, .7)
     assert machine.state == SEARCH
     assert machine.last_receipt_time == .7
-
-
-def test_search_is_requested_only_for_active_search_state():
-    assert search_should_run(SEARCH, True)
-    assert not search_should_run(SEARCH, False)
-    assert not search_should_run(ACQUIRE, True)
-    assert not search_should_run(FOLLOW, True)
 
 
 def test_behavior_handoff_disables_all_nodes_before_enabling_target():

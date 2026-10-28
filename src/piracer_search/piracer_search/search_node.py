@@ -4,8 +4,6 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import json
 import math
-import os
-import time
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -27,20 +25,12 @@ from rclpy.time import Time
 from rclpy.utilities import try_shutdown
 from rtabmap_msgs.msg import OdomInfo
 from std_srvs.srv import SetBool
-from tf2_ros import (
-    ConnectivityException,
-    ExtrapolationException,
-    LookupException,
-    TimeoutException,
-)
+from tf2_ros import Buffer
 from visualization_msgs.msg import MarkerArray
 
 from .search_markers import _candidate_markers, _stale_marker_deletions
 from .search_algorithm import evaluate_search, match_active_frontiers, revalidate_candidate
-from .tf_timing import (
-    InternalTfTrace, OdomInfoTraceExecutor, SearchTfBuffer, SearchTfReceiver,
-    SearchTransformListener,
-)
+from .tf_timing import SearchTfReceiver
 
 
 def _map_subscription_qos():
@@ -56,29 +46,9 @@ def _odom_info_subscription_qos():
     return qos_profile_sensor_data
 
 
-def _evaluate_frontier_snapshot(grid, robot_pose, camera, trace, tick_sequence):
+def _evaluate_frontier_snapshot(grid, robot_pose):
     """Pure computation: no node, action client or navigation state in the worker."""
-    span_id = None
-    error = None
-    if trace is not None:
-        try:
-            span_id, _ = trace.begin(
-                "search_computation", tick_sequence=tick_sequence,
-                operation="evaluate_search",
-            )
-        except Exception:
-            pass  # Optional tracing must not change the computation.
-    try:
-        return evaluate_search(grid, robot_pose, camera=camera)
-    except BaseException as exc:
-        error = exc
-        raise
-    finally:
-        if trace is not None and span_id is not None:
-            try:
-                trace.finish(span_id, error)
-            except Exception:
-                pass
+    return evaluate_search(grid, robot_pose)
 
 
 # Conservative default for direct and physical launches. The full simulation
@@ -106,14 +76,7 @@ class SearchNode(Node):
         if not math.isfinite(tf_future_lead_sec) or tf_future_lead_sec < 0.0:
             raise ValueError("tf_future_lead_sec must be finite and non-negative")
         self._tf_future_lead_ns = round(tf_future_lead_sec * 1_000_000_000)
-        self.declare_parameter(
-            "localization_trace_enabled",
-            os.environ.get("PIRACER_SEARCH_TRACE") == "1",
-        )
         self.declare_parameter("goal_switch_margin", 0.10)
-        # Simulation settings only; physical camera calibration is TBD.
-        self.declare_parameter("camera.horizontal_fov_deg", 65.36016047954865)
-        self.declare_parameter("camera.max_range_m", 5.0)
 
         self._enabled = False
         self._search_epoch = 0
@@ -122,7 +85,6 @@ class SearchNode(Node):
         self._evaluation_future = None
         self._evaluation_context = None
         self._map = None
-        self._frontier_key = None
         self._last_cluster_ranking = None
         self._cluster_ranking_context = None
         self._next_goal_requested = False
@@ -147,20 +109,8 @@ class SearchNode(Node):
         self._last_ros_time_ns = None
         self._clock_epoch = 0
         self._localization_reason = None
-        self._tf_snapshot_attempted = False
 
-        self._localization_trace_enabled = bool(
-            self.get_parameter("localization_trace_enabled").value
-        )
-        self._odom_info_trace_context = None
-        self._odom_info_trace_executor = None
-        self._internal_tf_trace = (
-            InternalTfTrace() if self._localization_trace_enabled else None
-        )
-        self._tf_buffer = SearchTfBuffer(
-            self._internal_tf_trace, self._localization_trace_enabled,
-            self._trace_error,
-        )
+        self._tf_buffer = Buffer()
         self._search_callback_group = MutuallyExclusiveCallbackGroup()
         self._odom_info_wakeup = self.create_guard_condition(
             self._drain_odom_info_snapshot,
@@ -187,16 +137,13 @@ class SearchNode(Node):
         self._timer = self.create_timer(
             1.0, self._search_tick, callback_group=self._search_callback_group
         )
-        self._localization_trace_summary_wall = time.monotonic()
-        if self._localization_trace_enabled:
-            self.get_logger().info("Search localization trace enabled")
         self.get_logger().info(
             "Search localization max age: "
             f"{float(self.get_parameter('max_localization_age_sec').value):.3f} s"
         )
 
         self._tf_receiver = SearchTfReceiver(
-            self._tf_buffer, self._internal_tf_trace, self._trace_error,
+            self._tf_buffer, self._receiver_error,
             context=self.context, namespace=self.get_namespace(),
             use_sim_time=bool(self.get_parameter("use_sim_time").value),
             odom_info_wakeup=self._odom_info_wakeup,
@@ -216,34 +163,7 @@ class SearchNode(Node):
 
     def _receive_odom_info(self, message):
         """Receive metadata only; validation stays in the Search callback group."""
-        callback_python_entry_ns = time.monotonic_ns()
-        result = self._tf_receiver.receive_odom_info(message)
-        context = getattr(self, "_odom_info_trace_context", None)
-        if context is not None and result is not None:
-            sample, disposition, handoff_commit_ns = result
-            try:
-                helper_ros_time_ns = (
-                    self._tf_receiver.node.get_clock().now().nanoseconds
-                )
-            except Exception:
-                helper_ros_time_ns = None
-            try:
-                search_ros_time_ns = self.get_clock().now().nanoseconds
-            except Exception:
-                search_ros_time_ns = None
-            trace_update_ns = time.monotonic_ns()
-            context.annotate(
-                callback_python_entry_monotonic_ns=callback_python_entry_ns,
-                handoff_commit_monotonic_ns=handoff_commit_ns,
-                handoff_trace_update_monotonic_ns=trace_update_ns,
-                handoff_sequence=sample.sequence,
-                handoff_disposition=disposition,
-                handoff_header_stamp_ns=sample.stamp_ns,
-                handoff_frame_id=sample.frame_id,
-                handoff_lost=sample.lost,
-                search_ros_time_ns_at_handoff=search_ros_time_ns,
-                helper_ros_time_ns_at_handoff=helper_ros_time_ns,
-            )
+        self._tf_receiver.receive_odom_info(message)
 
     def _map_callback(self, message):
         self._map = message
@@ -275,24 +195,20 @@ class SearchNode(Node):
             ]
             events.append(pending_loss)
         events.sort(key=lambda sample: sample.sequence)
-        try:
-            for sample in events:
-                if self._clock_epoch != clock_epoch:
-                    return
-                self._odom_info_callback(sample)
-                # The callback may observe a clock reset. Do not replay the
-                # rest of a snapshot captured in the previous clock epoch.
-                if self._clock_epoch != clock_epoch:
-                    return
-                self._last_processed_odom_info_sequence = sample.sequence
-                if sample.lost:
-                    receiver.acknowledge_odom_info_loss(sample.sequence)
-            self._last_processed_odom_info_sequence = max(
-                self._last_processed_odom_info_sequence, latest_sequence
-            )
-        finally:
-            if self._localization_trace_enabled:
-                self._flush_pending_localization_trace_dump()
+        for sample in events:
+            if self._clock_epoch != clock_epoch:
+                return
+            self._odom_info_callback(sample)
+            # The callback may observe a clock reset. Do not replay the
+            # rest of a snapshot captured in the previous clock epoch.
+            if self._clock_epoch != clock_epoch:
+                return
+            self._last_processed_odom_info_sequence = sample.sequence
+            if sample.lost:
+                receiver.acknowledge_odom_info_loss(sample.sequence)
+        self._last_processed_odom_info_sequence = max(
+            self._last_processed_odom_info_sequence, latest_sequence
+        )
 
     def _current_ros_time_ns(self):
         now_ns = self.get_clock().now().nanoseconds
@@ -314,15 +230,6 @@ class SearchNode(Node):
     def _handle_clock_regression(self, now_ns):
         self._clock_epoch += 1
         self._localization_generation += 1
-        if self._localization_trace_enabled:
-            try:
-                self._internal_tf_trace.record(
-                    "localization_clock_regression",
-                    ros_time_ns=now_ns,
-                    buffer_cleared=True,
-                )
-            except Exception as exc:
-                self._trace_error("clock_regression", exc)
         was_available = self._localization_available
         self._odom_info.clear()
         receiver = getattr(self, "_tf_receiver", None)
@@ -341,7 +248,7 @@ class SearchNode(Node):
 
     def _invalidate_localization(
         self, reason, lost_stamp_ns=None, diagnostic_details=None,
-        tf_failure_monotonic_ns=None, lost_stamp_floor_ns=None,
+        lost_stamp_floor_ns=None,
         after_odom_info_sequence=None,
     ):
         was_available = self._localization_available
@@ -353,37 +260,6 @@ class SearchNode(Node):
                 # Clock reset already cleared localization and handoff state.
                 # Do not apply barriers computed from the previous time epoch.
                 return
-
-        trace_dump_scheduled = (
-            self._localization_trace_enabled and not self._tf_snapshot_attempted
-        )
-        if trace_dump_scheduled:
-            trace_context = getattr(self, "_active_localization_trace", None)
-            state = (
-                trace_context.get("odom_info_state_snapshot")
-                if trace_context is not None else None
-            )
-            if state is None:
-                try:
-                    state = self._capture_odom_info_state(now_ns)
-                except Exception as exc:
-                    state = {"state_capture_error": f"{type(exc).__name__}: {exc}"}
-            try:
-                self._internal_tf_trace.record(
-                    "odom_info_pre_invalidation_state",
-                    reason=reason,
-                    selected_odom_sequence=(
-                        trace_context.get("selected_odom_sequence")
-                        if trace_context is not None else None
-                    ),
-                    selected_odom_stamp_ns=(
-                        trace_context.get("selected_odom_stamp_ns")
-                        if trace_context is not None else None
-                    ),
-                    **state,
-                )
-            except Exception as exc:
-                self._trace_error("pre_invalidation_snapshot", exc)
 
         boundaries = [self._localization_invalidated_at_ns, self._last_accepted_odom_stamp_ns]
         if lost_stamp_ns is not None and lost_stamp_ns > 0:
@@ -410,12 +286,6 @@ class SearchNode(Node):
             )
         self._reset_challenger()
         self._mark_owned_goal_localization_invalidated("localization_invalidated")
-        if trace_dump_scheduled:
-            self._tf_snapshot_attempted = True
-            self._pending_localization_trace_dump = {
-                "reason": reason,
-                "tf_failure_monotonic_ns": tf_failure_monotonic_ns,
-            }
         if was_available or self._localization_reason != reason:
             message = f"Search localization invalidated: {reason}"
             if diagnostic_details is not None:
@@ -425,14 +295,23 @@ class SearchNode(Node):
 
     def _odom_info_callback(self, message):
         clock_epoch = self._clock_epoch
-        self._current_ros_time_ns()
+        now_ns = self._current_ros_time_ns()
         if self._clock_epoch != clock_epoch:
             return
         stamp_ns = self._stamp_ns(message)
         if message.lost:
+            lost_stamp_ns = stamp_ns
+            lost_stamp_floor_ns = getattr(message, "lost_stamp_floor_ns", None)
+            if self._clock_epoch > 0:
+                # After a clock reset, future loss stamps may belong to an old
+                # epoch. Keep the loss signal without installing its barrier.
+                if lost_stamp_ns > now_ns:
+                    lost_stamp_ns = None
+                if lost_stamp_floor_ns is not None and lost_stamp_floor_ns > now_ns:
+                    lost_stamp_floor_ns = None
             self._invalidate_localization(
-                "OdomInfo reports lost", stamp_ns,
-                lost_stamp_floor_ns=getattr(message, "lost_stamp_floor_ns", None),
+                "OdomInfo reports lost", lost_stamp_ns,
+                lost_stamp_floor_ns=lost_stamp_floor_ns,
                 after_odom_info_sequence=getattr(message, "sequence", None),
             )
             return
@@ -443,202 +322,18 @@ class SearchNode(Node):
             return
         self._odom_info.append(message)
 
-    def _trace_error(self, operation, exc):
-        if self._localization_trace_enabled:
-            try:
-                self.get_logger().warning(
-                    "Search localization trace error: "
-                    f"operation={operation!r}, exception={type(exc).__name__}: {exc}"
-                )
-            except Exception:
-                pass
-
-    @staticmethod
-    def _trace_clock_anchor():
-        mono_before = time.monotonic_ns()
-        system_ns = time.time_ns()
-        mono_after = time.monotonic_ns()
-        return {
-            "clock_anchor_monotonic_before_ns": mono_before,
-            "clock_anchor_system_time_ns": system_ns,
-            "clock_anchor_monotonic_after_ns": mono_after,
-        }
-
-    def _capture_odom_info_state(self, ros_now_ns):
-        """Return bounded diagnostic metadata without retaining ROS messages."""
-        receiver = getattr(self, "_tf_receiver", None)
-        handoff_start_ns = time.monotonic_ns()
-        if receiver is not None and hasattr(receiver, "odom_info_snapshot"):
-            samples, pending_loss, latest_sequence = receiver.odom_info_snapshot()
-        else:
-            samples, pending_loss, latest_sequence = (), None, None
-        handoff_end_ns = time.monotonic_ns()
-        search_state_time_ns = time.monotonic_ns()
-        queue = [
-            {
-                "sequence": getattr(message, "sequence", None),
-                "stamp_ns": self._stamp_ns(message),
-                "lost": bool(getattr(message, "lost", False)),
-            }
-            for message in self._odom_info
-        ]
-        return {
-            "state_capture_ros_now_ns": ros_now_ns,
-            "state_capture_clock_epoch": self._clock_epoch,
-            "handoff_snapshot_start_monotonic_ns": handoff_start_ns,
-            "handoff_snapshot_end_monotonic_ns": handoff_end_ns,
-            "handoff_latest_sequence": latest_sequence,
-            "handoff_samples": [
-                {"sequence": sample.sequence,
-                 "stamp_ns": sample.stamp_ns,
-                 "frame_id": sample.frame_id,
-                 "lost": sample.lost}
-                for sample in samples
-            ],
-            "handoff_pending_loss": (
-                {
-                    "sequence": pending_loss.sequence,
-                    "stamp_ns": pending_loss.stamp_ns,
-                    "frame_id": pending_loss.frame_id,
-                    "lost": pending_loss.lost,
-                    "lost_stamp_floor_ns": pending_loss.lost_stamp_floor_ns,
-                }
-                if pending_loss is not None else None
-            ),
-            "search_state_capture_monotonic_ns": search_state_time_ns,
-            "search_last_processed_odom_info_sequence_watermark": (
-                self._last_processed_odom_info_sequence
-            ),
-            "search_odom_info_queue": queue,
-            "localization_invalidated_at_ns": self._localization_invalidated_at_ns,
-        }
-
-    def _trace_begin_safe(self, trace, kind, **details):
-        try:
-            return trace.begin(kind, **details)
-        except Exception as exc:
-            self._trace_error(f"{kind}_begin", exc)
-            return None, None
-
-    def _trace_finish_safe(self, trace, span_id, error=None):
-        if span_id is None:
-            return
-        try:
-            trace.finish(span_id, error)
-        except Exception as exc:
-            self._trace_error("search_computation_finish", exc)
-
-    def _flush_pending_localization_trace_dump(self):
-        pending = getattr(self, "_pending_localization_trace_dump", None)
-        if pending is None:
-            return
-        self._pending_localization_trace_dump = None
-        try:
-            payload = {
-                "reason": pending["reason"],
-                "tf_failure_monotonic_ns": pending["tf_failure_monotonic_ns"],
-                **self._trace_clock_anchor(),
-            }
-            try:
-                started_ns = time.monotonic_ns()
-                payload["buffer_snapshot_yaml"] = self._tf_buffer.all_frames_as_yaml()
-                payload["buffer_snapshot_start_monotonic_ns"] = started_ns
-                payload["buffer_snapshot_end_monotonic_ns"] = time.monotonic_ns()
-            except Exception as exc:
-                payload["buffer_snapshot_capture_error"] = (
-                    f"{type(exc).__name__}: {exc}"
-                )
-            try:
-                payload["trace_capture"] = self._internal_tf_trace.capture()
-            except Exception as exc:
-                payload["trace_capture_error"] = f"{type(exc).__name__}: {exc}"
-            trace_executor = getattr(self, "_odom_info_trace_executor", None)
-            if trace_executor is not None:
-                payload["odom_info_trace_stats"] = (
-                    trace_executor.odom_info_trace_stats()
-                )
-            self.get_logger().warning(
-                "Search localization trace dump: "
-                + json.dumps(payload, separators=(",", ":"))
-            )
-        except Exception as exc:
-            self._trace_error("invalidation_dump", exc)
+    def _receiver_error(self, operation, exc):
+        self.get_logger().warning(
+            "Search TF/OdomInfo receiver error: "
+            f"operation={operation!r}, exception={type(exc).__name__}: {exc}"
+        )
 
     def _localization_pose(self, map_frame):
-        if not self._localization_trace_enabled:
-            return self._localization_pose_impl(map_frame)
-        entry_ns = time.monotonic_ns()
-        start_ros_ns = self._last_ros_time_ns
-        context = {"lookup_results": []}
-        self._active_localization_trace = context
-        result = None
-        caught = None
-        try:
-            result = self._localization_pose_impl(map_frame)
-            return result
-        except Exception as exc:
-            caught = exc
-            raise
-        finally:
-            try:
-                exit_ns = time.monotonic_ns()
-                self._internal_tf_trace.record(
-                    "localization_validation",
-                    entry_monotonic_ns=entry_ns,
-                    exit_monotonic_ns=exit_ns,
-                    initial_ros_now_ns=context.get("initial_ros_now_ns", start_ros_ns),
-                    final_ros_now_ns=context.get(
-                        "final_ros_now_ns", context.get("initial_ros_now_ns", start_ros_ns)
-                    ),
-                    selected_odom_stamp_ns=context.get("selected_odom_stamp_ns"),
-                    selected_odom_sequence=context.get("selected_odom_sequence"),
-                    selected_odom_age_ns=context.get("selected_odom_age_ns"),
-                    selected_odom_initial_age_ns=context.get("selected_odom_age_ns"),
-                    selected_odom_final_age_ns=(
-                        context.get("final_ros_now_ns")
-                        - context["selected_odom_stamp_ns"]
-                        if context.get("final_ros_now_ns") is not None
-                        and context.get("selected_odom_stamp_ns") is not None
-                        else None
-                    ),
-                    max_age_ns=context.get("max_age_ns"),
-                    odom_info_state_snapshot=context.get(
-                        "odom_info_state_snapshot"
-                    ),
-                    lookups=context["lookup_results"],
-                    valid=result is not None,
-                    result=result,
-                    reason=(context.get("reason") or self._localization_reason
-                            or (str(caught) if caught is not None else None)),
-                )
-                del self._active_localization_trace
-            except Exception as exc:
-                self._trace_error("localization_decision", exc)
-            finally:
-                if hasattr(self, "_active_localization_trace"):
-                    del self._active_localization_trace
-                self._flush_pending_localization_trace_dump()
-
-    def _localization_pose_impl(self, map_frame):
         now_ns = self._current_ros_time_ns()
-        context = getattr(self, "_active_localization_trace", None)
-        if context is not None:
-            context["initial_ros_now_ns"] = now_ns
-            context["final_ros_now_ns"] = now_ns
-            try:
-                context["odom_info_state_snapshot"] = (
-                    self._capture_odom_info_state(now_ns)
-                )
-            except Exception as exc:
-                context["odom_info_state_capture_error"] = (
-                    f"{type(exc).__name__}: {exc}"
-                )
         max_age_ns = round(
             float(self.get_parameter("max_localization_age_sec").value)
             * 1_000_000_000
         )
-        if context is not None:
-            context["max_age_ns"] = max_age_ns
         base_frame = self.get_parameter("base_frame").value
         eligible = [
             message for message in self._odom_info
@@ -676,13 +371,6 @@ class SearchNode(Node):
                 rejection_reason = "OdomInfo timestamp regressed"
             else:
                 rejection_reason = "no eligible OdomInfo sample"
-            if context is not None:
-                context["selected_odom_stamp_ns"] = selected_stamp_ns
-                context["selected_odom_sequence"] = getattr(
-                    selected_message, "sequence", None
-                )
-                context["selected_odom_age_ns"] = info_age_ns
-                context["reason"] = rejection_reason
             details = (
                 f"selected_info_stamp_ns={selected_stamp_ns}, "
                 f"info_age_ns={info_age_ns}, requested_stamp_ns=0, "
@@ -700,12 +388,6 @@ class SearchNode(Node):
         info_message = max(eligible, key=self._stamp_ns)
         info_stamp_ns = self._stamp_ns(info_message)
         info_age_ns = now_ns - info_stamp_ns
-        if context is not None:
-            context["selected_odom_stamp_ns"] = info_stamp_ns
-            context["selected_odom_sequence"] = getattr(
-                info_message, "sequence", None
-            )
-            context["selected_odom_age_ns"] = info_age_ns
         info_details = (
             f"selected_info_stamp_ns={info_stamp_ns}, info_age_ns={info_age_ns}, "
             f"requested_stamp_ns=0, requested_time='latest', "
@@ -714,8 +396,6 @@ class SearchNode(Node):
             f"validation_ros_now_ns={now_ns}, max_age_ns={max_age_ns}"
         )
         if info_age_ns > max_age_ns:
-            if context is not None:
-                context["reason"] = "stale OdomInfo"
             self._invalidate_localization(
                 "OdomInfo is older than max_localization_age_sec",
                 diagnostic_details=info_details + ", rejection_reason='stale OdomInfo'",
@@ -724,28 +404,11 @@ class SearchNode(Node):
 
         # TF2 chooses one common time for the complete map-to-base chain.
         query_time = Time()
-        lookup_started_ns = time.monotonic_ns()
         try:
             full_transform = self._tf_buffer.lookup_transform(
                 map_frame, base_frame, query_time
             )
         except Exception as exc:
-            caught_monotonic_ns = time.monotonic_ns()
-            if context is not None:
-                context["lookup_results"].append({
-                    "target_frame": map_frame, "source_frame": base_frame,
-                    "lookup_kind": "actual_validation_lookup",
-                    "requested_stamp_ns": 0,
-                    "start_monotonic_ns": lookup_started_ns,
-                    "end_monotonic_ns": caught_monotonic_ns,
-                    "exception_class": type(exc).__name__,
-                    "exception_message": str(exc),
-                })
-                context["reason"] = "full TF lookup failed"
-            availability_exception = isinstance(exc, (
-                LookupException, ConnectivityException,
-                ExtrapolationException, TimeoutException,
-            ))
             self._invalidate_localization(
                 "full TF unavailable",
                 diagnostic_details=(
@@ -753,22 +416,9 @@ class SearchNode(Node):
                     f"exception_class={type(exc).__name__}, "
                     f"exception_message={str(exc)!r}"
                 ),
-                tf_failure_monotonic_ns=(
-                    caught_monotonic_ns if availability_exception else None
-                ),
             )
             return None
         full_stamp_ns = self._stamp_ns(full_transform)
-        if context is not None:
-            context["lookup_results"].append({
-                "target_frame": map_frame, "source_frame": base_frame,
-                "lookup_kind": "actual_validation_lookup",
-                "requested_stamp_ns": 0,
-                "start_monotonic_ns": lookup_started_ns,
-                "end_monotonic_ns": time.monotonic_ns(),
-                "stamp_ns": full_stamp_ns,
-                "age_ns": now_ns - full_stamp_ns,
-            })
 
         validation_now_ns = self.get_clock().now().nanoseconds
         last_ros_time_ns = self._last_ros_time_ns
@@ -777,15 +427,9 @@ class SearchNode(Node):
                     and validation_now_ns < last_ros_time_ns)):
             self._handle_clock_regression(validation_now_ns)
             self._last_ros_time_ns = validation_now_ns
-            if context is not None:
-                context["final_ros_now_ns"] = validation_now_ns
-                context["reason"] = "ROS clock moved backwards"
             return None
 
         self._last_ros_time_ns = validation_now_ns
-        if context is not None:
-            context["final_ros_now_ns"] = validation_now_ns
-            context["lookup_results"][-1]["age_ns"] = validation_now_ns - full_stamp_ns
         current_barrier_ns = self._localization_invalidated_at_ns
         accepted_info_ns = self._last_accepted_odom_stamp_ns
         current_eligible = [
@@ -822,9 +466,6 @@ class SearchNode(Node):
             if role == "OdomInfo" and info_stamp_ns not in current_eligible:
                 reason = reason or "selected OdomInfo is no longer eligible"
             if reason is not None:
-                if context is not None:
-                    context["final_ros_now_ns"] = validation_now_ns
-                    context["reason"] = reason
                 details = (
                     f"selected_info_stamp_ns={info_stamp_ns}, "
                     f"info_age_ns={validation_now_ns - info_stamp_ns}, "
@@ -837,9 +478,6 @@ class SearchNode(Node):
                 )
                 self._invalidate_localization(
                     reason, diagnostic_details=details,
-                    tf_failure_monotonic_ns=(
-                        None if role == "OdomInfo" else time.monotonic_ns()
-                    ),
                 )
                 return None
 
@@ -858,9 +496,6 @@ class SearchNode(Node):
         receiver = getattr(self, "_tf_receiver", None)
         if receiver is not None and hasattr(receiver, "set_odom_info_barrier"):
             receiver.set_odom_info_barrier(None)
-        if context is not None:
-            context["final_ros_now_ns"] = validation_now_ns
-            context["reason"] = "valid"
         if not was_available:
             self.get_logger().info("Search localization is available")
         return translation.x, translation.y, yaw
@@ -869,7 +504,6 @@ class SearchNode(Node):
         if request.data:
             if not self._enabled:
                 self._search_epoch += 1
-                self._frontier_key = None
                 self._last_cluster_ranking = None
                 self._cluster_ranking_context = None
                 self._next_goal_requested = False
@@ -921,54 +555,12 @@ class SearchNode(Node):
             "data": tuple(self._map.data),
         }
 
-    def _search_tick(self):
-        trace = getattr(self, "_internal_tf_trace", None)
-        if trace is None:
-            return self._search_tick_body(None)
-        try:
-            wall_now = time.monotonic()
-            if wall_now - getattr(self, "_localization_trace_summary_wall", wall_now) >= 5.0:
-                counts, evicted = trace.counts()
-                summary = {
-                    "counts": counts,
-                    "evicted": evicted,
-                    **self._trace_clock_anchor(),
-                }
-                self.get_logger().info("Search localization trace summary: "
-                                       + json.dumps(summary, separators=(",", ":")))
-                self._localization_trace_summary_wall = wall_now
-        except Exception as exc:
-            self._trace_error("summary", exc)
-        span_id = None
-        tick_sequence = None
-        try:
-            span_id, tick_sequence = trace.begin("search_tick")
-        except Exception as exc:
-            self._trace_error("search_tick_begin", exc)
-        error = None
-        try:
-            return self._search_tick_body(tick_sequence)
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            if span_id is not None:
-                try:
-                    trace.finish(span_id, error)
-                except Exception as exc:
-                    self._trace_error("search_tick_finish", exc)
 
-    def _search_tick_body(self, tick_sequence):
+    def _search_tick(self):
         self._drain_odom_info_snapshot()
         if not self._enabled or self._map is None:
             return
 
-        camera = {
-            "horizontal_fov_deg": self.get_parameter(
-                "camera.horizontal_fov_deg"
-            ).value,
-            "max_range_m": self.get_parameter("camera.max_range_m").value,
-        }
         robot_pose = self._localization_pose(self._map.header.frame_id)
         if robot_pose is None:
             self._last_cluster_ranking = None
@@ -1055,38 +647,21 @@ class SearchNode(Node):
             self._next_goal_requested = False
             self._last_cluster_ranking = None
             self._cluster_ranking_context = None
-        trace = getattr(self, "_internal_tf_trace", None)
         if self._evaluation_future is None:
-            grid_span = None
-            grid_error = None
             try:
-                if trace is not None:
-                    grid_span, _ = self._trace_begin_safe(
-                        trace, "search_computation",
-                        tick_sequence=tick_sequence, operation="grid",
-                    )
                 grid = self._grid()
             except Exception as error:
-                grid_error = error
                 self.get_logger().debug(f"Search waits for current map/TF: {error}")
                 return
-            except BaseException as error:
-                grid_error = error
-                raise
-            finally:
-                if trace is not None and grid_span is not None:
-                    self._trace_finish_safe(trace, grid_span, grid_error)
             # These values belong to this job only. The worker never sees self.
             self._evaluation_context = {
                 "epoch": self._search_epoch,
                 "localization_generation": self._localization_generation,
                 "frame": self._map.header.frame_id,
                 "grid": grid,
-                "camera": dict(camera),
             }
             self._evaluation_future = self._evaluation_executor.submit(
-                _evaluate_frontier_snapshot, grid, tuple(robot_pose), dict(camera),
-                trace, tick_sequence,
+                _evaluate_frontier_snapshot, grid, tuple(robot_pose),
             )
 
         # Do not wait in the callback group, or queue a second evaluation.
@@ -1110,7 +685,6 @@ class SearchNode(Node):
                 or context["epoch"] != self._search_epoch
                 or context["localization_generation"] != self._localization_generation
                 or context["frame"] != self._map.header.frame_id
-                or context["camera"] != camera
                 or not map_matches):
             return
         if self._localization_pose(self._map.header.frame_id) is None:
@@ -1120,10 +694,6 @@ class SearchNode(Node):
     def _apply_search_result(self, result):
         """Only the Search callback consumes results and changes navigation state."""
         candidates = {candidate["id"]: candidate for candidate in result["candidates"]}
-        eligible_identities = {
-            self._goal_identity(candidate, self._map.header.frame_id)
-            for candidate in candidates.values()
-        }
         if result.get("clustered"):
             self._last_cluster_ranking = dict(result)
             self._cluster_ranking_context = {
@@ -1135,21 +705,6 @@ class SearchNode(Node):
         else:
             self._last_cluster_ranking = None
             self._cluster_ranking_context = None
-        if "frontier_cells" in result and not result.get("clustered"):
-            frontier_key = tuple(tuple(cell) for cell in result["frontier_cells"])
-            if frontier_key != self._frontier_key:
-                self._frontier_key = frontier_key
-                self._failed_attempts = {
-                    identity: count
-                    for identity, count in self._failed_attempts.items()
-                    if identity in eligible_identities
-                }
-                self._exhausted_candidates.intersection_update(eligible_identities)
-                self._completed_candidates.clear()
-                if self._replacement_target not in eligible_identities:
-                    self._replacement_target = None
-                self._reset_challenger()
-
         self._invalidate_missing_owned_retry(candidates)
         selected = self._selected_for_markers(result, candidates)
         self._publish_markers(result, selected)
@@ -1564,7 +1119,8 @@ class SearchNode(Node):
             return
 
         if status == GoalStatus.STATUS_SUCCEEDED:
-            if active["epoch"] == self._search_epoch:
+            if (active["epoch"] == self._search_epoch
+                    and not active.get("localization_invalidated", False)):
                 self._completed_candidates.add(active["identity"])
                 self._next_goal_requested = True
         elif not active.get("localization_invalidated", False) and not (
@@ -1612,16 +1168,7 @@ def main(args=None):
     node = SearchNode()
     executor = None
     try:
-        if node._localization_trace_enabled:
-            executor = OdomInfoTraceExecutor(
-                node._odom_info_subscription,
-                node._internal_tf_trace,
-                num_threads=2,
-            )
-            node._odom_info_trace_context = executor.odom_info_trace_context
-            node._odom_info_trace_executor = executor
-        else:
-            executor = MultiThreadedExecutor(num_threads=2)
+        executor = MultiThreadedExecutor(num_threads=2)
         executor.add_node(node)
         node._tf_receiver.start()
         executor.spin()
@@ -1630,31 +1177,8 @@ def main(args=None):
     finally:
         if executor is not None:
             executor.shutdown()
-            if isinstance(executor, OdomInfoTraceExecutor):
-                executor.finish_pending_odom_info_spans()
         node._tf_receiver.close()
         node._evaluation_executor.shutdown(wait=True, cancel_futures=True)
-        if node._localization_trace_enabled:
-            try:
-                node._flush_pending_localization_trace_dump()
-                counts, evicted = node._internal_tf_trace.counts()
-                payload = {
-                    "reason": "shutdown",
-                    "counts": counts,
-                    "evicted": evicted,
-                    "odom_info_trace_stats": (
-                        executor.odom_info_trace_stats()
-                        if isinstance(executor, OdomInfoTraceExecutor) else None
-                    ),
-                    "trace_capture": node._internal_tf_trace.capture(),
-                    **node._trace_clock_anchor(),
-                }
-                node.get_logger().warning(
-                    "Search localization trace dump: "
-                    + json.dumps(payload, separators=(",", ":"))
-                )
-            except Exception as exc:
-                node._trace_error("shutdown_dump", exc)
         node.destroy_node()
         try_shutdown()
 

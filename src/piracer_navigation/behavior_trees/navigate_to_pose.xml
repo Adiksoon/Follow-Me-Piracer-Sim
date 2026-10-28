@@ -1,17 +1,8 @@
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <PipelineSequence name="NavigateWithTargetUpdates">
-      <RateController hz="1.0">
-        <Sequence>
-          <GoalUpdater input_goal="{goal}" output_goal="{updated_goal}">
-            <ComputePathToPose goal="{updated_goal}" path="{path}" planner_id="Hybrid"/>
-          </GoalUpdater>
-          <TruncatePath distance="1.0" input_path="{path}" output_path="{truncated_path}"/>
-        </Sequence>
-      </RateController>
-      <KeepRunningUntilFailure>
-        <FollowPath path="{truncated_path}" controller_id="FollowPath" goal_checker_id="general_goal_checker"/>
-      </KeepRunningUntilFailure>
-    </PipelineSequence>
+    <Sequence>
+      <ComputePathToPose goal="{goal}" path="{path}" planner_id="Hybrid" />
+      <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker" />
+    </Sequence>
   </BehaviorTree>
 </root>

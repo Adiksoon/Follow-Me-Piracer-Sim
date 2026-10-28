@@ -26,11 +26,6 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("max_localization_age_sec", default_value="0.5"),
         DeclareLaunchArgument("tf_future_lead_sec", default_value="0.1"),
-        DeclareLaunchArgument(
-            "camera_horizontal_fov_deg",
-            default_value="65.36016047954865",
-        ),
-        DeclareLaunchArgument("camera_max_range_m", default_value="5.0"),
         Node(
             package="piracer_search",
             executable="search_node",
@@ -48,8 +43,6 @@ def generate_launch_description():
                     LaunchConfiguration("tf_future_lead_sec"),
                     value_type=float,
                 ),
-                "camera.horizontal_fov_deg": LaunchConfiguration("camera_horizontal_fov_deg"),
-                "camera.max_range_m": LaunchConfiguration("camera_max_range_m"),
                 "behavior_tree": search_share
                 + "/behavior_trees/search_navigate_to_pose.xml",
             }],

@@ -189,7 +189,7 @@ visual-odometry accuracy.
 The simulation camera is enabled by the launch and publishes color, depth,
 and CameraInfo below `/sim_camera`; its optical frame is
 `sim_camera_optical_frame`. The Xacro attaches `sim_camera_link` to `chassis`
-at x=0.236 m, z=0.320 m, with a -0.0873 rad pitch, and attaches the optical
+at x=0.236 m, z=0.320 m, with a 0 rad pitch, and attaches the optical
 frame with the standard fixed optical rotation. The simulated sensor is
 640 x 360 at 30 Hz. Its finite horizontal field of view and scene occlusion
 limit which space can be observed from the camera.
@@ -219,14 +219,14 @@ Nav2 receives a derived map on `/nav2/map`. The source `/map` from RTAB-Map is
 not modified. At each launch, `start_zone_map` waits for the simulation clock,
 the latest map in frame `map`, and a current `map -> base_link` transform no
 older than 0.20 s. It captures the initial base position once and converts only
-unknown (`-1`) cell centers inside the configurable 1.0 m radius to free
+unknown (`-1`) cell centers inside the configurable 1.5 m radius to free
 (`0`). Existing free and occupied values are preserved, so a detected obstacle
 has precedence. The circle is fixed for that process lifetime and is not moved
 with the robot. A fresh launch starts with no retained center. Set
 `start_zone_enabled:=false` to pass the raw map through, or change
 `start_zone_radius` to configure the assumption.
 
-The 1.0 m region is an approved engineering assumption for the starting area;
+The 1.5 m region is an approved engineering assumption for the starting area;
 it is not evidence that all physical space there is clear. The RGB-D camera has
 a limited field of view, so unknown space outside observed sensor coverage can
 remain. The 2D map is generated from RGB-D depth, while `/cloud_map` provides a

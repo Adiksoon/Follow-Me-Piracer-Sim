@@ -9,7 +9,6 @@ from rclpy.clock import ClockType
 from rclpy.time import Time
 from tf2_ros import Buffer
 from piracer_search.search_node import SearchNode
-from piracer_search.tf_timing import InternalTfTrace
 
 NOW = 12_000_000_000
 
@@ -35,10 +34,6 @@ class CountingBuffer:
     def clear(self):
         self.inner.clear()
 
-    def all_frames_as_yaml(self):
-        return self.inner.all_frames_as_yaml()
-
-
 class RealTfLatestCommonTest(unittest.TestCase):
     def test_mock_fixture_preserves_real_modules_and_package_aliases(self):
         import piracer_search
@@ -58,11 +53,9 @@ class RealTfLatestCommonTest(unittest.TestCase):
         self.assertIs(SearchNode, real_search.SearchNode)
         self.assertIs(real_receiver, real_search.SearchTfReceiver)
 
-    def make_node(self, trace=False, info_stamp=NOW - 50_000_000,
+    def make_node(self, info_stamp=NOW - 50_000_000,
                   tf_future_lead_sec=0.1):
         node = object.__new__(SearchNode)
-        node._localization_trace_enabled = trace
-        node._internal_tf_trace = InternalTfTrace()
         node._localization_available = True
         node._localization_generation = 0
         node._localization_invalidated_at_ns = None
@@ -72,7 +65,6 @@ class RealTfLatestCommonTest(unittest.TestCase):
         node._tf_future_lead_ns = round(tf_future_lead_sec * 1_000_000_000)
         node._clock_epoch = 0
         node._localization_reason = None
-        node._tf_snapshot_attempted = False
         node._pending_goal = None
         class Handle:
             count = 0
@@ -99,22 +91,21 @@ class RealTfLatestCommonTest(unittest.TestCase):
 
     def test_boundaries_with_real_tf2(self):
         for offset, accepted in ((-62_000_000, True), (41_000_000, True),
-                                 (100_000_000, True), (100_000_001, False),
-                                 (-1_000_000_000, True), (-1_000_000_001, False)):
-            for trace in (False, True):
-                with self.subTest(offset=offset, trace=trace):
-                    node, handle = self.make_node(trace)
-                    self.static_map(node)
-                    sample = transform("vo_odom", "base_link", NOW + offset, 0.75)
-                    node._tf_buffer.inner.set_transform(sample, "offline")
-                    result = node._localization_pose("map")
-                    self.assertEqual(accepted, result is not None)
-                    self.assertEqual([("map", "base_link", 0)], node._tf_buffer.calls)
-                    self.assertEqual(0 if accepted else 1, handle.count)
-                    if accepted:
-                        self.assertEqual(NOW + offset, node._last_accepted_full_tf_stamp_ns)
-                        self.assertAlmostEqual(0.75, result[0])
-                    self.assertEqual(NOW + offset, node._stamp_ns(sample))
+                             (100_000_000, True), (100_000_001, False),
+                             (-1_000_000_000, True), (-1_000_000_001, False)):
+            with self.subTest(offset=offset):
+                node, handle = self.make_node()
+                self.static_map(node)
+                sample = transform("vo_odom", "base_link", NOW + offset, 0.75)
+                node._tf_buffer.inner.set_transform(sample, "offline")
+                result = node._localization_pose("map")
+                self.assertEqual(accepted, result is not None)
+                self.assertEqual([("map", "base_link", 0)], node._tf_buffer.calls)
+                self.assertEqual(0 if accepted else 1, handle.count)
+                if accepted:
+                    self.assertEqual(NOW + offset, node._last_accepted_full_tf_stamp_ns)
+                    self.assertAlmostEqual(0.75, result[0])
+                self.assertEqual(NOW + offset, node._stamp_ns(sample))
 
     def test_simulation_200ms_future_tf_boundaries_with_real_tf2(self):
         for offset, accepted in ((133_000_000, True), (200_000_000, True),
@@ -184,13 +175,12 @@ class RealTfLatestCommonTest(unittest.TestCase):
                 self.assertEqual(1, handle.count)
 
     def test_stale_info_prevents_lookup(self):
-        for trace in (False, True):
-            node, handle = self.make_node(trace, NOW - 1_000_000_001)
-            self.static_map(node)
-            node._tf_buffer.inner.set_transform(transform("vo_odom", "base_link", NOW), "offline")
-            self.assertIsNone(node._localization_pose("map"))
-            self.assertEqual([], node._tf_buffer.calls)
-            self.assertEqual(1, handle.count)
+        node, handle = self.make_node(NOW - 1_000_000_001)
+        self.static_map(node)
+        node._tf_buffer.inner.set_transform(transform("vo_odom", "base_link", NOW), "offline")
+        self.assertIsNone(node._localization_pose("map"))
+        self.assertEqual([], node._tf_buffer.calls)
+        self.assertEqual(1, handle.count)
 
     def test_barrier_regression_and_lost_keep_fail_safe(self):
         node, handle = self.make_node(info_stamp=NOW - 10_000_000)
