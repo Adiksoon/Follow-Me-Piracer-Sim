@@ -36,7 +36,7 @@ from tf2_ros import (
 from visualization_msgs.msg import MarkerArray
 
 from .search_markers import _candidate_markers, _stale_marker_deletions
-from .search_algorithm import evaluate_search
+from .search_algorithm import evaluate_search, match_active_frontiers, revalidate_candidate
 from .tf_timing import (
     InternalTfTrace, OdomInfoTraceExecutor, SearchTfBuffer, SearchTfReceiver,
     SearchTransformListener,
@@ -123,18 +123,20 @@ class SearchNode(Node):
         self._evaluation_context = None
         self._map = None
         self._frontier_key = None
+        self._last_cluster_ranking = None
+        self._cluster_ranking_context = None
+        self._next_goal_requested = False
         self._failed_attempts = {}
         self._exhausted_candidates = set()
         self._completed_candidates = set()
         self._retry_target = None
         self._replacement_target = None
+        self._replacement_proposal = None
+        self._goal_switch_deadline_ns = None
+        self._next_goal_dynamic = False
         self._goal_sequence = 0
         self._pending_goal = None
         self._active_goal = None
-        self._challenger_identity = None
-        self._challenger_target = None
-        self._challenger_epoch = None
-        self._challenger_count = 0
         self._published_marker_keys = set()
         self._odom_info = deque(maxlen=10)
         self._last_processed_odom_info_sequence = 0
@@ -868,6 +870,9 @@ class SearchNode(Node):
             if not self._enabled:
                 self._search_epoch += 1
                 self._frontier_key = None
+                self._last_cluster_ranking = None
+                self._cluster_ranking_context = None
+                self._next_goal_requested = False
                 self._failed_attempts.clear()
                 self._exhausted_candidates.clear()
                 self._completed_candidates.clear()
@@ -879,6 +884,9 @@ class SearchNode(Node):
         else:
             if self._enabled:
                 self._search_epoch += 1
+            self._last_cluster_ranking = None
+            self._cluster_ranking_context = None
+            self._next_goal_requested = False
             self._enabled = False
             if self._pending_goal is not None:
                 self._pending_goal["cancel_reason"] = "search_disabled"
@@ -963,7 +971,90 @@ class SearchNode(Node):
         }
         robot_pose = self._localization_pose(self._map.header.frame_id)
         if robot_pose is None:
+            self._last_cluster_ranking = None
+            self._cluster_ranking_context = None
+            self._next_goal_requested = False
             return
+        if (getattr(self, "_next_goal_requested", False) and not self._has_goal_ownership()
+                and getattr(self, "_last_cluster_ranking", None) is not None):
+            proposal = getattr(self, "_replacement_proposal", None)
+            if proposal is not None:
+                proposal_context = proposal["context"]
+                valid_context = (
+                    proposal_context.get("epoch") == self._search_epoch
+                    and proposal_context.get("localization_generation") == self._localization_generation
+                    and proposal_context.get("frame") == self._map.header.frame_id
+                    and proposal_context.get("clock_epoch") == self._clock_epoch
+                )
+                try:
+                    proposal_grid = self._grid()
+                except Exception:
+                    proposal_grid = None
+                original = proposal["candidate"]
+                original_identity = self._goal_identity(original, self._map.header.frame_id)
+                usable = (valid_context and proposal_grid is not None
+                          and original_identity not in self._completed_candidates
+                          and original_identity not in self._exhausted_candidates
+                          and self._failed_attempts.get(original_identity, 0) < 2)
+                fresh = (revalidate_candidate(proposal_grid, tuple(robot_pose), original)
+                         if usable else None)
+                identity = (self._goal_identity(fresh, self._map.header.frame_id)
+                            if fresh is not None else None)
+                if (fresh is not None and (identity in self._completed_candidates
+                        or identity in self._exhausted_candidates
+                        or self._failed_attempts.get(identity, 0) >= 2)):
+                    fresh = None
+                self._replacement_proposal = None
+                self._next_goal_requested = False
+                if fresh is not None and self._action.server_is_ready():
+                    self._next_goal_dynamic = True
+                    self._replacement_target = None
+                    behavior_tree = self.get_parameter("behavior_tree").value
+                    if behavior_tree and self._send_goal(fresh, behavior_tree):
+                        return
+                    self._next_goal_dynamic = False
+                self._replacement_target = None
+                self._last_cluster_ranking = None
+                self._cluster_ranking_context = None
+            # A dynamic cancellation must never fall through to the old cache.
+            else:
+                context = getattr(self, "_cluster_ranking_context", None) or {}
+                if (context.get("epoch") == self._search_epoch
+                        and context.get("localization_generation") == self._localization_generation
+                        and context.get("frame") == self._map.header.frame_id
+                        and context.get("clock_epoch") == self._clock_epoch):
+                    try:
+                        current_grid = self._grid()
+                    except Exception:
+                        current_grid = None
+                    if current_grid is not None:
+                        for candidate in self._ranked_candidates(
+                            self._last_cluster_ranking, include_coarse=True):
+                            old_identity = self._goal_identity(
+                                candidate, self._map.header.frame_id
+                            )
+                            if (old_identity in self._completed_candidates
+                                    or old_identity in self._exhausted_candidates
+                                    or self._failed_attempts.get(old_identity, 0) >= 2):
+                                continue
+                            fresh = revalidate_candidate(current_grid, tuple(robot_pose), candidate)
+                            if fresh is None:
+                                continue
+                            identity = self._goal_identity(fresh, self._map.header.frame_id)
+                            eligible = self._next_ranked_candidate({
+                                "candidates": [fresh], "ranking": [fresh["id"]]
+                            })
+                            if eligible is None or self._failed_attempts.get(identity, 0) >= 2:
+                                continue
+                            behavior_tree = self.get_parameter("behavior_tree").value
+                            if behavior_tree and self._action.server_is_ready():
+                                self._next_goal_requested = False
+                                if self._send_goal(fresh, behavior_tree):
+                                    return
+                                break
+            self._next_goal_requested = False
+            self._last_cluster_ranking = None
+            self._cluster_ranking_context = None
         trace = getattr(self, "_internal_tf_trace", None)
         if self._evaluation_future is None:
             grid_span = None
@@ -1033,7 +1124,18 @@ class SearchNode(Node):
             self._goal_identity(candidate, self._map.header.frame_id)
             for candidate in candidates.values()
         }
-        if "frontier_cells" in result:
+        if result.get("clustered"):
+            self._last_cluster_ranking = dict(result)
+            self._cluster_ranking_context = {
+                "epoch": self._search_epoch,
+                "localization_generation": self._localization_generation,
+                "clock_epoch": self._clock_epoch,
+                "frame": self._map.header.frame_id,
+            }
+        else:
+            self._last_cluster_ranking = None
+            self._cluster_ranking_context = None
+        if "frontier_cells" in result and not result.get("clustered"):
             frontier_key = tuple(tuple(cell) for cell in result["frontier_cells"])
             if frontier_key != self._frontier_key:
                 self._frontier_key = frontier_key
@@ -1067,6 +1169,11 @@ class SearchNode(Node):
         candidate = self._next_ranked_candidate(result)
         if candidate is not None:
             self._send_goal(candidate, behavior_tree)
+        elif (result.get("clustered") and result.get("cluster_candidates")
+                and self._ranked_candidates(result, include_coarse=True)):
+            # Detailed safe options can all be consumed while lower ranked coarse
+            # options remain. Let the next timer tick validate that backlog.
+            self._next_goal_requested = True
 
     def _selected_for_markers(self, result, candidates):
         current = self._pending_goal or self._active_goal
@@ -1124,9 +1231,7 @@ class SearchNode(Node):
         self._markers.publish(message)
 
     def _next_ranked_candidate(self, result):
-        by_id = {candidate["id"]: candidate for candidate in result["candidates"]}
-        ranked = [by_id[candidate_id] for candidate_id in result["ranking"]
-                  if candidate_id in by_id]
+        ranked = self._ranked_candidates(result)
 
         if self._replacement_target is not None:
             replacement = next(
@@ -1172,7 +1277,27 @@ class SearchNode(Node):
         )
 
     @staticmethod
+    def _ranked_candidates(result, include_coarse=False):
+        candidates = list(result.get("candidates", []))
+        by_id = {candidate["id"]: candidate for candidate in candidates}
+        extra = (list(result.get("cluster_candidates", []))
+                 if include_coarse and result.get("clustered") else [])
+        ready_clusters = {candidate.get("cluster_id") for candidate in candidates
+                          if candidate.get("cluster_id") is not None}
+        for candidate in extra:
+            cluster_id = candidate.get("cluster_id")
+            if cluster_id is not None and cluster_id in ready_clusters:
+                continue
+            by_id.setdefault(candidate["id"], candidate)
+        ordering = list(result.get("ranking", []))
+        ordering.extend(c["id"] for c in extra if c["id"] not in ordering)
+        return [by_id[candidate_id] for candidate_id in ordering if candidate_id in by_id]
+
+    @staticmethod
     def _goal_identity(candidate, frame_id):
+        if "cluster_size" in candidate:
+            x, y = candidate["pose_world"][:2]
+            return ("cluster", frame_id, round(float(x), 6), round(float(y), 6))
         return (candidate["id"], frame_id, tuple(candidate["pose_world"]))
 
     def _send_goal(self, candidate, behavior_tree):
@@ -1187,11 +1312,15 @@ class SearchNode(Node):
         goal.pose.header.stamp = now.to_msg()
         goal.pose.pose.position.x, goal.pose.pose.position.y = candidate["pose_world"][:2]
         goal.pose.pose.position.z = 0.0
-        # Cardinal candidate yaw estimates the camera view for scoring. Give
-        # Nav2 a simple approach bearing without changing candidate identities.
-        dx = goal.pose.pose.position.x - robot_pose[0]
-        dy = goal.pose.pose.position.y - robot_pose[1]
-        yaw = math.atan2(dy, dx) if math.hypot(dx, dy) > 1e-9 else robot_pose[2]
+        # The evaluator checks the full footprint using this approach yaw. Keep
+        # the sent orientation identical to that check, even if the robot moves
+        # slightly while the worker result is being handed back.
+        yaw = candidate.get("goal_yaw")
+        if (not isinstance(yaw, (int, float)) or isinstance(yaw, bool)
+                or not math.isfinite(yaw)):
+            dx = goal.pose.pose.position.x - robot_pose[0]
+            dy = goal.pose.pose.position.y - robot_pose[1]
+            yaw = math.atan2(dy, dx) if math.hypot(dx, dy) > 1e-9 else robot_pose[2]
         goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
         goal.behavior_tree = behavior_tree
@@ -1207,8 +1336,10 @@ class SearchNode(Node):
             "is_retry": self._retry_target == self._goal_identity(
                 candidate, self._map.header.frame_id
             ),
+            "dynamic_replacement": bool(getattr(self, "_next_goal_dynamic", False)),
             "cancel_reason": None,
         }
+        self._next_goal_dynamic = False
         self._pending_goal = pending
         if self._replacement_target == pending["identity"]:
             self._replacement_target = None
@@ -1255,6 +1386,10 @@ class SearchNode(Node):
             "handle": handle,
             "cancel_requested": False,
         }
+        self._goal_switch_deadline_ns = (
+            self.get_clock().now().nanoseconds
+            + (15 if pending.get("dynamic_replacement") else 10) * 1_000_000_000
+        )
         result_future = handle.get_result_async()
         result_future.add_done_callback(
             lambda completed: self._goal_result(completed, token)
@@ -1269,85 +1404,128 @@ class SearchNode(Node):
             )
 
     def _consider_goal_switch(self, result, candidates):
-        if self._pending_goal is not None and self._pending_goal["cancel_reason"] is not None:
+        if not self._enabled:
             return
-        current = self._pending_goal or self._active_goal
-        if current is None and self._retry_target is not None:
-            current = {"identity": self._retry_target, "epoch": self._search_epoch}
+        self._invalidate_missing_owned_retry(candidates)
+        if self._pending_goal is not None:
+            return
+        current = self._active_goal
+        if current is None:
+            return
         if current is not None and current.get("epoch", self._search_epoch) != self._search_epoch:
             return
-        if current is None or (
-            self._active_goal is not None and self._active_goal["cancel_requested"]
-        ):
+        if (current.get("cancel_requested") or current.get("localization_invalidated")
+                or current.get("outcome_unknown")):
+            return
+        now_ns = self._current_ros_time_ns()
+        if self._goal_switch_deadline_ns is None or now_ns < self._goal_switch_deadline_ns:
             return
 
-        target_identity = current.get(
-            "identity",
-            self._goal_identity(current["candidate"], self._map.header.frame_id)
-            if "candidate" in current else None,
-        )
-        target_epoch = current.get("epoch", self._search_epoch)
-        current_candidate = next(
-            (candidate for candidate in candidates.values()
-             if self._goal_identity(candidate, self._map.header.frame_id)
-             == target_identity),
-            None,
-        )
-        if current_candidate is None:
-            self._reset_challenger()
-            if self._retry_target == target_identity:
-                self._retry_target = None
-                if self._pending_goal is not None:
-                    self._pending_goal["cancel_reason"] = "retry_invalidated"
-                elif self._active_goal is not None and self._active_goal["is_retry"]:
-                    self._cancel_active_goal("retry_invalidated")
-            return
+        diagnostic = {
+            "event": "goal_switch_evaluation",
+            "ros_time_ns": now_ns,
+            "active_score": None,
+            "challenger_score": None,
+            "delta": None,
+            "distance_m": None,
+            "matched_clusters": None,
+        }
 
-        challenger = next(
-            (
-                candidates[candidate_id]
-                for candidate_id in result["ranking"]
-                if candidate_id in candidates
-                and self._goal_identity(candidates[candidate_id], self._map.header.frame_id)
-                != target_identity
-                and self._goal_identity(candidates[candidate_id], self._map.header.frame_id)
-                not in self._completed_candidates
-                and self._goal_identity(candidates[candidate_id], self._map.header.frame_id)
-                not in self._exhausted_candidates
-                and self._failed_attempts.get(
-                    self._goal_identity(candidates[candidate_id], self._map.header.frame_id), 0
-                ) < 2
-            ),
-            None,
-        )
+        def emit(decision, reason):
+            try:
+                record = dict(diagnostic, decision=decision, reason=reason)
+                for field in (
+                    "ros_time_ns", "active_score", "challenger_score", "delta", "distance_m",
+                ):
+                    value = record[field]
+                    try:
+                        valid_number = (
+                            isinstance(value, (int, float)) and not isinstance(value, bool)
+                            and math.isfinite(value)
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        valid_number = False
+                    if not valid_number:
+                        record[field] = None
+                message = json.dumps(record, allow_nan=False, sort_keys=True)
+                self.get_logger().info(message)
+            except Exception:
+                # Diagnostics must not affect goal selection or cancellation.
+                pass
+
+        target_identity = current.get("identity", self._goal_identity(
+            current["candidate"], self._map.header.frame_id
+        ))
+        current_candidate = current["candidate"]
+        grid = self._grid()
+        active_clusters = match_active_frontiers(grid, current_candidate, result)
+        if active_clusters is None:
+            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
+            emit("SKIP", "active_frontier_unmatched")
+            return
+        active_cluster_ids = {cluster["cluster_id"] for cluster in active_clusters}
+        active_score = max(cluster["score"] for cluster in active_clusters)
+        diagnostic["active_score"] = active_score
+        diagnostic["matched_clusters"] = len(active_cluster_ids)
+        robot_pose = self._localization_pose(self._map.header.frame_id)
+        distance = None if robot_pose is None else math.hypot(
+                current_candidate["pose_world"][0] - robot_pose[0],
+                current_candidate["pose_world"][1] - robot_pose[1])
+        diagnostic["distance_m"] = distance
+        if robot_pose is None or distance <= 0.30 + 1e-12:
+            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
+            reason = (
+                "localization_unavailable" if robot_pose is None
+                else "goal_within_switch_distance"
+            )
+            emit("SKIP", reason)
+            return
+        challenger = None
+        for candidate in result.get("candidates", []):
+            identity = self._goal_identity(candidate, self._map.header.frame_id)
+            if (candidate.get("cluster_id") in active_cluster_ids
+                    or identity in self._completed_candidates
+                    or identity in self._exhausted_candidates
+                    or self._failed_attempts.get(identity, 0) >= 2):
+                continue
+            challenger = candidate
+            break
         margin = float(self.get_parameter("goal_switch_margin").value)
-        if (challenger is None
-                or challenger["score"] - current_candidate["score"] + 1e-12 < margin):
-            self._reset_challenger()
+        if challenger is None:
+            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
+            emit("SKIP", "no_eligible_challenger")
             return
-
+        challenger_cluster = next((cluster for cluster in result.get("cluster_candidates", [])
+                                   if cluster.get("cluster_id") == challenger.get("cluster_id")), None)
+        challenger_score = challenger_cluster.get("score") if challenger_cluster else None
+        diagnostic["challenger_score"] = challenger_score
+        invalid_challenger_score = (
+            challenger_cluster is None or not isinstance(challenger_score, (int, float))
+            or isinstance(challenger_score, bool) or not math.isfinite(challenger_score)
+        )
+        if invalid_challenger_score:
+            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
+            emit("SKIP", "challenger_score_unavailable")
+            return
+        delta = challenger_score - active_score
+        diagnostic["delta"] = delta
+        if delta + 1e-12 < margin:
+            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
+            emit("KEEP", "score_delta_below_margin")
+            return
+        emit("SWITCH", "challenger_score_delta_met_margin")
         challenger_identity = self._goal_identity(challenger, self._map.header.frame_id)
-        if (challenger_identity == self._challenger_identity
-                and target_identity == self._challenger_target
-                and target_epoch == self._challenger_epoch):
-            self._challenger_count += 1
-        else:
-            self._challenger_identity = challenger_identity
-            self._challenger_target = target_identity
-            self._challenger_epoch = target_epoch
-            self._challenger_count = 1
-        if self._challenger_count < 2:
-            return
-
         self._replacement_target = challenger_identity
+        self._replacement_proposal = {"candidate": challenger, "context": {
+            "epoch": self._search_epoch,
+            "localization_generation": self._localization_generation,
+            "clock_epoch": self._clock_epoch,
+            "frame": self._map.header.frame_id,
+        }}
+        self._next_goal_requested = True
         if self._retry_target == target_identity:
             self._retry_target = None
-        if self._pending_goal is not None:
-            self._pending_goal["cancel_reason"] = "higher_scoring_candidate"
-        else:
-            if self._active_goal is not None:
-                self._cancel_active_goal("higher_scoring_candidate")
-        self._reset_challenger()
+        self._cancel_active_goal("higher_scoring_candidate")
 
     def _cancel_active_goal(self, reason):
         if self._active_goal is None or self._active_goal["cancel_requested"]:
@@ -1388,6 +1566,7 @@ class SearchNode(Node):
         if status == GoalStatus.STATUS_SUCCEEDED:
             if active["epoch"] == self._search_epoch:
                 self._completed_candidates.add(active["identity"])
+                self._next_goal_requested = True
         elif not active.get("localization_invalidated", False) and not (
             status == GoalStatus.STATUS_CANCELED
             and active["cancel_reason"] is not None
@@ -1405,6 +1584,11 @@ class SearchNode(Node):
         self._active_goal = None
         if active["cancel_reason"] in ("retry_invalidated", "higher_scoring_candidate"):
             self._retry_target = None
+        if (status == GoalStatus.STATUS_ABORTED and self._enabled
+                and active["epoch"] == self._search_epoch
+                and not active.get("localization_invalidated", False)
+                and active.get("cancel_reason") is None):
+            self._next_goal_requested = True
         if not self._enabled:
             self._publish_markers({"candidates": []}, None)
 
@@ -1418,10 +1602,9 @@ class SearchNode(Node):
             self._retry_target = None
 
     def _reset_challenger(self):
-        self._challenger_identity = None
-        self._challenger_target = None
-        self._challenger_epoch = None
-        self._challenger_count = 0
+        self._replacement_proposal = None
+        self._goal_switch_deadline_ns = None
+        self._next_goal_dynamic = False
 
 
 def main(args=None):

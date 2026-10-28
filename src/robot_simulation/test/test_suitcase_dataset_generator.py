@@ -19,11 +19,16 @@ generator = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = generator
 SPEC.loader.exec_module(generator)
 
+# DATA-01 capture is intentionally pinned to its original scene hash.
+# Keep unit-test geometry independent of later SEARCH-world appearance changes.
+DATA01_WORLD = PACKAGE / "test/fixtures/data01_room.world"
+generator.DEFAULT_WORLD = DATA01_WORLD
+
 
 class IndependentCameraPlanTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.world = generator.ROOT / generator.WORLD_REL
+        cls.world = DATA01_WORLD
         cls.mesh_path = generator.ROOT / generator.MESH_REL
         cls.mesh = generator.load_collada_geometry(cls.mesh_path)
         cls.target_position, cls.target_q = generator.target_model_pose(cls.world)
@@ -66,7 +71,7 @@ class IndependentCameraPlanTests(unittest.TestCase):
 class IndependentCameraPlanAndDiagnosticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.world = generator.ROOT / generator.WORLD_REL
+        cls.world = DATA01_WORLD
         cls.mesh_path = generator.ROOT / generator.MESH_REL
         cls.mesh = generator.load_collada_geometry(cls.mesh_path)
         cls.target_position, cls.target_q = generator.target_model_pose(cls.world)
@@ -179,7 +184,9 @@ class IndependentCameraPlanAndDiagnosticTests(unittest.TestCase):
             self.assertLess(x2, generator.CAMERA_WIDTH - 2.0)
             self.assertLess(y2, generator.CAMERA_HEIGHT - 2.0)
         obstacles = generator.validate_camera_clearance(self.world, self.samples)
-        self.assertEqual(88, len(obstacles))
+        # Four walls, one wall panel, four five-part tables, eight eight-part
+        # chairs and two two-part planters; the floor and target are excluded.
+        self.assertEqual(4 + 1 + 4 * 5 + 8 * 8 + 2 * 2, len(obstacles))
 
 
 class CaptureSafeguardTests(unittest.TestCase):
@@ -220,7 +227,7 @@ class CaptureSafeguardTests(unittest.TestCase):
         self.assertFalse(generator.rgbd_timestamps_are_fresh(10.02, 10.10, 10.01, 0.05))
 
     def test_full_dataset_and_candidate_pool_use_disjoint_azimuth_splits(self):
-        world = generator.ROOT / generator.WORLD_REL
+        world = DATA01_WORLD
         mesh = generator.load_collada_geometry(generator.ROOT / generator.MESH_REL)
         target_position, target_q = generator.target_model_pose(world)
         target_center = generator.suitcase_visual_center(target_position, target_q, mesh)
@@ -276,7 +283,7 @@ class CaptureSafeguardTests(unittest.TestCase):
         self.assertEqual("empty", generator.scene_variant_for_world(empty_world))
         self.assertEqual(generator.EMPTY_WORLD_SHA256, generator.sha256_file(empty_world))
         self.assertEqual([], generator.production_collision_boxes(empty_world))
-        production_world = generator.ROOT / generator.WORLD_REL
+        production_world = DATA01_WORLD
         self.assertEqual(
             generator.target_model_pose(production_world),
             generator.target_model_pose(empty_world),
@@ -300,6 +307,15 @@ class CaptureSafeguardTests(unittest.TestCase):
         with redirect_stderr(StringIO()):
             result = generator.main(["--target-entity", "piracer"])
         self.assertEqual(2, result)
+
+    def test_scene_guard_accepts_frozen_fixture_and_rejects_modified_copy(self):
+        self.assertEqual(generator.WORLD_SHA256, generator.sha256_file(DATA01_WORLD))
+        self.assertEqual("production_room", generator.scene_variant_for_world(DATA01_WORLD))
+        with tempfile.TemporaryDirectory() as directory:
+            changed = Path(directory) / "changed.world"
+            changed.write_bytes(DATA01_WORLD.read_bytes() + b"\n<!-- changed -->\n")
+            with self.assertRaisesRegex(ValueError, "not an approved DATA-01 scene"):
+                generator.scene_variant_for_world(changed)
 
 
 class GeometryAndCameraModelTests(unittest.TestCase):

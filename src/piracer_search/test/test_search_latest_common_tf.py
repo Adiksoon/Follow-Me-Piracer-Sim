@@ -1,5 +1,6 @@
 """Offline tests of SEARCH against the installed TF2 Buffer, without ROS nodes."""
 from collections import deque
+import importlib
 import types
 import unittest
 
@@ -39,6 +40,24 @@ class CountingBuffer:
 
 
 class RealTfLatestCommonTest(unittest.TestCase):
+    def test_mock_fixture_preserves_real_modules_and_package_aliases(self):
+        import piracer_search
+        import test_search_node as fixtures
+
+        real_search = importlib.import_module("piracer_search.search_node")
+        real_timing = importlib.import_module("piracer_search.tf_timing")
+        real_receiver = real_search.SearchTfReceiver
+        fixtures.SearchNodeCallbackTest.setUpClass()
+
+        self.assertIsNot(real_search, fixtures.SearchNodeCallbackTest.module)
+        self.assertIsNot(real_timing, fixtures.SearchNodeCallbackTest.tf_module)
+        self.assertIs(real_search, importlib.import_module("piracer_search.search_node"))
+        self.assertIs(real_timing, importlib.import_module("piracer_search.tf_timing"))
+        self.assertIs(real_search, piracer_search.search_node)
+        self.assertIs(real_timing, piracer_search.tf_timing)
+        self.assertIs(SearchNode, real_search.SearchNode)
+        self.assertIs(real_receiver, real_search.SearchTfReceiver)
+
     def make_node(self, trace=False, info_stamp=NOW - 50_000_000,
                   tf_future_lead_sec=0.1):
         node = object.__new__(SearchNode)
