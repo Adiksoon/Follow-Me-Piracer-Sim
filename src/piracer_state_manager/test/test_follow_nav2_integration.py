@@ -13,7 +13,6 @@ from piracer_state_manager.follow_nav2_helpers import (
     bound_nav_twist,
     footprint_clear,
     goal_refresh_due,
-    grid_is_fresh,
     localization_is_fresh,
     nav2_command_policy,
     require_distinct_command_topics,
@@ -113,16 +112,16 @@ def test_unknown_out_of_map_and_stale_inputs_fail_closed():
     assert not footprint_clear(grid, 0.0, 0.0, 0.0)
     grid = _grid(origin=(20.0, 20.0, 0.0))
     assert not footprint_clear(grid, 0.0, 0.0, 0.0)
-    assert grid_is_fresh(1_000_000_000, 1_400_000_000, 0.3, 0.6)
-    assert not grid_is_fresh(1_000_000_000, 1_700_000_000, 0.3, 0.6)
-    assert not grid_is_fresh(2_000_000_000, 1_000_000_000, 0.1, 0.6)
+    assert stamped_input_is_fresh(1_000_000_000, 1_400_000_000, 0.3, 0.6)
+    assert not stamped_input_is_fresh(1_000_000_000, 1_700_000_000, 0.3, 0.6)
+    assert not stamped_input_is_fresh(2_000_000_000, 1_000_000_000, 0.1, 0.6)
     assert stamped_input_is_fresh(1_000_000_000, 1_300_000_000, 0.0, 1.0)
     assert not stamped_input_is_fresh(1_000_000_000, 2_100_000_000, 0.0, 1.0)
     assert localization_is_fresh(False, 1_000_000_000, 1_500_000_000, 0.4)
     assert not localization_is_fresh(True, 1_000_000_000, 1_100_000_000, 0.1)
     assert not localization_is_fresh(False, 1_000_000_000, 2_100_000_000, 0.1)
     # A fresh costmap does not mask a stopped scan converter.
-    assert grid_is_fresh(1_000_000_000, 1_100_000_000, 0.1, 0.6)
+    assert stamped_input_is_fresh(1_000_000_000, 1_100_000_000, 0.1, 0.6)
     assert not stamped_input_is_fresh(1_000_000_000, 1_100_000_000, 0.7, 0.5)
 
 
@@ -209,8 +208,6 @@ def test_cancel_terminal_and_smoother_drain_require_wall_and_ros_progress():
     node._goal_terminal_wall = None
     node._goal_terminal_ros_ns = None
     node._goal_handle = object()
-    node._goal_result_future = object()
-    node._goal_send_future = None
     node._enabled = True
     node._clearance = ClearanceHysteresis()
     node._clearance.clear = 5
@@ -273,9 +270,7 @@ def test_late_goal_acceptance_is_canceled_and_unknown_acceptance_stays_owned():
     node = object.__new__(PiracerFollowNode)
     node._goal_state = "sending"
     node._goal_unresolved = True
-    node._goal_send_future = object()
     node._goal_handle = None
-    node._goal_result_future = None
     node._goal_cancel_reason = "disabled"
     node._goal_finish_action = None
     node._enabled = False
@@ -283,7 +278,6 @@ def test_late_goal_acceptance_is_canceled_and_unknown_acceptance_stays_owned():
     node._mode_reason = "disabled_while_sending"
     node._fault_latched = False
     node.get_logger = lambda: SimpleNamespace(error=lambda *_: None)
-    node._nav2_accept_wall = None
 
     class Future:
         @staticmethod
@@ -482,8 +476,6 @@ def _integrated_cycle_node(mode=DIRECT, local_grid=None, global_grid=None):
     node._goal_state = "idle"
     node._goal_unresolved = False
     node._goal_handle = None
-    node._goal_result_future = None
-    node._goal_send_future = None
     node._goal_cancel_reason = None
     node._goal_terminal_wall = None
     node._goal_terminal_ros_ns = None
@@ -494,7 +486,6 @@ def _integrated_cycle_node(mode=DIRECT, local_grid=None, global_grid=None):
     node._nav2_has_moved = False
     node._nav2_latest_command = None
     node._nav2_latest_command_wall = None
-    node._nav2_accept_wall = None
     node._goal_refresh_pending = False
     node._nav2_action = Action()
     node._latest_target_point = SimpleNamespace(
@@ -795,8 +786,6 @@ def test_nav2_goal_status_must_be_terminal_to_release_ownership():
         node._goal_cancel_reason = "disabled"
         node._goal_finish_action = None
         node._goal_handle = object()
-        node._goal_result_future = object()
-        node._goal_send_future = None
         node._enabled = False
         node._follow_nav2_avoidance = True
         node._publish_cmd_vel = True
@@ -829,8 +818,6 @@ def test_nav2_goal_status_must_be_terminal_to_release_ownership():
     aborted._goal_cancel_reason = "disabled"
     aborted._goal_finish_action = None
     aborted._goal_handle = object()
-    aborted._goal_result_future = object()
-    aborted._goal_send_future = None
     aborted._enabled = False
     aborted._clearance = ClearanceHysteresis()
     aborted._fault_latched = False

@@ -77,16 +77,6 @@ class ClearanceHysteresis:
         )
 
 
-def grid_is_fresh(stamp_ns: int, now_ns: int, received_age_s: float,
-                  max_age_s: float, future_lead_s: float = 0.2) -> bool:
-    values = (received_age_s, max_age_s, future_lead_s)
-    if not all(math.isfinite(value) for value in values):
-        return False
-    return stamped_input_is_fresh(
-        stamp_ns, now_ns, received_age_s, max_age_s, future_lead_s
-    )
-
-
 def stamped_input_is_fresh(stamp_ns: int, now_ns: int, received_age_s: float,
                            max_age_s: float, future_lead_s: float = 0.2) -> bool:
     values = (received_age_s, max_age_s, future_lead_s)

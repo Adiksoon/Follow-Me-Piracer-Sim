@@ -20,7 +20,6 @@ from std_msgs.msg import String
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 from rtabmap_msgs.msg import OdomInfo
-from vision_msgs.msg import Detection2DArray
 import tf2_geometry_msgs  # Register PointStamped transforms with tf2.
 
 from piracer_state_manager.follow_control import FollowPController
@@ -33,7 +32,6 @@ from piracer_state_manager.follow_nav2_helpers import (
     bound_nav_twist,
     footprint_clear,
     goal_refresh_due,
-    grid_is_fresh,
     localization_is_fresh,
     nav2_command_policy,
     require_distinct_command_topics,
@@ -48,7 +46,6 @@ class PiracerFollowNode(Node):
         super().__init__("piracer_follow")
         defaults = {
             "enable_service": "/follow/enable",
-            "detection_topic": "/yolo/detections",
             "target_point_topic": "/piracer/follow/target_point",
             "command_topic": "/cmd_vel",
             "nav2_command_topic": "/cmd_vel",
@@ -97,7 +94,6 @@ class PiracerFollowNode(Node):
             )
             require_distinct_command_topics(output_topic, nav2_input_topic)
         self._enabled = False
-        self._latest_detections = None
         self._latest_target_point = None
         self._latest_target_received_monotonic = None
         self._mode = DIRECT if not self._follow_nav2_avoidance else SAFE_STOP
@@ -113,9 +109,7 @@ class PiracerFollowNode(Node):
         self._latest_scan_received_monotonic = None
         self._last_integrated_ros_ns = None
         self._last_blocked_stamp_ns = None
-        self._goal_send_future = None
         self._goal_handle = None
-        self._goal_result_future = None
         self._goal_cancel_reason = None
         self._goal_state = "idle"
         self._goal_unresolved = False
@@ -127,7 +121,6 @@ class PiracerFollowNode(Node):
         self._nav2_has_moved = False
         self._nav2_latest_command = None
         self._nav2_latest_command_wall = None
-        self._nav2_accept_wall = None
         self._goal_refresh_pending = False
         self._fault_latched = False
         self._last_selected_source = "stop"
@@ -175,12 +168,6 @@ class PiracerFollowNode(Node):
             SetBool,
             str(self.get_parameter("enable_service").value),
             self._set_enabled,
-        )
-        self._detection_subscription = self.create_subscription(
-            Detection2DArray,
-            str(self.get_parameter("detection_topic").value),
-            self._on_detections,
-            10,
         )
         self._target_point_subscription = self.create_subscription(
             PointStamped,
@@ -276,11 +263,6 @@ class PiracerFollowNode(Node):
             max_speed_mps=float(self.get_parameter("max_speed_mps").value),
             max_steer_rad=float(self.get_parameter("max_steer_rad").value),
         )
-
-    def _on_detections(self, message):
-        # Kept as an input for the agreed Follow interface. Data association
-        # and detection-based gating are not part of this controller step.
-        self._latest_detections = message
 
     def _on_target_point(self, message):
         self._latest_target_point = message
@@ -413,12 +395,12 @@ class PiracerFollowNode(Node):
         global_stamp = self._stamp_ns(self._global_grid)
         local_age = monotonic_now - self._local_grid_received_monotonic
         global_age = monotonic_now - self._global_grid_received_monotonic
-        if not grid_is_fresh(
+        if not stamped_input_is_fresh(
             local_stamp, now_ns, local_age,
             float(self.get_parameter("local_costmap_max_age_s").value),
         ):
             return False, "stale_local_costmap"
-        if not grid_is_fresh(
+        if not stamped_input_is_fresh(
             global_stamp, now_ns, global_age,
             float(self.get_parameter("global_costmap_max_age_s").value),
         ):
@@ -551,8 +533,8 @@ class PiracerFollowNode(Node):
         self._mode = NAV2_PENDING
         self._mode_reason = "goal_request_pending"
         try:
-            self._goal_send_future = self._nav2_action.send_goal_async(goal)
-            self._goal_send_future.add_done_callback(self._on_nav2_goal_response)
+            goal_send_future = self._nav2_action.send_goal_async(goal)
+            goal_send_future.add_done_callback(self._on_nav2_goal_response)
         except Exception as error:
             self._goal_state = "unknown"
             self._mode = SAFE_STOP
@@ -570,7 +552,6 @@ class PiracerFollowNode(Node):
             self._fault_latched = True
             self.get_logger().error(f"FOLLOW_NAV2 goal acceptance unknown: {error}")
             return
-        self._goal_send_future = None
         if not handle.accepted:
             self._goal_state = "idle"
             self._goal_unresolved = False
@@ -582,11 +563,9 @@ class PiracerFollowNode(Node):
             return
         self._goal_handle = handle
         self._goal_state = "active"
-        self._nav2_accept_wall = time.monotonic()
         self._mode = NAV2
         self._mode_reason = "goal_accepted"
         result_future = handle.get_result_async()
-        self._goal_result_future = result_future
         result_future.add_done_callback(self._on_nav2_goal_result)
         # A disable or safety stop can arrive while goal acceptance was pending.
         if not self._enabled or self._goal_cancel_reason is not None:
@@ -674,8 +653,6 @@ class PiracerFollowNode(Node):
         self._goal_state = "idle"
         self._goal_unresolved = False
         self._goal_handle = None
-        self._goal_result_future = None
-        self._goal_send_future = None
         self._goal_cancel_reason = None
         self._goal_terminal_wall = None
         self._goal_terminal_ros_ns = None
@@ -1003,17 +980,10 @@ class PiracerFollowNode(Node):
         try:
             x_m = float(target.point.x)
             y_m = float(target.point.y)
-            if (self._controller.direction_kd > 0.0 or self._controller.direction_ki > 0.0
-                    or self._controller.distance_ki > 0.0 or self._controller.distance_kd > 0.0):
-                target_stamp_ns = (
-                    int(self._latest_target_point.header.stamp.sec) * 1_000_000_000
-                    + int(self._latest_target_point.header.stamp.nanosec)
-                )
-                command = self._controller.update(
-                    x_m, y_m, measurement_stamp_ns=target_stamp_ns
-                )
-            else:
-                command = self._controller.update(x_m, y_m)
+            target_stamp_ns = self._stamp_ns(self._latest_target_point)
+            command = self._controller.update(
+                x_m, y_m, measurement_stamp_ns=target_stamp_ns
+            )
         except (ValueError, TypeError) as exc:
             self.get_logger().debug(f"Follow stopped for invalid target or TF: {exc}")
             self._stop_for_input_error("invalid_target")
