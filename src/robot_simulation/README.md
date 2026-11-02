@@ -48,18 +48,20 @@ launch behavior; VO is always skipped when the camera is disabled.
 ## Full program
 
 The one-command simulation, VO, RTAB-Map, Nav2, perception, and state-managed
-Search entrypoint is:
+behavior entrypoint is:
 
 ```bash
 ros2 launch piracer_state_manager piracer_sim.launch.py
 ```
 
 Gazebo starts paused by default. After inspecting the graph, press Play to
-advance simulation time and produce sensor data. The State Manager then enables
-Search after the first valid YOLO message. Once the map, frontier, and Nav2
-action are ready, Search may send a navigation goal and move the robot. Use
-`start_paused:=false` only when automatic startup without an inspection pause is
-intended. This launcher does not start RViz.
+advance simulation time and produce sensor data. The State Manager currently
+selects FOLLOW after each fresh detector message; automatic SEARCH and ACQUIRE
+transitions are inactive. `follow_publish_cmd_vel` defaults to `false`. Setting
+it to `true` permits Follow to publish drive output when its input, time, TF,
+localization, costmap, footprint, and command ownership checks pass; it does not
+guarantee movement. Use `start_paused:=false` only when automatic startup without
+an inspection pause is intended. This launcher does not start RViz.
 
 ## DATA-01 suitcase dataset capture
 

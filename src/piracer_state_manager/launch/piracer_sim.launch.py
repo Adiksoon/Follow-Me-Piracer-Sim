@@ -31,7 +31,8 @@ def generate_launch_description():
                 default_value="true",
                 description=(
                     "Start Gazebo paused. Unpause it after checking the launched graph; "
-                    "sensor data then enables the existing SEARCH behavior."
+                    "fresh detector messages currently select FOLLOW; automatic "
+                    "SEARCH and ACQUIRE transitions are inactive."
                 ),
             ),
             DeclareLaunchArgument("world", default_value=""),
