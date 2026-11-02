@@ -6,15 +6,17 @@ import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
 from vision_msgs.msg import Detection2DArray
 
 from piracer_state_manager.state_machine import (
     ACQUIRE,
+    FOLLOW,
     SEARCH,
     BehaviorEnableCoordinator,
     StateMachine,
+    confirmed_command_owner,
 )
 
 
@@ -56,6 +58,11 @@ class StateManagerNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.run_pub = self.create_publisher(Bool, "/piracer/state/run", output_qos)
+        self.command_owner_pub = self.create_publisher(
+            String, "/piracer/state/command_owner", output_qos
+        )
+        self._command_owner = None
+        self._publish_command_owner("stop")
         self._published_run = None
         self._publish_changes(force=True)
         self.behavior_coordinator = BehaviorEnableCoordinator(
@@ -71,6 +78,7 @@ class StateManagerNode(Node):
         self._handoff_future = None
         self._handoff_wait_logged = False
         self._blocking_service_logged = None
+        self._behavior_enable_dispatched = False
         self.subscription = self.create_subscription(
             Detection2DArray, values["detection_topic"], self._on_detections, qos_profile_sensor_data
         )
@@ -85,6 +93,14 @@ class StateManagerNode(Node):
             msg.data = self.machine.active
             self.run_pub.publish(msg)
             self._published_run = self.machine.active
+
+    def _publish_command_owner(self, owner):
+        if owner == self._command_owner:
+            return
+        message = String()
+        message.data = owner
+        self.command_owner_pub.publish(message)
+        self._command_owner = owner
 
     def _log_events(self, events):
         for event in events:
@@ -154,8 +170,18 @@ class StateManagerNode(Node):
             target = "search"
         elif self.machine.state == ACQUIRE:
             target = "acquire"
+        elif self.machine.state == FOLLOW:
+            target = "follow"
         else:
             target = None
+        publish_owner = getattr(self, "_publish_command_owner", None)
+        if publish_owner is not None:
+            publish_owner(confirmed_command_owner(
+                target,
+                self.machine.active,
+                self.behavior_coordinator.confirmed,
+                self.behavior_coordinator.pending,
+            ))
         services_ready = {
             name: client.service_is_ready()
             for name, client in self.behavior_clients.items()
@@ -165,25 +191,36 @@ class StateManagerNode(Node):
             pending = self.behavior_coordinator.pending
             if pending is not None and self._handoff_started_monotonic is not None:
                 elapsed = time.monotonic() - self._handoff_started_monotonic
+                confirmed = self.behavior_coordinator.confirmed
+                initial_search_disable = (
+                    pending == ("search", False)
+                    and all(value is None for value in confirmed.values())
+                )
+                initial_follow_disable = (
+                    pending == ("follow", False)
+                    and confirmed.get("search") is False
+                    and confirmed.get("acquire") is False
+                    and confirmed.get("follow") is None
+                )
                 if (
                     elapsed >= 5.0
                     and self.get_parameter("use_sim_time").value
-                    and pending == ("search", False)
-                    and all(value is None for value in self.behavior_coordinator.confirmed.values())
+                    and not self._behavior_enable_dispatched
+                    and (initial_search_disable or initial_follow_disable)
                     and self._handoff_future is not None
                     and not self._handoff_future.done()
                 ):
-                    # TYMCZASOWO: tylko na czas testowania SEARCH w symulacji; usunac po dopracowaniu startu stanow.
                     old_future = self._handoff_future
                     self._handoff_future = None
-                    self.behavior_clients["search"].remove_pending_request(old_future)
-                    self.behavior_coordinator.complete("search", False, False)
+                    behavior = pending[0]
+                    self.behavior_clients[behavior].remove_pending_request(old_future)
+                    self.behavior_coordinator.complete(behavior, False, False)
                     old_future.cancel()
                     self._handoff_started_monotonic = None
                     self._handoff_wait_logged = False
                     self._handoff_failure_logged = False
                     self.get_logger().warning(
-                        "Timed out initial Search disable in simulation; retrying"
+                        f"Timed out initial {behavior.capitalize()} disable in simulation; retrying"
                     )
                     return
                 if elapsed >= 5.0 and not self._handoff_wait_logged:
@@ -218,6 +255,8 @@ class StateManagerNode(Node):
             f"Behavior request: service={self.behavior_clients[behavior].srv_name}, "
             f"enabled={enabled}, monotonic_s={self._handoff_started_monotonic:.6f}"
         )
+        if enabled:
+            self._behavior_enable_dispatched = True
         try:
             future = self.behavior_clients[behavior].call_async(request)
         except Exception as error:

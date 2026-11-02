@@ -20,7 +20,7 @@ def generate_launch_description():
         [state_manager_share, "launch", "search_state_manager.launch.py"]
     )
     detector_parameters = PathJoinSubstitution(
-        [perception_share, "config", "detector.yaml"]
+        [perception_share, "config", "detector_ft01_test.yaml"]
     )
 
     return LaunchDescription(
@@ -42,6 +42,12 @@ def generate_launch_description():
             DeclareLaunchArgument("map_topic", default_value="/nav2/map"),
             DeclareLaunchArgument("start_zone_enabled", default_value="true"),
             DeclareLaunchArgument("start_zone_radius", default_value="1.5"),
+            DeclareLaunchArgument("follow_nav2_avoidance", default_value="true"),
+            DeclareLaunchArgument(
+                "follow_publish_cmd_vel",
+                default_value="false",
+                description="Allow Follow to publish drive commands. Keep false for measurement-only runs.",
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(slam_launch),
                 launch_arguments={
@@ -55,6 +61,7 @@ def generate_launch_description():
                     "map_topic": LaunchConfiguration("map_topic"),
                     "start_zone_enabled": LaunchConfiguration("start_zone_enabled"),
                     "start_zone_radius": LaunchConfiguration("start_zone_radius"),
+                    "follow_nav2_avoidance": LaunchConfiguration("follow_nav2_avoidance"),
                 }.items(),
             ),
             Node(
@@ -77,6 +84,8 @@ def generate_launch_description():
                     "max_localization_age_sec": "1.0",
                     "tf_future_lead_sec": "0.2",
                     "use_sim_time": "true",
+                    "follow_publish_cmd_vel": LaunchConfiguration("follow_publish_cmd_vel"),
+                    "follow_nav2_avoidance": LaunchConfiguration("follow_nav2_avoidance"),
                 }.items(),
             ),
         ]

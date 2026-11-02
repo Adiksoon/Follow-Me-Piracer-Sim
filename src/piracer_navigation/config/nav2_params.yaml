@@ -129,14 +129,28 @@ global_costmap:
       footprint_padding: 0.0
       track_unknown_space: true
       transform_tolerance: 0.20
-      plugins: [static_layer, inflation_layer]
+      plugins: [static_layer, obstacle_layer, inflation_layer]
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_topic: /map
         map_subscribe_transient_local: true
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /piracer/scan
+          data_type: LaserScan
+          marking: true
+          max_obstacle_height: 2.0
+          clearing: true
+          obstacle_min_range: 0.05
+          obstacle_max_range: 3.0
+          raytrace_min_range: 0.05
+          raytrace_max_range: 3.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        inflation_radius: 0.10
+        inflation_radius: 0.30
         cost_scaling_factor: 3.0
       always_send_full_costmap: true
 
@@ -156,7 +170,11 @@ local_costmap:
       footprint_padding: 0.0
       track_unknown_space: true
       transform_tolerance: 0.20
-      plugins: [obstacle_layer, inflation_layer]
+      plugins: [static_layer, obstacle_layer, inflation_layer]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_topic: /map
+        map_subscribe_transient_local: true
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -165,6 +183,7 @@ local_costmap:
           topic: /piracer/scan
           data_type: LaserScan
           marking: true
+          max_obstacle_height: 2.0
           clearing: true
           obstacle_min_range: 0.05
           obstacle_max_range: 3.0
@@ -172,7 +191,7 @@ local_costmap:
           raytrace_max_range: 3.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        inflation_radius: 0.10
+        inflation_radius: 0.30
         cost_scaling_factor: 3.0
       always_send_full_costmap: true
 

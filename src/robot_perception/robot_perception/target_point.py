@@ -15,9 +15,20 @@ def _confidence(estimate) -> float:
 
 
 def select_target_point(estimates):
-    """Return the highest-confidence valid point, preserving source order on ties."""
+    """Return the nearest valid 3D point, using confidence and source index for ties."""
     valid = [estimate for estimate in estimates if estimate.point is not None]
     if not valid:
         return None
-    selected = max(valid, key=lambda estimate: (_confidence(estimate), -estimate.source_index))
+    selected = min(
+        valid,
+        key=lambda estimate: (
+            math.hypot(
+                estimate.point.point.x,
+                estimate.point.point.y,
+                estimate.point.point.z,
+            ),
+            -_confidence(estimate),
+            estimate.source_index,
+        ),
+    )
     return selected.point

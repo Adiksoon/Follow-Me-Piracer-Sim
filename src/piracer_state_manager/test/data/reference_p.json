@@ -1,0 +1,554 @@
+{
+  "source": "P equations from the pre-extension FollowPController",
+  "parameters": {
+    "target_distance_m": 2.25,
+    "min_distance_m": 2.0,
+    "distance_kp": 0.1,
+    "direction_kp": 1.0,
+    "max_speed_mps": 0.05,
+    "wheelbase_m": 0.155,
+    "max_steer_rad": 0.554
+  },
+  "gain_configs": [
+    {
+      "distance_kp": 0.05,
+      "direction_kp": 0.5,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.037500000000000006,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.04561388300841898,
+          "angular_z": 0.04775557552129308,
+          "steering_angle_rad": 0.1608752771983211,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.4636476090008061,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.10933447293697099,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.05234763231238044,
+          "steering_angle_rad": 0.1608752771983211,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    },
+    {
+      "distance_kp": 0.05,
+      "direction_kp": 1.0,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.037500000000000006,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.04561388300841898,
+          "angular_z": 0.09809437206111608,
+          "steering_angle_rad": 0.3217505543966422,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.21866894587394198,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.10752688172043011,
+          "steering_angle_rad": 0.3217505543966422,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    },
+    {
+      "distance_kp": 0.05,
+      "direction_kp": 1.5,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.037500000000000006,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.04561388300841898,
+          "angular_z": 0.15419050574665807,
+          "steering_angle_rad": 0.4826258315949633,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.328003418810913,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.16901707942535724,
+          "steering_angle_rad": 0.4826258315949633,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    },
+    {
+      "distance_kp": 0.1,
+      "direction_kp": 0.5,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.05,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.05,
+          "angular_z": 0.05234763231238044,
+          "steering_angle_rad": 0.1608752771983211,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.4636476090008061,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.10933447293697099,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.05234763231238044,
+          "steering_angle_rad": 0.1608752771983211,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    },
+    {
+      "distance_kp": 0.1,
+      "direction_kp": 1.0,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.05,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.05,
+          "angular_z": 0.10752688172043011,
+          "steering_angle_rad": 0.3217505543966422,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.21866894587394198,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.10752688172043011,
+          "steering_angle_rad": 0.3217505543966422,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    },
+    {
+      "distance_kp": 0.1,
+      "direction_kp": 1.5,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.05,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.05,
+          "angular_z": 0.16901707942535724,
+          "steering_angle_rad": 0.4826258315949633,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.328003418810913,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.16901707942535724,
+          "steering_angle_rad": 0.4826258315949633,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    },
+    {
+      "distance_kp": 0.2,
+      "direction_kp": 0.5,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.05,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.05,
+          "angular_z": 0.05234763231238044,
+          "steering_angle_rad": 0.1608752771983211,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.4636476090008061,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.10933447293697099,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.05234763231238044,
+          "steering_angle_rad": 0.1608752771983211,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    },
+    {
+      "distance_kp": 0.2,
+      "direction_kp": 1.0,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.05,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.05,
+          "angular_z": 0.10752688172043011,
+          "steering_angle_rad": 0.3217505543966422,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.21866894587394198,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.10752688172043011,
+          "steering_angle_rad": 0.3217505543966422,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    },
+    {
+      "distance_kp": 0.2,
+      "direction_kp": 1.5,
+      "cases": [
+        {
+          "x_m": 3.0,
+          "y_m": 0.0,
+          "linear_x": 0.05,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.0,
+          "distance_m": 3.0,
+          "bearing_rad": 0.0
+        },
+        {
+          "x_m": 3.0,
+          "y_m": 1.0,
+          "linear_x": 0.05,
+          "angular_z": 0.16901707942535724,
+          "steering_angle_rad": 0.4826258315949633,
+          "distance_m": 3.1622776601683795,
+          "bearing_rad": 0.3217505543966422
+        },
+        {
+          "x_m": 1.35,
+          "y_m": 1.8,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 2.25,
+          "bearing_rad": 0.9272952180016122
+        },
+        {
+          "x_m": 1.8,
+          "y_m": 0.4,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.328003418810913,
+          "distance_m": 1.8439088914585775,
+          "bearing_rad": 0.21866894587394198
+        },
+        {
+          "x_m": -3.0,
+          "y_m": 2.0,
+          "linear_x": 0.0,
+          "angular_z": 0.0,
+          "steering_angle_rad": 0.554,
+          "distance_m": 3.605551275463989,
+          "bearing_rad": 2.5535900500422257
+        },
+        {
+          "x_m": 3.6,
+          "y_m": 1.2,
+          "linear_x": 0.05,
+          "angular_z": 0.16901707942535724,
+          "steering_angle_rad": 0.4826258315949633,
+          "distance_m": 3.794733192202055,
+          "bearing_rad": 0.3217505543966422
+        }
+      ]
+    }
+  ]
+}

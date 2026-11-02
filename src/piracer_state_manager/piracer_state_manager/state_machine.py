@@ -8,6 +8,20 @@ ACQUIRE = "ACQUIRE"
 FOLLOW = "FOLLOW"
 
 
+def confirmed_command_owner(target, active, confirmed, pending):
+    """Return an actuator owner only after an exclusive confirmed handoff."""
+    if not active or pending is not None or not isinstance(target, str):
+        return "stop"
+    target_name = target.lower()
+    if target_name not in (SEARCH.lower(), FOLLOW.lower()):
+        return "stop"
+    if confirmed.get(target_name) is not True:
+        return "stop"
+    if any(name != target_name and value is not False for name, value in confirmed.items()):
+        return "stop"
+    return target_name
+
+
 class BehaviorEnableCoordinator:
     """Serialize SetBool handoffs between enabled behavior nodes."""
 
@@ -155,11 +169,9 @@ class StateMachine:
         self.active = self.enabled
         if not self.enabled:
             return events
-        # Hold transitions at SEARCH until ACQUIRE and FOLLOW are ready.
-        if self.state != SEARCH:
-            self._reset_state()
-        if self.state == SEARCH:
-            return events
+        # TEMPORARY: force FOLLOW while implementing and testing its controller.
+        self._reset_state(FOLLOW)
+        return events
 
         if self.state == ACQUIRE:
             self.hit_streak = self.hit_streak + 1 if positive else 0

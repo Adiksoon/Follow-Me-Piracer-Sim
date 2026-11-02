@@ -24,6 +24,12 @@ def generate_launch_description():
             description="OccupancyGrid topic consumed by Search.",
         ),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
+        DeclareLaunchArgument(
+            "follow_publish_cmd_vel",
+            default_value="false",
+            description="Allow Follow to publish drive commands. Keep false for measurement-only runs.",
+        ),
+        DeclareLaunchArgument("follow_nav2_avoidance", default_value="false"),
         DeclareLaunchArgument("max_localization_age_sec", default_value="0.5"),
         DeclareLaunchArgument("tf_future_lead_sec", default_value="0.1"),
         Node(
@@ -53,6 +59,8 @@ def generate_launch_description():
                 "search_enable_service": search_service,
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
                 "follow_use_sim_time": LaunchConfiguration("use_sim_time"),
+                "follow_publish_cmd_vel": LaunchConfiguration("follow_publish_cmd_vel"),
+                "follow_nav2_avoidance": LaunchConfiguration("follow_nav2_avoidance"),
             }.items(),
         ),
     ])

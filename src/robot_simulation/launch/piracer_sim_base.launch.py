@@ -14,6 +14,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 import xacro
 
 
@@ -65,7 +66,13 @@ def _build_simulation(context):
         package="piracer_gazebo_plugins",
         executable="ackermann_twist_adapter",
         namespace="piracer",
-        parameters=[{"wheelbase_m": 0.155}],
+        parameters=[{
+            "wheelbase_m": 0.155,
+            "command_timeout_s": 0.5,
+            "require_behavior_owner": ParameterValue(
+                LaunchConfiguration("follow_nav2_avoidance"), value_type=bool
+            ),
+        }],
         remappings=[("/piracer/cmd_vel", "/cmd_vel")],
         output="screen",
     )
@@ -253,5 +260,6 @@ def generate_launch_description():
         DeclareLaunchArgument("robot_spawn_y", default_value="0.0"),
         DeclareLaunchArgument("robot_spawn_z", default_value="0.019"),
         DeclareLaunchArgument("robot_spawn_yaw", default_value="0.0"),
+        DeclareLaunchArgument("follow_nav2_avoidance", default_value="false"),
         OpaqueFunction(function=_build_simulation),
     ])
