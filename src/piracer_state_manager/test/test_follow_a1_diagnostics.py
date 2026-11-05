@@ -202,6 +202,17 @@ def test_cumulative_diagnostics_are_published_at_interval_not_each_cycle():
         assert summary["cycle_counts"]["disabled"] == 1
         assert summary["cycle_counts"]["ros_time_stalled_cycles"] == 1
         assert summary["unclassified_cycles"] == 0
+        assert summary["input_received"] == {
+            "local_costmap": False, "global_costmap": False,
+            "odom_info": False, "scan": False,
+        }
+        node._latest_scan = object()
+        node._cycle_counts["timer_calls"] += 1
+        node._record_cycle("disabled", False, 2_000_000_000, start + 2.0)
+        assert json.loads(spy.messages[-1].data)["input_received"] == {
+            "local_costmap": False, "global_costmap": False,
+            "odom_info": False, "scan": True,
+        }
     finally:
         node.stop_and_destroy()
         if not was_initialized and rclpy.ok():
@@ -296,6 +307,78 @@ def test_active_extension_uses_original_target_stamp_and_stop_path_resets_histor
         integral_sample = json.loads(samples.messages[-1].data)
         assert integral_sample["distance_i_mps"] == pytest.approx(0.001)
         assert integral_sample["distance_integral_m_s"] == pytest.approx(0.2)
+    finally:
+        node.stop_and_destroy()
+        if not was_initialized and rclpy.ok():
+            rclpy.shutdown()
+
+
+
+
+@pytest.mark.parametrize("stamp_ns, outcome, expected", [
+    (None, "disabled", None),
+    (1_100_000_000, "stale_ros_stamp", -.1),
+    (400_000_000, "stale_ros_stamp", .6),
+    (800_000_000, "disabled", .2),
+])
+def test_diagnostics_report_the_point_and_clocks_used_by_the_cycle(stamp_ns, outcome, expected):
+    was_initialized = rclpy.ok()
+    if not was_initialized:
+        rclpy.init()
+    node = PiracerFollowNode()
+    try:
+        spy = _PublisherSpy()
+        node._control_diagnostics_publisher = spy
+        node._last_diagnostics_monotonic = 90.
+        if stamp_ns is not None:
+            point = PointStamped()
+            point.header.stamp = Time(nanoseconds=stamp_ns).to_msg()
+            node._latest_target_point = point
+            node._latest_target_received_monotonic = 99.95
+        node._cycle_counts["timer_calls"] = 1
+        node._record_cycle(outcome, False, 1_000_000_000, 100.)
+        value = json.loads(spy.messages[-1].data)
+        assert value["cycle_outcome"] == outcome
+        assert value["sim_time_ns"] == 1_000_000_000
+        assert value["target_stamp_ns"] == stamp_ns
+        if expected is None:
+            assert value["target_ros_age_s"] is None
+            assert value["target_received_age_s"] is None
+        else:
+            assert value["target_ros_age_s"] == pytest.approx(expected)
+            assert value["target_received_age_s"] == pytest.approx(.05)
+    finally:
+        node.stop_and_destroy()
+        if not was_initialized and rclpy.ok():
+            rclpy.shutdown()
+
+
+def test_target_reader_keeps_latest_point_without_relaxing_freshness():
+    from rclpy.qos import HistoryPolicy, ReliabilityPolicy
+    was_initialized = rclpy.ok()
+    if not was_initialized:
+        rclpy.init()
+    node = PiracerFollowNode()
+    try:
+        qos = node._target_point_subscription.qos_profile
+        assert qos.history == HistoryPolicy.KEEP_LAST
+        assert qos.depth == 1
+        assert qos.reliability == ReliabilityPolicy.RELIABLE
+        assert node._detection_subscription.qos_profile.depth == 10
+        assert node.get_parameter("max_target_age_s").value == .5
+        node._set_enabled(SetBool.Request(data=True), SetBool.Response())
+        point = _fresh_point(node)
+        original = node.get_clock().now()
+        for offset in (-.6, .1):
+            point.header.stamp = Time(
+                nanoseconds=original.nanoseconds + round(offset * 1e9),
+                clock_type=original.clock_type).to_msg()
+            node._on_target_point(point)
+            node._control_cycle()
+        assert node._cycle_counts["stale_ros_stamp"] == 2
+        assert point.header.stamp == Time(
+            nanoseconds=original.nanoseconds + 100_000_000,
+            clock_type=original.clock_type).to_msg()
     finally:
         node.stop_and_destroy()
         if not was_initialized and rclpy.ok():

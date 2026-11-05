@@ -688,13 +688,13 @@
   </xacro:if>
 
   <!--
-    PLUGIN: upstream ROS Humble GazeboRosAckermannDrive 3.9.0.
+    PLUGIN: ROS Humble GazeboRosAckermannDrive 3.9.0 with per-wheel STOP braking.
     Drive P=0.0155 is an experimental low-speed response candidate.
     Steering PID values remain provisional starting estimates.
     The upstream plugin changes the world friction model to cone_model on load.
   -->
   <gazebo>
-    <plugin name="gazebo_ros_ackermann_drive" filename="libgazebo_ros_ackermann_drive.so">
+    <plugin name="gazebo_ros_ackermann_drive" filename="$(find robot_description)/../../lib/libpiracer_ackermann_drive.so">
       <ros>
         <namespace>/piracer</namespace>
         <remapping>cmd_vel:=ackermann_cmd_vel</remapping>

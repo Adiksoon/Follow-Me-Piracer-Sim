@@ -21,7 +21,14 @@ def test_local_and_global_costmaps_share_static_and_live_scan_layers():
         assert params["obstacle_layer"]["scan"] == global_params["obstacle_layer"]["scan"]
         assert params["obstacle_layer"]["scan"]["topic"] == "/piracer/scan"
         assert params["obstacle_layer"]["scan"]["data_type"] == "LaserScan"
+        assert params["obstacle_layer"]["observation_sources"] == "scan depth_obstacles"
+        depth = params["obstacle_layer"]["depth_obstacles"]
+        assert depth["topic"] == "/piracer/obstacle_scan"
+        assert depth["data_type"] == "LaserScan"
+        assert depth["marking"] and depth["clearing"]
+        assert depth["inf_is_valid"] is False
         assert params["footprint"] == global_params["footprint"]
+        assert params["footprint_padding"] == 0.02
     assert local_params["global_frame"] == "vo_odom"
     assert local_params["rolling_window"] is True
     assert local_params["resolution"] == global_params["resolution"] == 0.05
@@ -40,6 +47,54 @@ def test_inflation_radius_covers_configured_footprint_circumradius():
     assert ast.literal_eval(local_params["footprint"]) == footprint
     for params in (global_params, local_params):
         assert params["inflation_layer"]["inflation_radius"] >= circumradius
+
+
+def test_follow_and_search_planners_share_kinematics_and_keep_unknown_policy_separate():
+    from xml.etree import ElementTree as ET
+    config = yaml.safe_load((ROOT / "config/nav2_params.yaml").read_text())
+    planners = config["planner_server"]["ros__parameters"]
+    assert planners["planner_plugins"] == ["Hybrid", "FollowHybrid"]
+    assert planners["Hybrid"]["allow_unknown"] is False
+    assert planners["FollowHybrid"]["allow_unknown"] is True
+    assert planners["FollowHybrid"]["smooth_path"] is False
+    assert {k: v for k, v in planners["Hybrid"].items() if k != "allow_unknown"} == {
+        k: v for k, v in planners["FollowHybrid"].items() if k not in ("allow_unknown", "smooth_path")}
+    follow = ET.parse(ROOT / "behavior_trees/follow_navigate_to_pose.xml")
+    pipeline = follow.find('./BehaviorTree/PipelineSequence')
+    assert [node.tag for node in pipeline] == ['RateController', 'FollowPath']
+    assert pipeline.find('RateController').get('hz') == '1.0'
+    updater = pipeline.find('RateController/GoalUpdater')
+    assert updater.get('input_goal') == '{goal}'
+    assert updater.get('output_goal') == '{updated_goal}'
+    assert updater.find('ComputePathToPose').get('goal') == '{updated_goal}'
+    assert config['bt_navigator']['ros__parameters']['goal_updater_topic'] == '/piracer/follow/nav2_goal_update'
+    assert 'nav2_goal_updater_node_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
+    assert 'nav2_rate_controller_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
+    assert 'nav2_pipeline_sequence_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
+    assert follow.find('.//ComputePathToPose').get('planner_id') == 'FollowHybrid'
+    assert follow.find('.//FollowPath').get('goal_checker_id') == 'search_goal_checker'
+    search = ET.parse(ROOT.parent / "piracer_search/behavior_trees/search_navigate_to_pose.xml")
+    assert search.find('.//ComputePathToPose').get('planner_id') == 'Hybrid'
+
+
+def test_rpp_and_both_inflation_layers_use_same_cost_scaling():
+    config = yaml.safe_load((ROOT / "config/nav2_params.yaml").read_text())
+    rpp = config["controller_server"]["ros__parameters"]["FollowPath"]
+    for name in ("global_costmap", "local_costmap"):
+        layer = config[name][name]["ros__parameters"]["inflation_layer"]
+        assert layer["cost_scaling_factor"] == rpp["inflation_cost_scaling_factor"] == 8.0
+
+
+def test_smoother_preserves_feasible_ackermann_angular_commands():
+    import math
+    config = yaml.safe_load((ROOT / "config/nav2_params.yaml").read_text())
+    smoother = config["velocity_smoother"]["ros__parameters"]
+    assert smoother["max_velocity"] == [.10, 0., .4]
+    assert smoother["min_velocity"] == [0., 0., -.4]
+    physical_yaw_at_raw_speed = .10 * math.tan(.554) / .155
+    assert smoother["max_velocity"][2] >= physical_yaw_at_raw_speed
+    assert smoother["max_accel"] == [.05, 0., .20]
+    assert smoother["max_decel"] == [-.10, 0., -.40]
 
 
 def test_integration_flag_defaults_and_propagation_preserve_standalone_routing():

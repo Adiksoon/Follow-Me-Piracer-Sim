@@ -15,6 +15,6 @@ def test_controller_error_patience_does_not_relax_transform_or_motion_limits():
         assert config[name][name]["ros__parameters"]["transform_tolerance"] == 0.2
     assert config["behavior_server"]["ros__parameters"]["transform_tolerance"] == 0.2
     smoother = config["velocity_smoother"]["ros__parameters"]
-    assert smoother["max_velocity"] == [0.10, 0.0, 0.2]
+    assert smoother["max_velocity"] == [0.10, 0.0, 0.4]
     assert smoother["max_accel"] == [0.05, 0.0, 0.2]
     assert smoother["max_decel"] == [-0.1, 0.0, -0.4]

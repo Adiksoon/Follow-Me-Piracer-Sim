@@ -1,11 +1,19 @@
 from types import SimpleNamespace
+from functools import partial
 
-from robot_perception.target_point import select_target_point
+import pytest
+
+from robot_perception.target_point import select_target_point as _select_target_point
+
+
+select_target_point = partial(_select_target_point, image_width=640, image_height=360)
 
 
 def _estimate(index, score, point):
     result = SimpleNamespace(hypothesis=SimpleNamespace(score=score))
-    detection = SimpleNamespace(results=[result])
+    box = SimpleNamespace(center=SimpleNamespace(position=SimpleNamespace(x=320., y=180.)),
+                          size_x=40., size_y=80.)
+    detection = SimpleNamespace(results=[result], bbox=box)
     return SimpleNamespace(
         source_index=index,
         source_detection=detection,
@@ -73,3 +81,24 @@ def test_returns_none_when_no_estimate_has_a_valid_point():
     assert select_target_point(
         [_estimate(0, 0.9, None), _estimate(1, 0.7, None)]
     ) is None
+
+
+@pytest.mark.parametrize('x,y,w,h', [
+    (10., 180., 20., 80.), (630., 180., 20., 80.),
+    (320., 20., 40., 40.), (320., 340., 40., 40.),
+    (8.435725212097168, 144.022705078125, 16.871450424194336, 95.92831420898438),
+])
+def test_clipped_box_is_rejected_even_with_valid_background_depth(x,y,w,h):
+    clipped = _estimate(0, .95, _point(0., 0., 1.))
+    box = clipped.source_detection.bbox
+    box.center.position.x, box.center.position.y = x, y
+    box.size_x, box.size_y = w, h
+    assert select_target_point([clipped]) is None
+    complete = _estimate(1, .5, _point(0., 0., 3.))
+    assert select_target_point([clipped, complete]) is complete.point
+
+
+def test_complete_box_near_border_remains_eligible():
+    complete = _estimate(0, .5, _point(0., 0., 3.))
+    complete.source_detection.bbox.center.position.x = 20.01
+    assert select_target_point([complete]) is complete.point

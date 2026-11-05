@@ -1,0 +1,12 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <PipelineSequence>
+      <RateController hz="1.0">
+        <GoalUpdater input_goal="{goal}" output_goal="{updated_goal}">
+          <ComputePathToPose goal="{updated_goal}" path="{path}" planner_id="FollowHybrid" />
+        </GoalUpdater>
+      </RateController>
+      <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="search_goal_checker" />
+    </PipelineSequence>
+  </BehaviorTree>
+</root>

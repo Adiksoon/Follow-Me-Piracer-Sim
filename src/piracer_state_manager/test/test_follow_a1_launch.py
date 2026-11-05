@@ -42,6 +42,7 @@ def test_state_manager_passes_closed_motion_gate_as_boolean_parameter():
         )
     description = launch.generate_launch_description()
     assert _default_argument(description, "follow_publish_cmd_vel") == "false"
+    assert _default_argument(description, "follow_max_speed_mps") == "0.05"
 
     follow = next(
         entity
@@ -55,6 +56,10 @@ def test_state_manager_passes_closed_motion_gate_as_boolean_parameter():
         for key in parameters
         if perform_substitutions(LaunchContext(), key) == "publish_cmd_vel"
     )
+    speed_key = next(k for k in parameters if perform_substitutions(LaunchContext(), k) == "max_speed_mps")
+    context = LaunchContext()
+    context.launch_configurations["follow_max_speed_mps"] = "0.075"
+    assert parameters[speed_key].evaluate(context) == 0.075
     parameter = parameters[key]
     assert isinstance(parameter, ParameterValue)
     assert parameter.value_type is bool
@@ -73,6 +78,7 @@ def test_full_simulation_forwards_motion_gate_without_enabling_it():
     )
     description = launch.generate_launch_description()
     assert _default_argument(description, "follow_publish_cmd_vel") == "false"
+    assert _default_argument(description, "follow_max_speed_mps") == "0.05"
     search_state_manager = next(
         entity
         for entity in description.entities
@@ -97,6 +103,7 @@ def test_search_launch_forwards_motion_gate_to_state_manager():
         )
     description = launch.generate_launch_description()
     assert _default_argument(description, "follow_publish_cmd_vel") == "false"
+    assert _default_argument(description, "follow_max_speed_mps") == "0.05"
     manager = next(
         entity
         for entity in description.entities
@@ -108,3 +115,19 @@ def test_search_launch_forwards_motion_gate_to_state_manager():
     assert perform_substitutions(
         LaunchContext(), forwarded.variable_name
     ) == "follow_publish_cmd_vel"
+
+
+def test_nav2_autostart_defaults_true_and_can_be_forwarded_false():
+    sim = _load_launch("autostart_sim", SOURCE / "launch/piracer_sim.launch.py")
+    description = sim.generate_launch_description()
+    assert _default_argument(description, "nav2_autostart") == "true"
+    include = next(e for e in description.entities if isinstance(e, IncludeLaunchDescription)
+                   and "nav2_autostart" in dict(e.launch_arguments))
+    ctx = LaunchContext()
+    ctx.launch_configurations.update(nav2_autostart="false", follow_nav2_avoidance="false")
+    assert dict(include.launch_arguments)["nav2_autostart"].perform(ctx) == "false"
+    navigation = _load_launch("autostart_nav", SOURCE.parents[0] / "piracer_navigation/launch/slam_nav2.launch.py")
+    assert _default_argument(navigation.generate_launch_description(), "nav2_autostart") == "true"
+    with patch.object(navigation, "get_package_share_directory", side_effect=lambda name: "/share/" + name):
+        child = navigation._build_launch(ctx)[-1]
+    assert dict(child.launch_arguments)["autostart"].perform(ctx) == "false"

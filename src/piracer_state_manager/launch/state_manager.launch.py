@@ -25,6 +25,10 @@ def generate_launch_description():
             default_value="false",
             description="Allow Follow to publish drive commands. Keep false for measurement-only runs.",
         ),
+        DeclareLaunchArgument(
+            "follow_max_speed_mps", default_value="0.05", choices=["0.05", "0.075"],
+            description="Forward speed limit for manual FOLLOW in simulation.",
+        ),
         DeclareLaunchArgument("follow_nav2_avoidance", default_value="false"),
         Node(
             package="piracer_state_manager",
@@ -55,6 +59,7 @@ def generate_launch_description():
                     LaunchConfiguration("follow_use_sim_time"),
                     value_type=bool,
                 ),
+                "max_speed_mps": ParameterValue(LaunchConfiguration("follow_max_speed_mps"), value_type=float),
                 "publish_cmd_vel": ParameterValue(
                     LaunchConfiguration("follow_publish_cmd_vel"),
                     value_type=bool,

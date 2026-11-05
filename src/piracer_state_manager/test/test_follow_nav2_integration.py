@@ -2,6 +2,8 @@ from math import cos, sin
 from pathlib import Path
 from types import SimpleNamespace
 
+import math
+
 import pytest
 
 from piracer_state_manager.follow_nav2_helpers import (
@@ -9,8 +11,8 @@ from piracer_state_manager.follow_nav2_helpers import (
     NAV2,
     NAV2_PENDING,
     SAFE_STOP,
-    ClearanceHysteresis,
     bound_nav_twist,
+    clear_stand_off_goal,
     footprint_clear,
     goal_refresh_due,
     localization_is_fresh,
@@ -22,7 +24,7 @@ from piracer_state_manager.follow_nav2_helpers import (
 )
 
 
-def _grid(width=60, height=40, resolution=0.05, origin=(-1.0, -1.0, 0.0), fill=0):
+def _grid(width=60, height=80, resolution=0.05, origin=(-1.0, -2.0, 0.0), fill=0):
     yaw = origin[2]
     return SimpleNamespace(
         info=SimpleNamespace(
@@ -97,6 +99,28 @@ def test_same_fixture_box_off_corridor_is_clear_at_actual_target_goal():
     assert footprint_clear(grid, goal[0], goal[1], goal[2])
 
 
+def test_barrier_rejects_radial_goal_but_allows_side_observation_pose():
+    grid = _grid(width=150, height=120, origin=(-1.0, -3.0, 0.0))
+    target = (4.116, -0.149)
+    radial = stand_off_goal(0.838, -0.007, *target)
+    assert clear_stand_off_goal(grid, radial, *target) == radial
+    _rasterize_box_bounds(grid, (1.7, 2.0, -0.9, 0.9))
+    assert not footprint_clear(grid, *radial)
+    first = clear_stand_off_goal(grid, radial, *target)
+    assert first is not None and footprint_clear(grid, *first)
+    _set_world_cell(grid, first[0], first[1], 100)
+    other = clear_stand_off_goal(grid, radial, *target)
+    assert other is not None and footprint_clear(grid, *other)
+    assert (first[1] - target[1]) * (other[1] - target[1]) < 0
+    for x, y, yaw in (first, other):
+        assert math.hypot(target[0] - x, target[1] - y) == pytest.approx(2.25)
+        assert math.atan2(target[1] - y, target[0] - x) == pytest.approx(yaw)
+    grid.data[:] = [-1] * len(grid.data)
+    assert clear_stand_off_goal(grid, radial, *target) == radial
+    grid.data[:] = [100] * len(grid.data)
+    assert clear_stand_off_goal(grid, radial, *target) is None
+
+
 def test_obstacle_outside_corridor_and_rotated_grid_are_handled():
     grid = _grid(origin=(-1.0, -1.0, 0.4))
     _set_world_cell(grid, 0.43, 0.35, 100)
@@ -107,9 +131,10 @@ def test_obstacle_outside_corridor_and_rotated_grid_are_handled():
     assert not clear
 
 
-def test_unknown_out_of_map_and_stale_inputs_fail_closed():
+def test_unknown_is_traversable_but_out_of_map_and_stale_inputs_still_stop():
     grid = _grid(fill=-1)
-    assert not footprint_clear(grid, 0.0, 0.0, 0.0)
+    assert footprint_clear(grid, 0.0, 0.0, 0.0)
+    assert swept_footprint_clear(grid, 0.0, 0.0, 0.0, 0.05, 0.0, 0.6)[0]
     grid = _grid(origin=(20.0, 20.0, 0.0))
     assert not footprint_clear(grid, 0.0, 0.0, 0.0)
     assert stamped_input_is_fresh(1_000_000_000, 1_400_000_000, 0.3, 0.6)
@@ -125,6 +150,15 @@ def test_unknown_out_of_map_and_stale_inputs_fail_closed():
     assert not stamped_input_is_fresh(1_000_000_000, 1_100_000_000, 0.7, 0.5)
 
 
+@pytest.mark.parametrize("blocked_cost", [99, 100])
+@pytest.mark.parametrize("cell", [-2, -1, 100])
+def test_unknown_policy_preserves_invalid_and_occupied_cost_rejection(blocked_cost, cell):
+    grid = _grid(fill=cell)
+    assert footprint_clear(grid, 0.0, 0.0, 0.0, blocked_cost=blocked_cost) is (cell == -1)
+    grid.data[:] = [blocked_cost] * len(grid.data)
+    assert not footprint_clear(grid, 0.0, 0.0, 0.0, blocked_cost=blocked_cost)
+
+
 def test_suitcase_at_standoff_does_not_create_an_avoidance_goal():
     goal = stand_off_goal(0.0, 0.0, 3.0, 0.0, 2.25)
     assert goal == pytest.approx((0.75, 0.0, 0.0))
@@ -132,29 +166,75 @@ def test_suitcase_at_standoff_does_not_create_an_avoidance_goal():
     assert swept_footprint_clear(_grid(), 0.75, 0.0, 0.0, 0.0, 0.0, 0.0)[0]
 
 
-def test_distinct_map_stamp_hysteresis_stops_immediately_and_waits_to_return():
-    state = ClearanceHysteresis(blocked_count=2, clear_count=5)
-    first = state.observe(True, 1_000_000_000)
-    assert first.stop_now and not first.confirm_nav2
-    duplicate = state.observe(True, 1_000_000_000)
-    assert duplicate.stop_now and not duplicate.confirm_nav2
-    second = state.observe(True, 1_200_000_000)
-    assert second.confirm_nav2
-    assert state.observe(False, 1_400_000_000).stop_now
-    for stamp in range(1_600_000_000, 2_200_000_000, 200_000_000):
-        assert not state.observe(False, stamp).return_direct
-    assert state.observe(False, 2_400_000_000).return_direct
-    assert not state.observe(True, 0).return_direct
+def test_new_scan_danger_stops_direct_even_with_the_same_map_stamp():
+    node = _integrated_cycle_node(
+        local_grid=_stamp_grid(_grid(), 5_000_000_000),
+        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"))
+    command = SimpleNamespace(linear_x=.05, angular_z=0.)
+    node._integrated_cycle(command, node._test_target, node._test_now_ns, node._test_monotonic_now)
+    assert node._last_selected_source == "direct"
+    node._latest_scan.ranges[len(node._latest_scan.ranges)//2] = .5
+    node._integrated_cycle(command, node._test_target, node._test_now_ns, node._test_monotonic_now)
+    assert node._last_selected_source == "stop"
+    assert node._last_selected_twist.linear.x == 0
+    assert node._mode == NAV2_PENDING
 
 
-def test_duplicate_clear_map_blocks_newly_unsafe_trajectory_without_counting_evidence():
-    state = ClearanceHysteresis(blocked_count=2, clear_count=5)
-    assert not state.observe(False, 1_000_000_000).stop_now
-    duplicate_blocked = state.observe(True, 1_000_000_000)
-    assert duplicate_blocked.stop_now
-    assert not duplicate_blocked.confirm_nav2
-    assert state.blocked == 0
-    assert state.last_stamp_ns == 1_000_000_000
+@pytest.mark.parametrize('mode',[DIRECT,NAV2])
+def test_rotated_robot_cannot_release_nav2_while_corridor_to_suitcase_is_blocked(mode,monkeypatch):
+    from geometry_msgs.msg import Twist
+    from piracer_state_manager.follow_control import FollowPController
+    from piracer_state_manager import follow_node as control_module
+    from rclpy.time import Time
+    from test_follow_last_seen import Handle
+
+    # Turned pose observed at the premature handoff; target is beyond the barrier.
+    pose=(.193,.027,.424)
+    local=_stamp_grid(_grid(width=40,height=40,origin=(-.8,-1.,0.)),5_000_000_000)
+    global_map=_stamp_grid(_grid(width=180,height=140,origin=(-2.,-3.,0.)),5_000_000_000,'map')
+    _rasterize_box_bounds(global_map,(1.7,2.,-.6,.6))
+    node=_integrated_cycle_node(mode=mode,local_grid=local,global_grid=global_map)
+    clock=SimpleNamespace(ros=5_000_000_000,wall=100.)
+    monkeypatch.setattr(control_module,'time',SimpleNamespace(monotonic=lambda:clock.wall))
+    node.get_clock=lambda:SimpleNamespace(now=lambda:Time(nanoseconds=clock.ros))
+    node._controller=FollowPController(max_speed_mps=.075)
+    node._tf_pose=lambda *_:pose
+    target_map=SimpleNamespace(header=node._latest_target_point.header,
+                               point=SimpleNamespace(x=5.,y=0.,z=0.))
+    node._tf_buffer.transform=lambda *_:target_map
+    dx,dy=5.-pose[0],-pose[1]
+    base=SimpleNamespace(point=SimpleNamespace(
+        x=cos(pose[2])*dx+sin(pose[2])*dy,
+        y=-sin(pose[2])*dx+cos(pose[2])*dy,z=0.))
+    command=node._controller.update(base.point.x,base.point.y)
+    assert swept_footprint_clear(local,*pose,command.linear_x,command.angular_z,.6)[0]
+    from piracer_state_manager.follow_nav2_helpers import scan_clears_motion
+    assert scan_clears_motion(node._latest_scan,(0.,0.,0.),0.,distance=2.)
+    handle=Handle(7)
+    if mode==NAV2:
+        node._goal_handle=handle
+        node._goal_state,node._goal_unresolved='active',True
+        node._sent_goal_stamp_ns=5_000_000_000
+        node._nav2_goal_target_map=(5.,0.)
+        node._nav2_goal_started_wall=100.
+        node._active_actions={'navigate_to_pose':{bytes(handle.goal_id.uuid):(2,5_000_000_000)},
+                              'follow_path':{b'current-path':(2,5_000_000_000)}}
+    for step in range(4):
+        now=5_000_000_000+step*200_000_000
+        clock.ros,clock.wall=now,100.+step*.2
+        node._latest_target_point.header.stamp.sec=now//10**9
+        node._latest_target_point.header.stamp.nanosec=now%10**9
+        if mode==NAV2:
+            node._test_monotonic_now=100.+step*.2
+            nav=Twist();nav.linear.x=.04
+            node._on_nav2_command(nav)
+        node._integrated_cycle(command,base,now,100.+step*.2)
+        assert node._direct_clear_since_ns is None
+        assert node._last_selected_source!='direct'
+    if mode==NAV2:
+        assert handle.cancels==0 and node._goal_state=='active'
+    else:
+        assert node._mode==NAV2_PENDING and len(node._nav2_action.goals)==1
 
 
 def test_nav2_forwarding_caps_speed_curvature_and_rejects_unsafe_twists():
@@ -169,6 +249,16 @@ def test_nav2_forwarding_caps_speed_curvature_and_rejects_unsafe_twists():
     assert nav2_command_policy(float("nan"), 0.0, 0.01, False)[0] == "fault"
     assert nav2_command_policy(0.10, 0.1, 1.0, False)[0] == "wait"
     assert nav2_command_policy(0.10, 0.1, 1.0, True)[0] == "fault"
+
+
+@pytest.mark.parametrize("cap", [0.05, 0.075])
+@pytest.mark.parametrize("turn", [-1, 1])
+def test_selected_follow_speed_preserves_curvature_and_steering_limit(cap, turn):
+    policy, (v, w) = nav2_command_policy(0.10, turn * 0.20, 0.05, True, cap)
+    assert policy == "forward" and v == pytest.approx(cap)
+    assert w / v == pytest.approx(turn * 2.0)
+    _, (v, w) = nav2_command_policy(0.10, turn * 2.0, 0.05, True, cap)
+    assert math.atan(0.155 * w / v) == pytest.approx(turn * 0.554)
 
 
 def test_goal_refresh_is_rate_and_displacement_bounded():
@@ -201,16 +291,18 @@ def test_cancel_terminal_and_smoother_drain_require_wall_and_ros_progress():
     from piracer_state_manager.follow_node import PiracerFollowNode
 
     node = object.__new__(PiracerFollowNode)
+    node._memory_goal = node._last_seen = None
+    node._nav2_goal_offset = None
+    node._publish_cmd_vel = False
     node._goal_state = "canceling"
     node._goal_unresolved = True
-    node._goal_cancel_reason = "return_direct"
+    node._goal_cancel_reason = "target_moved"
     node._goal_finish_action = None
     node._goal_terminal_wall = None
     node._goal_terminal_ros_ns = None
     node._goal_handle = object()
+    node._goal_send_future = None
     node._enabled = True
-    node._clearance = ClearanceHysteresis()
-    node._clearance.clear = 5
     node._fault_latched = False
     node._mode = SAFE_STOP
     node._mode_reason = "waiting_for_cancel"
@@ -243,7 +335,7 @@ def test_cancel_terminal_and_smoother_drain_require_wall_and_ros_progress():
     node._finish_goal_drain(1_300_000_001, node._goal_terminal_wall + 0.4)
     assert node._goal_state == "idle"
     assert not node._goal_unresolved
-    assert node._mode == DIRECT
+    assert node._mode == NAV2_PENDING
 
 
 def test_late_goal_acceptance_is_canceled_and_unknown_acceptance_stays_owned():
@@ -259,6 +351,7 @@ def test_late_goal_acceptance_is_canceled_and_unknown_acceptance_stays_owned():
 
         def __init__(self):
             self.cancel_count = 0
+            self.goal_id = SimpleNamespace(uuid=[1] * 16)
 
         def get_result_async(self):
             return ResultFuture()
@@ -268,11 +361,15 @@ def test_late_goal_acceptance_is_canceled_and_unknown_acceptance_stays_owned():
 
     handle = Handle()
     node = object.__new__(PiracerFollowNode)
+    node._memory_goal = node._last_seen = None
+    node._nav2_goal_offset = None
     node._goal_state = "sending"
     node._goal_unresolved = True
+    node._goal_send_future = object()
     node._goal_handle = None
     node._goal_cancel_reason = "disabled"
     node._goal_finish_action = None
+    node._active_actions = {}
     node._enabled = False
     node._mode = NAV2_PENDING
     node._mode_reason = "disabled_while_sending"
@@ -290,6 +387,8 @@ def test_late_goal_acceptance_is_canceled_and_unknown_acceptance_stays_owned():
     assert node._goal_unresolved
 
     unknown = object.__new__(PiracerFollowNode)
+    unknown._memory_goal = unknown._last_seen = None
+    unknown._nav2_goal_offset = None
     unknown._goal_state = "sending"
     unknown._goal_unresolved = True
     unknown._mode = NAV2_PENDING
@@ -332,6 +431,8 @@ def test_follow_disable_ack_waits_for_goal_terminal_and_stale_nav_output_is_neve
             self.cancel_count += 1
 
     node = object.__new__(PiracerFollowNode)
+    node._memory_goal = node._last_seen = None
+    node._nav2_goal_offset = None
     node._follow_nav2_avoidance = True
     node._enabled = True
     node._goal_unresolved = True
@@ -402,6 +503,8 @@ def test_dry_follow_blocks_twists_and_navigate_to_pose_requests():
             self.messages.append(message)
 
     node = object.__new__(PiracerFollowNode)
+    node._memory_goal = node._last_seen = None
+    node._nav2_goal_offset = None
     node._publish_cmd_vel = False
     node._command_publisher = Publisher()
     node._goal_unresolved = False
@@ -450,6 +553,8 @@ def _integrated_cycle_node(mode=DIRECT, local_grid=None, global_grid=None):
     )
     target = SimpleNamespace(point=SimpleNamespace(x=2.839554, y=0.013049, z=0.0))
     node = object.__new__(PiracerFollowNode)
+    node._memory_goal = node._last_seen = None
+    node._nav2_goal_offset = None
     node._enabled = True
     node._publish_cmd_vel = True
     node._follow_nav2_avoidance = True
@@ -458,7 +563,7 @@ def _integrated_cycle_node(mode=DIRECT, local_grid=None, global_grid=None):
     node._mode_reason = "test"
     node._last_integrated_ros_ns = None
     node._last_blocked_stamp_ns = None
-    node._clearance = ClearanceHysteresis()
+    node._direct_clear_since_ns = None
     node._local_grid = local_grid
     node._global_grid = global_grid
     node._integrated_inputs_fresh = lambda *_: (
@@ -468,14 +573,17 @@ def _integrated_cycle_node(mode=DIRECT, local_grid=None, global_grid=None):
     node._tf_pose = lambda *_: (0.0, 0.0, 0.0)
     node._tf_buffer = SimpleNamespace(transform=lambda *_: target_map)
     node._controller = SimpleNamespace(
+        max_speed_mps=0.05,
         target_distance_m=2.25,
         min_distance_m=2.0,
         reset=lambda *_: None,
     )
     node._command_publisher = Publisher()
+    node._nav2_goal_update_publisher = Publisher()
     node._goal_state = "idle"
     node._goal_unresolved = False
     node._goal_handle = None
+    node._goal_send_future = None
     node._goal_cancel_reason = None
     node._goal_terminal_wall = None
     node._goal_terminal_ros_ns = None
@@ -488,6 +596,21 @@ def _integrated_cycle_node(mode=DIRECT, local_grid=None, global_grid=None):
     node._nav2_latest_command_wall = None
     node._goal_refresh_pending = False
     node._nav2_action = Action()
+    from sensor_msgs.msg import LaserScan
+    node._latest_scan = LaserScan()
+    node._latest_scan.header.frame_id = "base_link"
+    node._latest_scan.header.stamp.sec = 5
+    node._latest_scan.range_min, node._latest_scan.range_max = .05, 3.
+    node._latest_scan.angle_min, node._latest_scan.angle_increment = -.5, .01
+    node._latest_scan.ranges = [float("inf")] * 101
+    node._latest_scan_received_monotonic = monotonic_now
+    node._odom_info = SimpleNamespace(lost=False, header=node._latest_scan.header)
+    node._odom_info_received_monotonic = monotonic_now
+    node._local_grid_received_monotonic = monotonic_now
+    node._global_grid_received_monotonic = monotonic_now
+    node._latest_detections = None
+    node._detection_receipt = None
+    node._active_actions = {}
     node._latest_target_point = SimpleNamespace(
         header=SimpleNamespace(stamp=SimpleNamespace(sec=5, nanosec=0)),
         point=target.point,
@@ -515,6 +638,7 @@ def _integrated_cycle_node(mode=DIRECT, local_grid=None, global_grid=None):
         error=lambda *_: None,
     )
     node._test_now_ns = now_ns
+    node._latest_target_received_monotonic = monotonic_now
     node._test_monotonic_now = monotonic_now
     node._test_target = target
     return node
@@ -527,6 +651,33 @@ def _stamp_grid(grid, stamp_ns, frame_id="vo_odom"):
         frame_id=frame_id,
     )
     return grid
+
+
+@pytest.mark.parametrize("distance,expected_nav2", [(1.5, True), (2., True), (2.02, False)])
+def test_first_fresh_depth_hit_triggers_nav2_from_front_footprint(distance, expected_nav2):
+    node = _integrated_cycle_node(
+        local_grid=_stamp_grid(_grid(), 5_000_000_000),
+        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"))
+    node._latest_scan.ranges[50] = .246 + distance
+    node._integrated_cycle(SimpleNamespace(linear_x=.05, angular_z=0.), node._test_target,
+                           node._test_now_ns, node._test_monotonic_now)
+    assert bool(node._nav2_action.goals) is expected_nav2
+    if expected_nav2:
+        assert node._mode == NAV2_PENDING
+        assert node._last_selected_twist.linear.x == 0
+        assert not any(m.linear.x > 0 for m in node._command_publisher.messages)
+    else:
+        assert node._last_selected_source == "direct"
+
+
+def test_depth_obstacle_does_not_start_a_goal_when_follow_wants_to_stand_still():
+    node = _integrated_cycle_node(
+        local_grid=_stamp_grid(_grid(), 5_000_000_000),
+        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"))
+    node._latest_scan.ranges[50] = 1.5
+    node._integrated_cycle(SimpleNamespace(linear_x=0., angular_z=0.), node._test_target,
+                           node._test_now_ns, node._test_monotonic_now)
+    assert not node._nav2_action.goals and node._last_selected_twist.linear.x == 0
 
 
 def test_integrated_cycle_recovers_from_startup_data_wait_and_preserves_direct_p_output():
@@ -557,7 +708,7 @@ def test_integrated_cycle_recovers_from_startup_data_wait_and_preserves_direct_p
     assert node._last_selected_source == "direct"
 
 
-def test_integrated_nav2_ignores_emergency_on_unused_direct_arc_but_checks_selected_arc():
+def test_integrated_nav2_ignores_unused_direct_arc_but_stops_for_current_footprint():
     from geometry_msgs.msg import Twist
     from piracer_state_manager.follow_nav2_helpers import NAV2
 
@@ -575,6 +726,12 @@ def test_integrated_nav2_ignores_emergency_on_unused_direct_arc_but_checks_selec
     node._goal_unresolved = True
     node._goal_handle = object()
     node._nav2_goal_target_map = (2.839554, 0.013049)
+    node._goal_handle = SimpleNamespace(goal_id=SimpleNamespace(uuid=[1] * 16))
+    node._sent_goal_stamp_ns = node._test_now_ns
+    node._active_actions = {
+        "navigate_to_pose": {bytes([1] * 16): (2, node._test_now_ns)},
+        "follow_path": {b"own-path": (2, node._test_now_ns)},
+    }
     node._nav2_goal_started_wall = 90.0
     nav_command = Twist()
     nav_command.linear.x = 0.05
@@ -590,7 +747,7 @@ def test_integrated_nav2_ignores_emergency_on_unused_direct_arc_but_checks_selec
     assert node._last_selected_source == "nav2"
     assert node._command_publisher.messages[-1].linear.x > 0.0
 
-    for x in (0.25, 0.30):
+    for x in (0.10, 0.25, 0.30):
         for y in (0.0, 0.05):
             _set_world_cell(grid, x, y, 100)
     node._nav2_latest_command.angular.z = 0.0
@@ -621,8 +778,6 @@ def test_integrated_data_loss_cancels_nav2_then_recovers_after_clear_confirmatio
     node._goal_state = "active"
     node._goal_unresolved = True
     node._goal_handle = handle
-    node._clearance.observe(True, 4_600_000_000)
-    node._clearance.observe(True, 4_800_000_000)
     node._nav2_latest_command = Twist()
     node._nav2_latest_command.linear.x = 0.05
     node._nav2_latest_command_wall = node._test_monotonic_now
@@ -648,13 +803,15 @@ def test_integrated_data_loss_cancels_nav2_then_recovers_after_clear_confirmatio
     terminal_wall = node._goal_terminal_wall
     node._finish_goal_drain(node._test_now_ns + 400_000_000, terminal_wall + 0.4)
     assert not node._goal_unresolved
-    assert node._mode == SAFE_STOP
+    assert node._mode == NAV2_PENDING
     assert not node._fault_latched
 
     node._integrated_inputs_fresh = lambda *_: (True, "")
     command = SimpleNamespace(linear_x=0.02, angular_z=0.01)
     for offset in range(5):
         stamp = node._test_now_ns + 500_000_000 + offset * 200_000_000
+        node._latest_target_point.header.stamp.sec=stamp//10**9
+        node._latest_target_point.header.stamp.nanosec=stamp%10**9
         node._local_grid = _stamp_grid(_grid(), stamp)
         node._integrated_cycle(command, node._test_target, stamp,
                                node._test_monotonic_now + 0.5 + offset * 0.05)
@@ -781,17 +938,19 @@ def test_nav2_goal_status_must_be_terminal_to_release_ownership():
 
     for status in (0, 1, 2, 3, 999):
         node = object.__new__(PiracerFollowNode)
+        node._memory_goal = node._last_seen = None
+        node._nav2_goal_offset = None
         node._goal_state = "active"
         node._goal_unresolved = True
         node._goal_cancel_reason = "disabled"
         node._goal_finish_action = None
         node._goal_handle = object()
+        node._goal_send_future = None
         node._enabled = False
         node._follow_nav2_avoidance = True
         node._publish_cmd_vel = True
         node._controller = SimpleNamespace(reset=lambda *_: None)
         node._command_publisher = Publisher()
-        node._clearance = ClearanceHysteresis()
         node._fault_latched = False
         node._mode = SAFE_STOP
         node._mode_reason = "disabled"
@@ -813,13 +972,16 @@ def test_nav2_goal_status_must_be_terminal_to_release_ownership():
         assert node._goal_unresolved
 
     aborted = object.__new__(PiracerFollowNode)
+    aborted._memory_goal = aborted._last_seen = None
+    aborted._nav2_goal_offset = None
+    aborted._publish_cmd_vel = False
     aborted._goal_state = "active"
     aborted._goal_unresolved = True
     aborted._goal_cancel_reason = "disabled"
     aborted._goal_finish_action = None
     aborted._goal_handle = object()
+    aborted._goal_send_future = None
     aborted._enabled = False
-    aborted._clearance = ClearanceHysteresis()
     aborted._fault_latched = False
     aborted._mode = SAFE_STOP
     aborted._mode_reason = "disabled"
@@ -839,6 +1001,9 @@ def test_nav2_goal_status_must_be_terminal_to_release_ownership():
     assert aborted._mode_reason == "goal_terminal_aborted_tail_drain"
 
     malformed = object.__new__(PiracerFollowNode)
+    malformed._memory_goal = malformed._last_seen = None
+    malformed._nav2_goal_offset = None
+    malformed._publish_cmd_vel = False
     malformed._goal_state = "active"
     malformed._goal_unresolved = True
     malformed._mode = SAFE_STOP
@@ -864,7 +1029,7 @@ def test_repeated_blocked_maps_keep_first_global_costmap_barrier_until_clear_ret
     node = _integrated_cycle_node(
         mode=DIRECT,
         local_grid=_stamp_grid(grid, 5_000_000_000),
-        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"),
+        global_grid=_stamp_grid(_grid(), 4_900_000_000, "map"),
     )
     command = SimpleNamespace(linear_x=0.05, angular_z=0.0)
     node._integrated_cycle(command, node._test_target,
@@ -872,22 +1037,22 @@ def test_repeated_blocked_maps_keep_first_global_costmap_barrier_until_clear_ret
     node._local_grid = _stamp_grid(grid, 5_200_000_000)
     node._integrated_cycle(command, node._test_target,
                            5_200_000_000, node._test_monotonic_now + 0.05)
-    assert node._last_blocked_stamp_ns == 5_200_000_000
+    assert node._last_blocked_stamp_ns == 5_000_000_000
     assert node._mode == NAV2_PENDING
     assert not node._nav2_action.goals
 
     # Later local observations do not move the barrier. A global frame newer
-    # than the first confirmed blockage can then authorize exactly one goal.
+    # than the first blockage can then authorize exactly one goal.
     node._global_grid = _stamp_grid(_grid(), 5_300_000_000, "map")
     node._local_grid = _stamp_grid(grid, 5_400_000_000)
     node._integrated_cycle(command, node._test_target,
                            5_400_000_000, node._test_monotonic_now + 0.10)
-    assert node._last_blocked_stamp_ns == 5_200_000_000
+    assert node._last_blocked_stamp_ns == 5_000_000_000
     assert len(node._nav2_action.goals) == 1
     assert node._goal_state == "sending"
 
 
-def test_imminent_direct_collision_waits_for_distinct_map_before_nav2_handoff():
+def test_imminent_collision_stays_stopped_until_the_obstacle_is_farther_away():
     grid = _grid()
     _set_world_cell(grid, 0.30, 0.0, 100)
     assert footprint_clear(grid, 0.0, 0.0, 0.0)
@@ -916,7 +1081,6 @@ def test_imminent_direct_collision_waits_for_distinct_map_before_nav2_handoff():
 
     node._integrated_cycle(command, node._test_target,
                            5_000_000_000, node._test_monotonic_now)
-    assert node._clearance.blocked == 1
     assert node._mode == SAFE_STOP
     assert not node._nav2_action.goals
     assert node._last_selected_source == "stop"
@@ -924,7 +1088,6 @@ def test_imminent_direct_collision_waits_for_distinct_map_before_nav2_handoff():
 
     node._integrated_cycle(command, node._test_target,
                            5_000_000_001, node._test_monotonic_now + 0.01)
-    assert node._clearance.blocked == 1
     assert node._mode == SAFE_STOP
     assert not node._nav2_action.goals
     assert node._last_selected_source == "stop"
@@ -937,7 +1100,16 @@ def test_imminent_direct_collision_waits_for_distinct_map_before_nav2_handoff():
     node._global_grid = _stamp_grid(_grid(), stamp, "map")
     node._integrated_cycle(command, node._test_target,
                            stamp, node._test_monotonic_now + 0.02)
-    assert node._clearance.blocked == 2
+    assert node._mode == SAFE_STOP and not node._nav2_action.goals
+    assert node._last_selected_twist.linear.x == 0
+
+    farther = _grid()
+    _set_world_cell(farther, 0.45, 0.0, 100)
+    stamp = 5_400_000_000
+    node._local_grid = _stamp_grid(farther, stamp)
+    node._global_grid = _stamp_grid(_grid(), stamp, "map")
+    node._integrated_cycle(command, node._test_target,
+                           stamp, node._test_monotonic_now + 0.04)
     assert node._mode == NAV2_PENDING
     assert len(node._nav2_action.goals) == 1
     assert node._goal_state == "sending"
@@ -948,7 +1120,7 @@ def test_imminent_direct_collision_waits_for_distinct_map_before_nav2_handoff():
     assert all(call[3] != "direct" for call in calls if call[0] == "command")
 
 
-def test_occupied_current_footprint_still_stops_before_hysteresis_or_goal():
+def test_occupied_current_footprint_still_stops_before_any_goal():
     grid = _grid()
     _set_world_cell(grid, 0.10, 0.0, 100)
     assert not footprint_clear(grid, 0.0, 0.0, 0.0)
@@ -963,10 +1135,26 @@ def test_occupied_current_footprint_still_stops_before_hysteresis_or_goal():
                            node._test_monotonic_now)
     assert node._mode == SAFE_STOP
     assert node._last_selected_source == "stop"
-    assert node._clearance.blocked == 0
     assert not node._nav2_action.goals
     assert node._command_publisher.messages[-1].linear.x == 0.0
     assert node._command_publisher.messages[-1].angular.z == 0.0
+
+
+def test_missing_depth_updates_reach_existing_stale_scan_stop():
+    from piracer_state_manager.follow_node import PiracerFollowNode
+    node = _integrated_cycle_node(
+        local_grid=_stamp_grid(_grid(), 5_000_000_000),
+        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"))
+    node.get_parameter = lambda name: SimpleNamespace(value={
+        "local_costmap_max_age_s": .6, "global_costmap_max_age_s": 2.,
+        "max_localization_age_s": 1.}[name])
+    node._latest_scan_received_monotonic = 99.4
+    node._integrated_inputs_fresh = lambda *args: PiracerFollowNode._integrated_inputs_fresh(node, *args)
+    assert node._integrated_inputs_fresh(5_000_000_000, 100.) == (False, "stale_scan")
+    node._integrated_cycle(SimpleNamespace(linear_x=.05, angular_z=0.),
+                           node._test_target, 5_000_000_000, 100.)
+    assert node._last_selected_source == "stop"
+    assert node._last_selected_twist.linear.x == 0 and not node._nav2_action.goals
 
 
 def test_nav2_respects_controller_minimum_distance_stop_and_cancels_owned_goal():

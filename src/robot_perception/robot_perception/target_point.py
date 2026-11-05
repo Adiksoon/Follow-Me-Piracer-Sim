@@ -14,9 +14,18 @@ def _confidence(estimate) -> float:
     return max(finite_scores, default=0.0)
 
 
-def select_target_point(estimates):
-    """Return the nearest valid 3D point, using confidence and source index for ties."""
-    valid = [estimate for estimate in estimates if estimate.point is not None]
+def select_target_point(estimates, image_width, image_height):
+    """Select the nearest complete detection, with confidence and index for ties."""
+    valid = []
+    for estimate in estimates:
+        if estimate.point is None:
+            continue
+        box = estimate.source_detection.bbox
+        x, y = box.center.position.x, box.center.position.y
+        if (x - box.size_x / 2 <= 0 or x + box.size_x / 2 >= image_width
+                or y - box.size_y / 2 <= 0 or y + box.size_y / 2 >= image_height):
+            continue  # A clipped box's center pixel can fall on the background.
+        valid.append(estimate)
     if not valid:
         return None
     selected = min(

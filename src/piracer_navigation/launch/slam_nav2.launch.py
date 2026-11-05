@@ -9,12 +9,14 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
+    GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.actions import SetRemap
 from nav2_common.launch import RewrittenYaml
 
 
@@ -154,12 +156,25 @@ def _build_launch(context, *args, **kwargs):
         launch_arguments={
             "use_sim_time": "true",
             "params_file": nav2_params,
-            "autostart": "true",
+            "autostart": LaunchConfiguration("nav2_autostart"),
             "use_composition": "False",
             "use_respawn": "False",
         }.items(),
     )
 
+    if LaunchConfiguration("follow_nav2_avoidance").perform(context).lower() == "true":
+        # Humble remaps individual action services/topics. Keep the controller
+        # path internal to the Nav2 group and behavior commands off the smoother.
+        path_remaps = [
+            SetRemap(src=f"follow_path/_action/{endpoint}",
+                     dst=f"/piracer/follow_nav/follow_path/_action/{endpoint}")
+            for endpoint in ("send_goal", "get_result", "cancel_goal", "feedback", "status")
+        ]
+        nav2 = GroupAction(actions=[
+            SetRemap(src="behavior_server:cmd_vel", dst="/piracer/nav2_behavior_cmd_vel"),
+            *path_remaps,
+            nav2,
+        ])
     return [
         simulation,
         native_visual_odometry,
@@ -179,6 +194,7 @@ def generate_launch_description():
             DeclareLaunchArgument("robot_spawn_x", default_value="0.0"),
             DeclareLaunchArgument("robot_spawn_y", default_value="0.0"),
             DeclareLaunchArgument("robot_spawn_yaw", default_value="0.0"),
+            DeclareLaunchArgument("nav2_autostart", default_value="true"),
             DeclareLaunchArgument("follow_nav2_avoidance", default_value="false"),
             DeclareLaunchArgument("raw_map_topic", default_value="/map"),
             DeclareLaunchArgument("map_topic", default_value="/nav2/map"),

@@ -43,6 +43,12 @@ Suma jawnie przypisanych mas w rozwiniętym bieżącym URDF wynosi `1.018508 kg`
 To wartość wynikająca z parametrów modelu, a nie pomiar masy fizycznego
 PiRacera.
 
+Plugin napędu bazuje na `gazebo_ros_ackermann_drive` 3.9.0 (Apache-2.0).
+Lokalna biblioteka `libpiracer_ackermann_drive.so` zachowuje jazdę i skręt
+upstream. Przy zerowej komendzie hamuje każde tylne koło według jego własnej
+prędkości, aby odciążenie jednego koła nie wyłączało hamowania drugiego.
+Źródło, licencja i zakres zmiany: `third_party_licenses/gazebo_ackermann/`.
+
 ## Uruchomienie i zakres dowodów
 
 Domyślne polecenie uruchamiające model to:

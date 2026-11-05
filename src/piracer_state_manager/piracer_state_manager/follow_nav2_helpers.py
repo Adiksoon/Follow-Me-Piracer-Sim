@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 
 
@@ -12,69 +11,9 @@ NAV2 = "NAV2"
 SAFE_STOP = "SAFE_STOP"
 
 FOOTPRINT = ((-0.020, -0.1085), (0.246, -0.1085), (0.246, 0.1085), (-0.020, 0.1085))
-MAX_NAV_SPEED_MPS = 0.05
+MAX_NAV_SPEED_MPS = 0.075
 MAX_STEER_RAD = 0.554
 WHEELBASE_M = 0.155
-
-
-@dataclass(frozen=True)
-class ClearanceResult:
-    stop_now: bool
-    confirm_nav2: bool = False
-    return_direct: bool = False
-    reason: str = ""
-
-
-class ClearanceHysteresis:
-    """Count distinct costmap stamps; block immediately, require stable clear."""
-
-    def __init__(self, blocked_count: int = 2, clear_count: int = 5) -> None:
-        if blocked_count < 1 or clear_count < 1:
-            raise ValueError("hysteresis counts must be positive")
-        self.blocked_count = blocked_count
-        self.clear_count = clear_count
-        self.last_stamp_ns = None
-        self.blocked = 0
-        self.clear = 0
-        self._was_blocked = False
-
-    def reset(self) -> None:
-        self.last_stamp_ns = None
-        self.blocked = 0
-        self.clear = 0
-        self._was_blocked = False
-
-    def observe(self, is_blocked: bool, stamp_ns: int) -> ClearanceResult:
-        if isinstance(stamp_ns, bool) or not isinstance(stamp_ns, int) or stamp_ns <= 0:
-            return ClearanceResult(True, reason="invalid_costmap_stamp")
-        if self.last_stamp_ns is not None and stamp_ns <= self.last_stamp_ns:
-            # A repeated map is not new hysteresis evidence, but the current
-            # pose/command can have changed since that map was first seen.
-            return ClearanceResult(
-                bool(is_blocked or self._was_blocked),
-                reason="duplicate_costmap_stamp",
-            )
-        self.last_stamp_ns = stamp_ns
-        if is_blocked:
-            self.blocked += 1
-            self.clear = 0
-            first = not self._was_blocked
-            self._was_blocked = True
-            return ClearanceResult(
-                True,
-                confirm_nav2=self.blocked >= self.blocked_count,
-                reason="blocked_first_map" if first else "blocked_confirmed",
-            )
-        self.clear += 1
-        self.blocked = 0
-        was_blocked = self._was_blocked
-        if self.clear >= self.clear_count:
-            self._was_blocked = False
-        return ClearanceResult(
-            stop_now=self._was_blocked,
-            return_direct=was_blocked and not self._was_blocked,
-            reason="clear_confirmed" if was_blocked and not self._was_blocked else "clear_candidate",
-        )
 
 
 def stamped_input_is_fresh(stamp_ns: int, now_ns: int, received_age_s: float,
@@ -143,14 +82,17 @@ def footprint_polygon(x: float, y: float, yaw: float, footprint=FOOTPRINT):
     return tuple((x + c * px - s * py, y + s * px + c * py) for px, py in footprint)
 
 
-def footprint_clear(grid, x: float, y: float, yaw: float, footprint=FOOTPRINT) -> bool:
-    """Check every touched OccupancyGrid cell; unknown/outside is blocked."""
+def footprint_clear(grid, x: float, y: float, yaw: float, footprint=FOOTPRINT,
+                    blocked_cost=100) -> bool:
+    """Require the entire footprint to fit within the grid and avoid obstacles."""
     width, height, resolution = grid.info.width, grid.info.height, grid.info.resolution
     if width <= 0 or height <= 0 or not math.isfinite(resolution) or resolution <= 0.0:
         return False
     poly = footprint_polygon(x, y, yaw, footprint)
     local = tuple(_grid_coordinates(grid, px, py) for px, py in poly)
     max_x, max_y = width * resolution, height * resolution
+    if not all(math.isfinite(v) for point in local for v in point):
+        return False
     if any(px < 0.0 or py < 0.0 or px > max_x or py > max_y for px, py in local):
         return False
     min_i = max(0, int(math.floor(min(p[0] for p in local) / resolution)))
@@ -165,14 +107,43 @@ def footprint_clear(grid, x: float, y: float, yaw: float, footprint=FOOTPRINT) -
             cell = data[j * width + i]
             if _polygons_overlap_rect(local, i * resolution, j * resolution,
                                       (i + 1) * resolution, (j + 1) * resolution):
-                if cell < 0 or cell >= 100:
+                # UNKNOWN (-1) is traversable; occupied and invalid cells still block.
+                if cell < -1 or cell >= blocked_cost:
                     return False
+    return True
+
+
+def scan_clears_motion(scan, sensor_pose, curvature, distance=0.10):
+    """Check the immediate swept area against the latest horizontal depth scan."""
+    sx, sy, yaw = sensor_pose
+    if not (scan.ranges and 0 < scan.range_min < scan.range_max and scan.angle_increment > 0
+            and all(math.isfinite(v) for v in (sx, sy, yaw, curvature, scan.range_max,
+                                                scan.angle_min, scan.angle_increment))):
+        return False
+    # A bounding box around the short Ackermann arc is conservative on turns.
+    corners = []
+    for travel in (0.0, distance / 2, distance):
+        angle = curvature * travel
+        x = math.sin(angle) / curvature if abs(curvature) > 1e-9 else travel
+        y = (1 - math.cos(angle)) / curvature if abs(curvature) > 1e-9 else 0.0
+        corners.extend(footprint_polygon(x, y, angle))
+    xs, ys = zip(*corners)
+    left, right = min(xs) - .003, max(xs) + .003
+    bottom, top = min(ys) - .003, max(ys) + .003
+    for i, measured in enumerate(scan.ranges):
+        if not math.isfinite(measured) or not scan.range_min <= measured <= scan.range_max:
+            continue
+        angle = yaw + scan.angle_min + i * scan.angle_increment
+        x, y = sx + measured * math.cos(angle), sy + measured * math.sin(angle)
+        if left <= x <= right and bottom <= y <= top:
+            return False
+    # Finite scan hits supplement the Nav2 and costmap collision checks.
     return True
 
 
 def swept_footprint_clear(grid, x: float, y: float, yaw: float,
                           linear_x: float, angular_z: float, distance_m: float,
-                          footprint=FOOTPRINT) -> tuple[bool, float]:
+                          footprint=FOOTPRINT, blocked_cost=100) -> tuple[bool, float]:
     """Sweep the FOLLOW command arc, at no more than half-cell spacing."""
     values = (x, y, yaw, linear_x, angular_z, distance_m)
     if not all(math.isfinite(value) for value in values) or distance_m < 0.0:
@@ -196,7 +167,7 @@ def swept_footprint_clear(grid, x: float, y: float, yaw: float,
             pyaw = yaw + angular_z * dt
             px = x + radius * (math.sin(pyaw) - math.sin(yaw))
             py = y - radius * (math.cos(pyaw) - math.cos(yaw))
-        if not footprint_clear(grid, px, py, pyaw, footprint):
+        if not footprint_clear(grid, px, py, pyaw, footprint, blocked_cost):
             return False, distance
     return True, math.inf
 
@@ -215,11 +186,35 @@ def stand_off_goal(robot_x: float, robot_y: float, target_x: float, target_y: fl
     return x, y, math.atan2(target_y - y, target_x - x)
 
 
-def bound_nav_twist(linear_x: float, angular_z: float) -> tuple[float, float] | None:
+def clear_stand_off_goal(grid, radial_goal, target_x: float, target_y: float,
+                         robot_yaw=None, approach_from=None):
+    """Choose a clear endpoint on the same target-distance circle."""
+    if footprint_clear(grid, *radial_goal):
+        return radial_goal
+    x, y, yaw = radial_goal
+    radius = math.hypot(x - target_x, y - target_y)
+    offsets = (30, -30, 45, -45)
+    if robot_yaw is not None and math.sin(robot_yaw - yaw) >= 0:
+        offsets = (-30, 30, -45, 45)
+    for offset in offsets:
+        bearing = yaw + math.radians(offset)
+        goal_x = target_x - radius * math.cos(bearing)
+        goal_y = target_y - radius * math.sin(bearing)
+        goal_yaw = bearing
+        if approach_from is not None:
+            # Approach the endpoint without requiring a turn toward the suitcase.
+            goal_yaw = math.atan2(goal_y - approach_from[1], goal_x - approach_from[0])
+        goal = (goal_x, goal_y, goal_yaw)
+        if footprint_clear(grid, *goal):
+            return goal
+    return None
+
+
+def bound_nav_twist(linear_x: float, angular_z: float, max_speed_mps: float = 0.05) -> tuple[float, float] | None:
     """Bound speed and Ackermann steering without changing curvature."""
     if not math.isfinite(linear_x) or not math.isfinite(angular_z) or linear_x <= 0.0:
         return None
-    speed = min(MAX_NAV_SPEED_MPS, linear_x)
+    speed = min(MAX_NAV_SPEED_MPS, max_speed_mps, linear_x)
     yaw_rate = angular_z * (speed / linear_x)
     steer = math.atan(WHEELBASE_M * yaw_rate / speed)
     if abs(steer) > MAX_STEER_RAD:
@@ -229,7 +224,7 @@ def bound_nav_twist(linear_x: float, angular_z: float) -> tuple[float, float] | 
 
 
 def nav2_command_policy(linear_x: float, angular_z: float,
-                        received_age_s: float, motion_started: bool):
+                        received_age_s: float, motion_started: bool, max_speed_mps: float = 0.05):
     """Return (wait|forward|fault, bounded Twist) for the owned Nav2 stream."""
     if not math.isfinite(linear_x) or not math.isfinite(angular_z):
         return "fault", None
@@ -243,7 +238,7 @@ def nav2_command_policy(linear_x: float, angular_z: float,
         return "fault", None
     if received_age_s > 0.20:
         return ("fault" if motion_started else "wait"), None
-    bounded = bound_nav_twist(linear_x, angular_z)
+    bounded = bound_nav_twist(linear_x, angular_z, max_speed_mps)
     return ("forward", bounded) if bounded is not None else ("fault", None)
 
 

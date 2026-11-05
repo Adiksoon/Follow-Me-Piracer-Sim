@@ -29,6 +29,10 @@ def generate_launch_description():
             default_value="false",
             description="Allow Follow to publish drive commands. Keep false for measurement-only runs.",
         ),
+        DeclareLaunchArgument(
+            "follow_max_speed_mps", default_value="0.05", choices=["0.05", "0.075"],
+            description="Forward speed limit for manual FOLLOW in simulation.",
+        ),
         DeclareLaunchArgument("follow_nav2_avoidance", default_value="false"),
         DeclareLaunchArgument("max_localization_age_sec", default_value="0.5"),
         DeclareLaunchArgument("tf_future_lead_sec", default_value="0.1"),
@@ -60,6 +64,7 @@ def generate_launch_description():
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
                 "follow_use_sim_time": LaunchConfiguration("use_sim_time"),
                 "follow_publish_cmd_vel": LaunchConfiguration("follow_publish_cmd_vel"),
+                "follow_max_speed_mps": LaunchConfiguration("follow_max_speed_mps"),
                 "follow_nav2_avoidance": LaunchConfiguration("follow_nav2_avoidance"),
             }.items(),
         ),

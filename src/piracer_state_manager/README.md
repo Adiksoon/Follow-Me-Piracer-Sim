@@ -1,6 +1,6 @@
 # PiRacer state manager and FOLLOW
 
-The package runs the detector-driven state manager, Search, Acquire's service scaffold, and Follow. The current implementation temporarily forces FOLLOW after each fresh detector message. SEARCH and ACQUIRE transition code remains, but automatic SEARCH/ACQUIRE/FOLLOW behavior is not active. This candidate preserves that guard and the control and telemetry code unchanged.
+The package runs the detector-driven state manager, Search, Acquire's service scaffold, and Follow. The current implementation temporarily forces FOLLOW after each fresh detector message. SEARCH and ACQUIRE transition code remains, but automatic SEARCH/ACQUIRE/FOLLOW behavior is not active. The controller and its measurement telemetry remain available.
 
 ## Launch profiles
 
@@ -13,9 +13,11 @@ Set `follow_publish_cmd_vel:=true` only when drive output is intended. In the fu
 
 The default Follow controller targets 2.25 m, stops at or inside 2.0 m, limits forward speed to 0.05 m/s, and limits steering to 0.554 rad. Distance and direction use P control by default. Optional I and D gains default to zero; no gains are claimed to be optimal. Search's Nav2 desired speed remains 0.10 m/s, with a configured minimum turning radius of 0.50 m.
 
+The simulation launch accepts `follow_max_speed_mps:=0.075` as an optional Follow speed cap; its default remains `0.05`. Integrated Follow checks the depth obstacle scan before transferring control to Nav2. It can continue toward the last observed suitcase position during an existing bypass and returns to direct following after fresh target observations confirm a clear corridor. Nav2 updates its approach heading while retaining the current action's destination. An unavailable path or invalid localization stops the selected output.
+
 `/piracer/state/enable` is a `std_srvs/srv/SetBool` service; `data: false` latches the manager stopped and requests behavior disable. Follow also exposes `/follow/enable`. The integrated simulation adapter accepts commands for the currently confirmed behavior owner and emits zero when its command stream has been quiet for 0.5 seconds. These software mechanisms are not a validated hardware safety system and do not establish production approval.
 
-Follow requires a fresh, valid target point and usable TF; input, time, and transform failures stop its selected output. Integrated mode also checks localization and costmap freshness, the current and swept footprint, and Nav2 goal ownership before forwarding commands. Unknown or stale inputs fail closed. Controller samples on `/piracer/follow/control_sample` are observational and do not drive the robot; accumulated diagnostics are published on `/piracer/follow/control_diagnostics`.
+Direct Follow requires a fresh, valid target point and usable TF. Integrated mode also checks localization and costmap freshness, the current and swept footprint, and Nav2 goal ownership before forwarding commands, including continuation toward a remembered position. Stale required inputs stop the selected output. The `FollowHybrid` planner permits unknown map cells while live obstacle sensing and collision checks remain active; Search retains its separate planner policy. Costmaps, RPP and the velocity smoother are shared by both behaviors. Controller samples on `/piracer/follow/control_sample` are observational and do not drive the robot; accumulated diagnostics are published on `/piracer/follow/control_diagnostics`.
 
 ## Development evidence
 

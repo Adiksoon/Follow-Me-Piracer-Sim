@@ -6,6 +6,7 @@ import pytest
 rclpy = pytest.importorskip("rclpy")
 from geometry_msgs.msg import PointStamped
 from std_srvs.srv import SetBool
+from vision_msgs.msg import Detection2DArray
 
 from piracer_state_manager.acquire_node import AcquireNode
 from piracer_state_manager.follow_node import PiracerFollowNode
@@ -36,17 +37,21 @@ def test_acquire_still_refuses_enable_and_accepts_disable():
             rclpy.shutdown()
 
 
-def test_follow_accepts_target_and_can_enable():
+def test_follow_subscribes_to_detections_and_target_and_can_enable():
     was_initialized = rclpy.ok()
     if not was_initialized:
         rclpy.init()
     node = PiracerFollowNode()
     try:
+        assert node._latest_detections is None
         assert node._latest_target_point is None
 
+        detections = Detection2DArray()
         target_point = PointStamped()
         target_point.header.stamp.sec = 1
+        node._on_detections(detections)
         node._on_target_point(target_point)
+        assert node._latest_detections is detections
         # A nonzero stamp is cached. The control loop separately checks ROS age.
         assert node._latest_target_point is target_point
 
@@ -81,11 +86,9 @@ def test_follow_default_blocks_every_command_but_still_calculates_controller_out
         controller_update = controller.update
         calls = []
 
-        def update(x, y, *, measurement_stamp_ns=None):
-            calls.append((x, y, measurement_stamp_ns))
-            return controller_update(
-                x, y, measurement_stamp_ns=measurement_stamp_ns
-            )
+        def update(x, y):
+            calls.append((x, y))
+            return controller_update(x, y)
 
         node._controller.update = update
         enable = node._set_enabled(SetBool.Request(data=True), SetBool.Response())
@@ -99,11 +102,7 @@ def test_follow_default_blocks_every_command_but_still_calculates_controller_out
         node._on_target_point(point)
         node._control_cycle()
 
-        expected_stamp_ns = (
-            point.header.stamp.sec * 1_000_000_000
-            + point.header.stamp.nanosec
-        )
-        assert calls == [(3.0, 0.5, expected_stamp_ns)]
+        assert calls == [(3.0, 0.5)]
         assert not spy.messages
         assert len(preview_spy.messages) == 1
         sample = json.loads(preview_spy.messages[0].data)

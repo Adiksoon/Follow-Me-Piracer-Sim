@@ -1,4 +1,4 @@
-"""Launch the full PiRacer simulation, mapping, navigation, and Search graph."""
+"""Launch PiRacer simulation, perception, mapping and integrated FOLLOW/Nav2."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -43,6 +43,11 @@ def generate_launch_description():
             DeclareLaunchArgument("map_topic", default_value="/nav2/map"),
             DeclareLaunchArgument("start_zone_enabled", default_value="true"),
             DeclareLaunchArgument("start_zone_radius", default_value="1.5"),
+            DeclareLaunchArgument(
+                "follow_max_speed_mps", default_value="0.05", choices=["0.05", "0.075"],
+                description="Forward speed limit for manual FOLLOW in simulation.",
+            ),
+            DeclareLaunchArgument("nav2_autostart", default_value="true"),
             DeclareLaunchArgument("follow_nav2_avoidance", default_value="true"),
             DeclareLaunchArgument(
                 "follow_publish_cmd_vel",
@@ -62,6 +67,7 @@ def generate_launch_description():
                     "map_topic": LaunchConfiguration("map_topic"),
                     "start_zone_enabled": LaunchConfiguration("start_zone_enabled"),
                     "start_zone_radius": LaunchConfiguration("start_zone_radius"),
+                    "nav2_autostart": LaunchConfiguration("nav2_autostart"),
                     "follow_nav2_avoidance": LaunchConfiguration("follow_nav2_avoidance"),
                 }.items(),
             ),
@@ -78,6 +84,13 @@ def generate_launch_description():
                 name="suitcase_point_node",
                 output="screen",
             ),
+            Node(
+                package="robot_perception",
+                executable="obstacle_scan_node",
+                name="obstacle_scan_node",
+                parameters=[{"use_sim_time": True}],
+                output="screen",
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(search_state_manager_launch),
                 launch_arguments={
@@ -86,6 +99,7 @@ def generate_launch_description():
                     "tf_future_lead_sec": "0.2",
                     "use_sim_time": "true",
                     "follow_publish_cmd_vel": LaunchConfiguration("follow_publish_cmd_vel"),
+                    "follow_max_speed_mps": LaunchConfiguration("follow_max_speed_mps"),
                     "follow_nav2_avoidance": LaunchConfiguration("follow_nav2_avoidance"),
                 }.items(),
             ),

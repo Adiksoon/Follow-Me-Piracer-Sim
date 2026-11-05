@@ -80,7 +80,7 @@ class SuitcasePointNode(Node):
             depth_info,
             self._bridge,
         )
-        point = select_target_point(estimates)
+        point = select_target_point(estimates, depth_image.width, depth_image.height)
         if point is not None:
             self._point_publisher.publish(point)
 

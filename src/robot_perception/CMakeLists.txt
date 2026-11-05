@@ -9,6 +9,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/yolo11n_node
   scripts/suitcase_point_node
+  scripts/obstacle_scan_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -28,6 +29,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_yolo_timing test/test_yolo_timing.py)
   ament_add_pytest_test(test_ros_messages test/test_ros_messages.py)
   ament_add_pytest_test(test_opencv_dnn test/test_opencv_dnn.py)
+  ament_add_pytest_test(test_obstacle_scan test/test_obstacle_scan.py)
 endif()
 
 ament_package()

@@ -8,7 +8,7 @@ def test_scaled_turn_ramp_matches_linear_acceleration_and_stop():
     config = yaml.safe_load((Path(__file__).parents[1] / "config/nav2_params.yaml").read_text())
     p = config["velocity_smoother"]["ros__parameters"]
     assert p["scale_velocities"] is True
-    assert p["max_velocity"] == [0.10, 0.0, 0.2]
+    assert p["max_velocity"] == [0.10, 0.0, 0.4]
     assert p["max_accel"] == [0.05, 0.0, 0.2]
     assert p["max_decel"] == [-0.10, 0.0, -0.4]
     # With proportional scaling the slowest component sets the ramp time.

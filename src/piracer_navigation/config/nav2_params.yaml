@@ -4,6 +4,7 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: /visual_odom
+    goal_updater_topic: /piracer/follow/nav2_goal_update
     bt_loop_duration: 10
     default_server_timeout: 20
     wait_for_service_timeout: 1000
@@ -92,6 +93,7 @@ controller_server:
       use_rotate_to_heading: false
       allow_reversing: false
       use_collision_detection: true
+      inflation_cost_scaling_factor: 8.0
       use_regulated_linear_velocity_scaling: true
       regulated_linear_scaling_min_radius: 0.25
       regulated_linear_scaling_min_speed: 0.02
@@ -100,7 +102,7 @@ planner_server:
   ros__parameters:
     use_sim_time: true
     expected_planner_frequency: 5.0
-    planner_plugins: [Hybrid]
+    planner_plugins: [Hybrid, FollowHybrid]
     Hybrid:
       plugin: nav2_smac_planner/SmacPlannerHybrid
       tolerance: 0.10
@@ -115,6 +117,21 @@ planner_server:
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
       allow_reverse_expansion: false
+    FollowHybrid:
+      # FOLLOW may plan around a partially mapped obstacle toward a known goal.
+      plugin: nav2_smac_planner/SmacPlannerHybrid
+      tolerance: 0.10
+      downsample_costmap: false
+      allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 2.0
+      motion_model_for_search: DUBIN
+      minimum_turning_radius: 0.50
+      angle_quantization_bins: 72
+      analytic_expansion_ratio: 3.5
+      allow_reverse_expansion: false
+      smooth_path: false
 
 global_costmap:
   global_costmap:
@@ -126,7 +143,7 @@ global_costmap:
       publish_frequency: 1.0
       resolution: 0.05
       footprint: "[[-0.020, -0.1085], [0.246, -0.1085], [0.246, 0.1085], [-0.020, 0.1085]]"
-      footprint_padding: 0.0
+      footprint_padding: 0.02
       track_unknown_space: true
       transform_tolerance: 0.20
       plugins: [static_layer, obstacle_layer, inflation_layer]
@@ -137,7 +154,7 @@ global_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
-        observation_sources: scan
+        observation_sources: scan depth_obstacles
         scan:
           topic: /piracer/scan
           data_type: LaserScan
@@ -148,10 +165,21 @@ global_costmap:
           obstacle_max_range: 3.0
           raytrace_min_range: 0.05
           raytrace_max_range: 3.0
+        depth_obstacles:
+          topic: /piracer/obstacle_scan
+          data_type: LaserScan
+          marking: true
+          clearing: true
+          inf_is_valid: false
+          max_obstacle_height: 2.0
+          obstacle_min_range: 0.05
+          obstacle_max_range: 3.0
+          raytrace_min_range: 0.05
+          raytrace_max_range: 3.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        inflation_radius: 0.30
-        cost_scaling_factor: 3.0
+        inflation_radius: 0.275
+        cost_scaling_factor: 8.0
       always_send_full_costmap: true
 
 local_costmap:
@@ -167,7 +195,7 @@ local_costmap:
       height: 2
       resolution: 0.05
       footprint: "[[-0.020, -0.1085], [0.246, -0.1085], [0.246, 0.1085], [-0.020, 0.1085]]"
-      footprint_padding: 0.0
+      footprint_padding: 0.02
       track_unknown_space: true
       transform_tolerance: 0.20
       plugins: [static_layer, obstacle_layer, inflation_layer]
@@ -178,7 +206,7 @@ local_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
-        observation_sources: scan
+        observation_sources: scan depth_obstacles
         scan:
           topic: /piracer/scan
           data_type: LaserScan
@@ -189,10 +217,21 @@ local_costmap:
           obstacle_max_range: 3.0
           raytrace_min_range: 0.05
           raytrace_max_range: 3.0
+        depth_obstacles:
+          topic: /piracer/obstacle_scan
+          data_type: LaserScan
+          marking: true
+          clearing: true
+          inf_is_valid: false
+          max_obstacle_height: 2.0
+          obstacle_min_range: 0.05
+          obstacle_max_range: 3.0
+          raytrace_min_range: 0.05
+          raytrace_max_range: 3.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        inflation_radius: 0.30
-        cost_scaling_factor: 3.0
+        inflation_radius: 0.275
+        cost_scaling_factor: 8.0
       always_send_full_costmap: true
 
 behavior_server:
@@ -231,8 +270,8 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: true
     feedback: OPEN_LOOP
-    max_velocity: [0.10, 0.0, 0.2]
-    min_velocity: [0.0, 0.0, -0.2]
+    max_velocity: [0.10, 0.0, 0.4]
+    min_velocity: [0.0, 0.0, -0.4]
     max_accel: [0.05, 0.0, 0.20]
     max_decel: [-0.10, 0.0, -0.40]
     odom_topic: /visual_odom
