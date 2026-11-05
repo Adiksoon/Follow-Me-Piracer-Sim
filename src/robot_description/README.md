@@ -49,6 +49,14 @@ upstream. Przy zerowej komendzie hamuje każde tylne koło według jego własnej
 prędkości, aby odciążenie jednego koła nie wyłączało hamowania drugiego.
 Źródło, licencja i zakres zmiany: `third_party_licenses/gazebo_ackermann/`.
 
+Plugin zeruje cel prędkości i skrętu po ponad `0,5 s` od wejścia ostatniej
+komendy do callbacka i korzysta z powyższego hamowania. Mierzy ten czas zegarem
+monotonicznym, niezależnym od `/clock`; sprawdzenie wykonuje w następnym
+kroku sterowania. To chroni przed podtrzymywaniem starej komendy także wtedy,
+gdy zero wysłane przez adapter nie zostanie obsłużone w pluginie. Nie oznacza
+zatrzymania fizycznego w ciągu `0,5 s` ani ochrony przy zatrzymaniu fizyki lub
+blokadzie samej aktualizacji napędu.
+
 ## Uruchomienie i zakres dowodów
 
 Domyślne polecenie uruchamiające model to:

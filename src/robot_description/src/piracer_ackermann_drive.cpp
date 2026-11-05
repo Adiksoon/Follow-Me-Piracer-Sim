@@ -37,6 +37,7 @@
 
 #include "wheel_brake.hpp"
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -156,6 +157,8 @@ public:
 
   // Preserve upstream startup behavior until the first commanded drive.
   bool brake_armed_{false};
+
+  std::chrono::steady_clock::time_point last_command_time_{std::chrono::steady_clock::now()};
 
   /// Update period in seconds.
   double update_period_;
@@ -490,6 +493,16 @@ void GazeboRosAckermannDrivePrivate::OnUpdate(const gazebo::common::UpdateInfo &
     return;
   }
 
+  constexpr auto command_timeout = std::chrono::milliseconds(500);
+  const auto command_age = std::chrono::steady_clock::now() - last_command_time_;
+  if (command_age > command_timeout && (target_linear_ != 0.0 || target_rot_ != 0.0)) {
+    target_linear_ = 0.0;
+    target_rot_ = 0.0;
+    RCLCPP_WARN(ros_node_->get_logger(),
+      "Drive command expired: age=%.6f s, target_linear=0, target_steering=0, brake_armed=%d",
+      std::chrono::duration<double>(command_age).count(), brake_armed_);
+  }
+
   if (publish_distance_) {
 #ifdef IGN_PROFILER_ENABLE
     IGN_PROFILE_BEGIN("publish distance");
@@ -602,9 +615,11 @@ void GazeboRosAckermannDrivePrivate::OnUpdate(const gazebo::common::UpdateInfo &
 
 void GazeboRosAckermannDrivePrivate::OnCmdVel(const geometry_msgs::msg::Twist::SharedPtr _msg)
 {
+  const auto received = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> scoped_lock(lock_);
   target_linear_ = _msg->linear.x;
   target_rot_ = _msg->angular.z;
+  last_command_time_ = received;
 }
 
 double GazeboRosAckermannDrivePrivate::CollisionRadius(const gazebo::physics::CollisionPtr & _coll)
