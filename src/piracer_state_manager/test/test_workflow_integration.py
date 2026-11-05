@@ -341,6 +341,53 @@ def test_acquire_disable_fault_ack_blocks_successor_before_delayed_result(acquir
     assert not n.machine.enabled and not n.enabled["follow"]
 
 
+@pytest.mark.parametrize("kind", ["plan", "follow"])
+@pytest.mark.parametrize("terminal_first", [False, True])
+def test_acquire_abort_blocks_handoff_even_before_result_topic(acquire, kind, terminal_first):
+    from test_acquire_path import start_plan
+    from test_acquire_state_integration import manager
+    from test_state_machine import frame
+    n = manager(acquire)
+    n._sync_behavior_services()
+    acquire._result_pub.publish.side_effect = None
+    acquire._result_pub.publish.reset_mock()
+    if kind == "follow":
+        handle, goal = dispatch_leg(acquire)
+        advance(acquire, 4.0, goal)
+    else:
+        handle = start_plan(acquire)
+    operation = acquire._operation
+    for i in range(3, 8):
+        frame(n.machine, i, True, 100 + i / 10)
+    assert n.machine.state == FOLLOW
+    if not terminal_first:
+        n._sync_behavior_services()
+        assert handle.cancel_count == 1 and not acquire._enabled
+    handle.result.set_result(SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+    n._sync_behavior_services()
+    assert not n.machine.enabled and not n.enabled["follow"]
+    assert n.owners[-1] == "stop" and ("follow", True) not in n.requests
+
+    if kind == "follow":
+        assert acquire._operation is operation
+        acquire._result_pub.publish.assert_not_called()
+        from geometry_msgs.msg import Twist
+        acquire._on_command(Twist())
+        advance(acquire, 0.1)
+        assert acquire._operation is operation
+        for _ in range(21):
+            advance(acquire, 0.1)
+    n._sync_behavior_services()
+    assert acquire._operation is None
+    assert n.behavior_coordinator.confirmed["acquire"] is False
+    assert not any(n.enabled.values()) and ("follow", True) not in n.requests
+    late = acquire._result_pub.publish.call_args.args[0]
+    assert json.loads(late.data)["outcome"] == "failed"
+    n._on_acquire_result(late)
+    n._sync_behavior_services()
+    assert not n.machine.enabled and n.owners[-1] == "stop"
+
+
 def test_clock_regression_cannot_lose_acquire_fault_when_attempt_id_is_cleared(acquire):
     from test_acquire_state_integration import manager
     n = manager(acquire)

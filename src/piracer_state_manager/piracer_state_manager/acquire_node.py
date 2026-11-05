@@ -826,6 +826,9 @@ class AcquireNode(Node):
             self._cancel("nonterminal action result")
             return
         self.get_logger().info(f"Acquire {op['kind']} {names[status]}")
+        if status == GoalStatus.STATUS_ABORTED:
+            op["fault"] = True
+            self._fault_latched = True
         if op["kind"] == "follow":
             op["terminal_follow"] = True
             op["terminal_status"] = status

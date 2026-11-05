@@ -12,7 +12,7 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import TransformStamped, Twist
 
 from piracer_state_manager.acquire_geometry import observation_goal
-from test_acquire_path import acquire, FakeHandle, stationary_odom, finish_plan, start_follow
+from test_acquire_path import acquire, FakeHandle, stationary_odom, finish_plan, start_follow, start_plan
 
 
 def advance(node, seconds, pose=None, future_tf_ns=0, twist=(0.0, 0.0, 0.0)):
@@ -435,6 +435,49 @@ def test_aborted_leg_reports_failure_only_after_stop_and_never_advances(acquire)
     finish_leg(acquire, follower, goal, GoalStatus.STATUS_ABORTED)
     result = json.loads(acquire._result_pub.publish.call_args.args[0].data)
     assert result["outcome"] == "failed" and result["completed_maneuvers"] == 0
+    acquire._tick()
+    assert len(acquire._planner.goals) == 1
+
+
+@pytest.mark.parametrize("kind", ["plan", "follow"])
+@pytest.mark.parametrize("terminal_first", [False, True])
+@pytest.mark.parametrize("status", [GoalStatus.STATUS_ABORTED, GoalStatus.STATUS_CANCELED])
+def test_terminal_status_survives_disable_ordering(acquire, kind, terminal_first, status):
+    acquire.params["max_maneuvers"] = 3
+    if kind == "follow":
+        handle, goal = dispatch_leg(acquire)
+        advance(acquire, 4.0, goal)
+    else:
+        handle = start_plan(acquire)
+    operation = acquire._operation
+
+    def disable():
+        return acquire._set_enabled(SimpleNamespace(data=False), SimpleNamespace())
+
+    if not terminal_first:
+        assert not disable().success
+        assert handle.cancel_count == 1
+    handle.result.set_result(SimpleNamespace(status=status))
+    response = disable()
+    # An unrequested planning cancellation already reports failure.
+    fault = status == GoalStatus.STATUS_ABORTED or (kind == "plan" and terminal_first)
+    assert acquire._fault_latched is fault
+    assert f"fault_latched={str(fault).lower()}" in response.message
+
+    if kind == "follow":
+        assert not response.success and acquire._operation is operation
+        acquire._result_pub.publish.assert_not_called()
+        acquire._on_command(Twist())
+        advance(acquire, 0.1)
+        assert acquire._operation is operation
+        for _ in range(21):
+            advance(acquire, 0.1)
+    else:
+        assert response.success
+    assert acquire._operation is None
+    result = json.loads(acquire._result_pub.publish.call_args.args[0].data)
+    assert result["outcome"] == ("failed" if fault else "canceled")
+    assert result["completed_maneuvers"] == 0
     acquire._tick()
     assert len(acquire._planner.goals) == 1
 
