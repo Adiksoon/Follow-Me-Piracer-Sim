@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 
 from launch import LaunchContext
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -55,3 +56,19 @@ def test_nested_launches_forward_acquire_file_and_preserve_follow_options():
         context.launch_configurations["acquire_params_file"] = "/chosen/acquire.yaml"
         assert arguments["acquire_params_file"].perform(context) == "/chosen/acquire.yaml"
         assert {"follow_publish_cmd_vel", "follow_nav2_avoidance"} <= set(arguments)
+
+
+@pytest.mark.parametrize("avoidance,expected", [
+    ("true", "/piracer/follow_nav/follow_path"),
+    ("TrUe", "/piracer/follow_nav/follow_path"),
+    ("false", "/follow_path"),
+])
+def test_acquire_uses_the_active_nav2_controller_action(avoidance, expected):
+    description = launch_description("state_manager.launch.py")
+    node = next(e for e in description.entities
+                if isinstance(e, Node) and e._Node__node_name == "piracer_acquire")
+    context = LaunchContext()
+    context.launch_configurations["follow_nav2_avoidance"] = avoidance
+    values = node._Node__parameters[-1]
+    key = next(k for k in values if perform_substitutions(context, k) == "controller_action")
+    assert ParameterValue(values[key].value, value_type=str).evaluate(context) == expected

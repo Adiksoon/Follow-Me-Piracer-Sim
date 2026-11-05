@@ -56,7 +56,12 @@ def generate_launch_description():
             parameters=[
                 LaunchConfiguration("acquire_params_file"),
                 {"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool),
-                 "standoff_m": ParameterValue(LaunchConfiguration("follow_target_distance_m"), value_type=float)},
+                 "standoff_m": ParameterValue(LaunchConfiguration("follow_target_distance_m"), value_type=float),
+                 "controller_action": ParameterValue(PythonExpression([
+                     "'/piracer/follow_nav/follow_path' if '",
+                     LaunchConfiguration("follow_nav2_avoidance"),
+                     "'.lower() == 'true' else '/follow_path'",
+                 ]), value_type=str)},
             ],
         ),
         Node(
