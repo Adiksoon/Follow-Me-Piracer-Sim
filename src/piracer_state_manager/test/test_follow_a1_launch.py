@@ -43,6 +43,7 @@ def test_state_manager_passes_closed_motion_gate_as_boolean_parameter():
     description = launch.generate_launch_description()
     assert _default_argument(description, "follow_publish_cmd_vel") == "false"
     assert _default_argument(description, "follow_max_speed_mps") == "0.05"
+    assert _default_argument(description, "follow_target_distance_m") == "2.25"
 
     follow = next(
         entity
@@ -60,6 +61,11 @@ def test_state_manager_passes_closed_motion_gate_as_boolean_parameter():
     context = LaunchContext()
     context.launch_configurations["follow_max_speed_mps"] = "0.075"
     assert parameters[speed_key].evaluate(context) == 0.075
+    target_key = next(k for k in parameters
+                      if perform_substitutions(context, k) == "target_distance_m")
+    context.launch_configurations["follow_target_distance_m"] = "1.0"
+    assert parameters[target_key].value_type is float
+    assert parameters[target_key].evaluate(context) == 1.0
     parameter = parameters[key]
     assert isinstance(parameter, ParameterValue)
     assert parameter.value_type is bool
@@ -79,6 +85,7 @@ def test_full_simulation_forwards_motion_gate_without_enabling_it():
     description = launch.generate_launch_description()
     assert _default_argument(description, "follow_publish_cmd_vel") == "false"
     assert _default_argument(description, "follow_max_speed_mps") == "0.05"
+    assert _default_argument(description, "follow_target_distance_m") == "2.25"
     search_state_manager = next(
         entity
         for entity in description.entities
@@ -86,6 +93,9 @@ def test_full_simulation_forwards_motion_gate_without_enabling_it():
         and "follow_publish_cmd_vel" in dict(entity.launch_arguments)
     )
     forwarded = dict(search_state_manager.launch_arguments)["follow_publish_cmd_vel"]
+    context = LaunchContext()
+    context.launch_configurations["follow_target_distance_m"] = "1.0"
+    assert dict(search_state_manager.launch_arguments)["follow_target_distance_m"].perform(context) == "1.0"
     assert isinstance(forwarded, LaunchConfiguration)
     assert perform_substitutions(
         LaunchContext(), forwarded.variable_name
@@ -104,6 +114,7 @@ def test_search_launch_forwards_motion_gate_to_state_manager():
     description = launch.generate_launch_description()
     assert _default_argument(description, "follow_publish_cmd_vel") == "false"
     assert _default_argument(description, "follow_max_speed_mps") == "0.05"
+    assert _default_argument(description, "follow_target_distance_m") == "2.25"
     manager = next(
         entity
         for entity in description.entities
@@ -111,6 +122,9 @@ def test_search_launch_forwards_motion_gate_to_state_manager():
         and "follow_publish_cmd_vel" in dict(entity.launch_arguments)
     )
     forwarded = dict(manager.launch_arguments)["follow_publish_cmd_vel"]
+    context = LaunchContext()
+    context.launch_configurations["follow_target_distance_m"] = "1.0"
+    assert dict(manager.launch_arguments)["follow_target_distance_m"].perform(context) == "1.0"
     assert isinstance(forwarded, LaunchConfiguration)
     assert perform_substitutions(
         LaunchContext(), forwarded.variable_name

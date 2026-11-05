@@ -34,6 +34,10 @@ def generate_launch_description():
             description="Forward speed limit for manual FOLLOW in simulation.",
         ),
         DeclareLaunchArgument("follow_nav2_avoidance", default_value="false"),
+        DeclareLaunchArgument(
+            "follow_target_distance_m", default_value="2.25",
+            description="Desired FOLLOW distance in meters; must exceed 0.25.",
+        ),
         DeclareLaunchArgument("max_localization_age_sec", default_value="0.5"),
         DeclareLaunchArgument("tf_future_lead_sec", default_value="0.1"),
         Node(
@@ -65,6 +69,7 @@ def generate_launch_description():
                 "follow_use_sim_time": LaunchConfiguration("use_sim_time"),
                 "follow_publish_cmd_vel": LaunchConfiguration("follow_publish_cmd_vel"),
                 "follow_max_speed_mps": LaunchConfiguration("follow_max_speed_mps"),
+                "follow_target_distance_m": LaunchConfiguration("follow_target_distance_m"),
                 "follow_nav2_avoidance": LaunchConfiguration("follow_nav2_avoidance"),
             }.items(),
         ),

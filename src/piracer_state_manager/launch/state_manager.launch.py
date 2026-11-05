@@ -30,6 +30,10 @@ def generate_launch_description():
             description="Forward speed limit for manual FOLLOW in simulation.",
         ),
         DeclareLaunchArgument("follow_nav2_avoidance", default_value="false"),
+        DeclareLaunchArgument(
+            "follow_target_distance_m", default_value="2.25",
+            description="Desired FOLLOW distance in meters; must exceed 0.25.",
+        ),
         Node(
             package="piracer_state_manager",
             executable="state_manager_node",
@@ -60,6 +64,8 @@ def generate_launch_description():
                     value_type=bool,
                 ),
                 "max_speed_mps": ParameterValue(LaunchConfiguration("follow_max_speed_mps"), value_type=float),
+                "target_distance_m": ParameterValue(
+                    LaunchConfiguration("follow_target_distance_m"), value_type=float),
                 "publish_cmd_vel": ParameterValue(
                     LaunchConfiguration("follow_publish_cmd_vel"),
                     value_type=bool,

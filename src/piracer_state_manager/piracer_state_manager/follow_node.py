@@ -11,6 +11,7 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
+from rcl_interfaces.msg import ParameterDescriptor
 from ament_index_python.packages import get_package_share_directory
 from rclpy.clock import Clock, ClockType
 from rclpy.action import ActionClient
@@ -61,6 +62,8 @@ class PiracerFollowNode(Node):
     def __init__(self):
         super().__init__("piracer_follow")
         self._tf_node = self._tf_executor = self._tf_thread = self._tf_listener = None
+        self.declare_parameter(
+            "target_distance_m", 2.25, descriptor=ParameterDescriptor(read_only=True))
         defaults = {
             "enable_service": "/follow/enable",
             "detection_topic": "/yolo/detections",
@@ -78,8 +81,6 @@ class PiracerFollowNode(Node):
             "control_diagnostics_topic": "/piracer/follow/control_diagnostics",
             "publish_cmd_vel": False,
             "base_frame": "base_link",
-            "target_distance_m": 2.25,
-            "min_distance_m": 2.0,
             "distance_kp": 0.10,
             "distance_ki": 0.0,
             "distance_kd": 0.0,
@@ -330,9 +331,10 @@ class PiracerFollowNode(Node):
         return super().destroy_node()
 
     def _make_controller(self):
+        target_distance = float(self.get_parameter("target_distance_m").value)
         return FollowPController(
-            target_distance_m=float(self.get_parameter("target_distance_m").value),
-            min_distance_m=float(self.get_parameter("min_distance_m").value),
+            target_distance_m=target_distance,
+            min_distance_m=target_distance - 0.25,  # Existing 25 cm STOP margin.
             distance_kp=float(self.get_parameter("distance_kp").value),
             distance_ki=float(self.get_parameter("distance_ki").value),
             distance_kd=float(self.get_parameter("distance_kd").value),

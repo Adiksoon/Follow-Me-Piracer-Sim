@@ -50,6 +50,10 @@ def generate_launch_description():
             DeclareLaunchArgument("nav2_autostart", default_value="true"),
             DeclareLaunchArgument("follow_nav2_avoidance", default_value="true"),
             DeclareLaunchArgument(
+                "follow_target_distance_m", default_value="2.25",
+                description="Desired FOLLOW distance in meters; must exceed 0.25.",
+            ),
+            DeclareLaunchArgument(
                 "follow_publish_cmd_vel",
                 default_value="false",
                 description="Allow Follow to publish drive commands. Keep false for measurement-only runs.",
@@ -100,6 +104,7 @@ def generate_launch_description():
                     "use_sim_time": "true",
                     "follow_publish_cmd_vel": LaunchConfiguration("follow_publish_cmd_vel"),
                     "follow_max_speed_mps": LaunchConfiguration("follow_max_speed_mps"),
+                    "follow_target_distance_m": LaunchConfiguration("follow_target_distance_m"),
                     "follow_nav2_avoidance": LaunchConfiguration("follow_nav2_avoidance"),
                 }.items(),
             ),
