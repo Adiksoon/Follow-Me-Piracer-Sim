@@ -657,7 +657,9 @@ def _stamp_grid(grid, stamp_ns, frame_id="vo_odom"):
 def test_first_fresh_depth_hit_triggers_nav2_from_front_footprint(distance, expected_nav2):
     node = _integrated_cycle_node(
         local_grid=_stamp_grid(_grid(), 5_000_000_000),
-        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"))
+        global_grid=_stamp_grid(_grid(width=120), 5_000_000_000, "map"))
+    node._test_target.point.x = 5.0
+    node._tf_buffer.transform = lambda message, _frame: message
     node._latest_scan.ranges[50] = .246 + distance
     node._integrated_cycle(SimpleNamespace(linear_x=.05, angular_z=0.), node._test_target,
                            node._test_now_ns, node._test_monotonic_now)
@@ -678,6 +680,68 @@ def test_depth_obstacle_does_not_start_a_goal_when_follow_wants_to_stand_still()
     node._integrated_cycle(SimpleNamespace(linear_x=0., angular_z=0.), node._test_target,
                            node._test_now_ns, node._test_monotonic_now)
     assert not node._nav2_action.goals and node._last_selected_twist.linear.x == 0
+
+
+@pytest.mark.parametrize("hit,blocked", [(2.2, False), (.26, True)])
+def test_near_standoff_scan_only_blocks_the_remaining_footprint(hit, blocked):
+    from piracer_state_manager.follow_control import FollowPController
+
+    node = _integrated_cycle_node(
+        local_grid=_stamp_grid(_grid(), 5_000_000_000),
+        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"))
+    target = node._test_target.point
+    target.x, target.y = 2.27324498, .01837878
+    node._tf_buffer.transform = lambda message, _frame: message
+    node._latest_scan.ranges[50] = hit
+    command = FollowPController().update(target.x, target.y)
+    node._integrated_cycle(command, node._test_target,
+                           node._test_now_ns, node._test_monotonic_now)
+    assert bool(node._nav2_action.goals) is blocked
+    assert not node._fault_latched
+    if blocked:
+        assert node._last_selected_twist.linear.x == 0
+    else:
+        assert node._mode == DIRECT and node._last_selected_source == "direct"
+        assert node._last_selected_twist.linear.x == pytest.approx(command.linear_x)
+
+
+def test_near_standoff_repeated_cycles_and_moving_target_need_no_rearm():
+    from piracer_state_manager.follow_control import FollowPController
+    from rclpy.time import Time
+
+    node = _integrated_cycle_node(
+        local_grid=_stamp_grid(_grid(), 5_000_000_000),
+        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"))
+    controller = FollowPController()
+    node._tf_buffer.transform = lambda message, _frame: message
+    node._latest_scan.ranges[50] = 2.2
+    for index, distance in enumerate((2.2733, 2.2733, 2.2733, 2.25, 3.0)):
+        now_ns = node._test_now_ns + index * 100_000_000
+        node._test_target.point.x, node._test_target.point.y = distance, 0.
+        node._latest_target_point.header.stamp = Time(nanoseconds=now_ns).to_msg()
+        node._latest_target_received_monotonic = node._test_monotonic_now + index * .1
+        node._integrated_cycle(controller.update(distance, 0.), node._test_target,
+                               now_ns, node._latest_target_received_monotonic)
+        assert not node._nav2_action.goals and not node._fault_latched
+        if distance == 2.25:
+            assert node._last_selected_twist.linear.x == 0
+        else:
+            assert node._last_selected_source == "direct"
+            assert node._last_selected_twist.linear.x > 0
+
+
+def test_near_standoff_costmap_collision_still_stops_before_nav2():
+    node = _integrated_cycle_node(
+        local_grid=_stamp_grid(_grid(), 5_000_000_000),
+        global_grid=_stamp_grid(_grid(), 5_000_000_000, "map"))
+    node._test_target.point.x, node._test_target.point.y = 2.2733, 0.
+    node._tf_buffer.transform = lambda message, _frame: message
+    _set_world_cell(node._local_grid, .26, 0., 100)
+    node._integrated_cycle(SimpleNamespace(linear_x=.00233, angular_z=0.),
+                           node._test_target, node._test_now_ns, node._test_monotonic_now)
+    assert node._mode_reason == "imminent_swept_footprint_collision"
+    assert node._last_selected_twist.linear.x == 0
+    assert not node._nav2_action.goals
 
 
 def test_integrated_cycle_recovers_from_startup_data_wait_and_preserves_direct_p_output():

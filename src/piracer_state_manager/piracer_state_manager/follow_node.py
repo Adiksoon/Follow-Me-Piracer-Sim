@@ -1151,7 +1151,9 @@ class PiracerFollowNode(Node):
             float(command.linear_x), 0.0,
             max(0.0, math.hypot(dx, dy) - self._controller.target_distance_m),
         )
-        obstacle_ahead = not scan_clears_motion(self._latest_scan, (0., 0., 0.), 0., distance=2.)
+        # Obstacles beyond the intended stand-off must not trigger another goal.
+        obstacle_ahead = not scan_clears_motion(
+            self._latest_scan, (0., 0., 0.), 0., distance=min(2., remaining))
         danger = obstacle_ahead or not direct_clear or not target_clear
         if danger:
             self._direct_clear_since_ns = None

@@ -385,6 +385,7 @@ def test_follow_goal_uses_position_only_ackermann_tree(observation):
     import yaml
     from ament_index_python.packages import get_package_share_directory
     (n, t) = observation
+    n._latest_scan.ranges[20] = .5  # Obstacle before the intended stand-off.
     tick(n, t)
     goal = n._nav2_action.goals[-1]
     expected = Path(get_package_share_directory('piracer_navigation')) / 'behavior_trees/follow_navigate_to_pose.xml'
