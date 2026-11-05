@@ -13,6 +13,15 @@ from launch_ros.parameter_descriptions import ParameterValue
 SOURCE = Path(__file__).parents[1]
 
 
+def test_simulation_supplies_the_configured_low_obstacle_scan():
+    import yaml
+    params = yaml.safe_load((SOURCE / "config/acquire.yaml").read_text())["piracer_acquire"]["ros__parameters"]
+    assert params["scan_topic"] == "/piracer/obstacle_scan"
+    description = launch_description("piracer_sim.launch.py")
+    assert any(isinstance(entity, Node) and entity._Node__node_name == "obstacle_scan_node"
+               for entity in description.entities)
+
+
 def launch_description(filename):
     with patch("ament_index_python.packages.get_package_share_directory",
                side_effect=lambda package: "/share/" + package):

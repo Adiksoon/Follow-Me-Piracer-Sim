@@ -52,16 +52,15 @@ def test_planner_heading_changes_while_committed_xy_and_action_remain(owned_goal
     assert not node._nav2_action.goals and node._goal_state == "active"
 
 
-def test_historical_destination_uses_actual_committed_xy(owned_goal):
+def test_target_loss_keeps_the_committed_observation_xy(owned_goal):
     node = owned_goal
-    node._nav2_goal_offset = None
-    node._memory_goal = (4.84, .01, 0.)
+    node._memory_goal = (2.59, .01, 0.)
     tf = TransformStamped()
     tf.transform.rotation.w = 1.
     node._tf_buffer.lookup_transform = lambda *_: tf
     forward(node, (2., -.8))
     msg = node._nav2_goal_update_publisher.messages[-1]
-    assert (msg.pose.position.x, msg.pose.position.y) == pytest.approx((4.84, .01))
+    assert (msg.pose.position.x, msg.pose.position.y) == pytest.approx((2.59, .01))
 
 
 def test_new_heading_is_rejected_if_endpoint_footprint_becomes_occupied(owned_goal):

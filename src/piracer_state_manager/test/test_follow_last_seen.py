@@ -108,6 +108,23 @@ def valid_cycle(n, t, seconds=.1, command=None):
     n._integrated_cycle(command or NS(linear_x=.05,angular_z=0.),n._test_target,t.ros,t.wall)
 
 
+def prepare_control_cycle(n, t):
+    from piracer_state_manager.follow_control import FollowPController
+    from rclpy.clock import ClockType
+    n._controller = FollowPController(max_speed_mps=.075)
+    n._cycle_counts = {'timer_calls': 0, 'ros_time_zero_cycles': 0}
+    n._record_cycle = lambda *_: None
+    n._publish_control_sample = lambda *_: None
+    n._last_ros_time_ns = n._last_ros_time_advance_monotonic = None
+    n.get_clock = lambda: NS(now=lambda: Time(nanoseconds=t.ros), clock_type=ClockType.SYSTEM_TIME)
+    original = n.get_parameter
+    n.get_parameter = lambda key: NS(value='base_link') if key == 'base_frame' else original(key)
+    original_transform = n._tf_buffer.transform
+    n._tf_buffer.transform = lambda message, frame: NS(
+        header=NS(frame_id=frame, stamp=message.header.stamp),
+        point=original_transform(message, frame).point)
+
+
 def test_normal_goal_success_holds_without_a_false_failure_latch(episode):
     n, t, _ = episode
     n._on_nav2_goal_result(NS(result=lambda: NS(status=GoalStatus.STATUS_SUCCEEDED)))
@@ -262,18 +279,20 @@ def test_point_gap_keeps_exactly_one_owned_goal_for_either_detection_result(epis
     n._latest_detections.detections=[object()] if positive else []
     original=n._last_seen
     assert forward_memory(n,t)
-    assert n._memory_goal[:2]==pytest.approx(original[:2])
+    assert n._memory_goal[:2]==pytest.approx((n._nav2_action.goals[0].pose.pose.position.x,
+                                                     n._nav2_action.goals[0].pose.pose.position.y))
     assert n._goal_handle is h and h.cancels==0 and len(n._nav2_action.goals)==1
     assert n._last_seen==original and n._last_selected_source=='nav2'
     assert n._last_selected_twist.linear.x==pytest.approx(.04)
 
 
-def test_latest_observation_is_final_destination_without_replacing_active_approach(episode):
+def test_occupied_remembered_point_does_not_replace_committed_observation_goal(episode):
     n,t,h=episode
-    n._last_seen=(8.,0.,*n._last_seen[2:])
+    n._last_seen=(5.,0.,*n._last_seen[2:])
     _set_world_cell(n._global_grid, 5.,0.,100)
     forward_memory(n,t)
-    assert n._memory_goal[:2]==pytest.approx((8.,0.))
+    assert n._memory_goal[:2]==pytest.approx((n._nav2_action.goals[0].pose.pose.position.x,
+                                                     n._nav2_action.goals[0].pose.pose.position.y))
     assert n._goal_handle is h and h.cancels==0 and len(n._nav2_action.goals)==1
 
 
@@ -333,54 +352,30 @@ def test_failed_committed_memory_goal_never_retries(episode,status):
     assert len(n._nav2_action.goals)==1
 
 
-def test_successful_approach_waits_for_both_clocks_and_old_actions_before_final_goal(episode):
-    n,t,h=episode
-    forward_memory(n,t)
-    destination=n._memory_goal
-    original=n._last_seen
-    n._on_nav2_goal_result(NS(result=lambda:NS(status=GoalStatus.STATUS_SUCCEEDED)))
-    assert n._memory_goal==destination and n._goal_finish_action=='last_seen'
-    n._finish_goal_drain(t.ros,t.wall+.4)
-    tick(n,t)
-    assert n._goal_unresolved and n._last_selected_twist.linear.x==0
-    assert len(n._nav2_action.goals)==1 and n._memory_goal==destination
-    t.ros+=400_000_000
-    n._finish_goal_drain(t.ros,t.wall)
-    tick(n,t)
-    assert n._goal_unresolved and len(n._nav2_action.goals)==1
-    t.wall+=.4
-    n._latest_detections.header.stamp=Time(nanoseconds=t.ros).to_msg()
-    n._detection_receipt=t.wall
-    n._finish_goal_drain(t.ros,t.wall)
-    tick(n,t)
-    assert not n._goal_unresolved and not n._fault_latched
-    assert n._last_selected_twist.linear.x==0 and len(n._nav2_action.goals)==1
-    # No fresh detection during lingering action statuses still means zero wait.
-    n._latest_detections=None
-    tick(n,t)
-    assert n._memory_goal==destination and not n._fault_latched
-    n._latest_detections=NS(header=NS(stamp=Time(nanoseconds=t.ros).to_msg()),detections=[])
-    n._detection_receipt=t.wall
+def test_observation_success_drains_both_clocks_without_another_goal(episode):
+    n, t, h = episode
+    prepare_control_cycle(n, t)
+    forward_memory(n, t)
+    _set_world_cell(n._global_grid, *n._last_seen[:2], 100)
+    n._on_nav2_goal_result(NS(result=lambda: NS(status=GoalStatus.STATUS_SUCCEEDED)))
+    assert n._memory_goal is None and n._last_seen is None
+    assert n._nav2_goal_offset is None and n._nav2_goal_target_map is None
+    assert n._goal_finish_action == 'recover' and n._behavior_status() == 'AVOIDING'
+    assert n._last_selected_twist.linear.x == 0
+    n._finish_goal_drain(t.ros, t.wall + .4)
+    assert n._goal_unresolved and n._behavior_status() == 'AVOIDING'
+    t.ros += 400_000_000
+    n._finish_goal_drain(t.ros, t.wall)
+    assert n._goal_unresolved and n._behavior_status() == 'AVOIDING'
+    t.wall += .4
     n._active_actions.clear()
-    tick(n,t)
-    assert len(n._nav2_action.goals)==2 and n._goal_state=='sending'
-    goal=n._nav2_action.goals[-1].pose.pose
-    assert (goal.position.x,goal.position.y)==pytest.approx(original[:2])
-    assert n._last_seen==original
-    final=Handle(2)
-    n._on_nav2_goal_response(NS(result=lambda:final))
-    n._active_actions={'navigate_to_pose':{bytes(final.goal_id.uuid):(2,t.ros)},
-                       'follow_path':{b'final-path':(2,t.ros)}}
-    forward_memory(n,t)
-    assert n._last_selected_source=='nav2'
-    n._on_nav2_goal_result(NS(result=lambda:NS(status=GoalStatus.STATUS_SUCCEEDED)))
-    assert n._memory_goal is None and n._last_selected_twist.linear.x==0
-    n._active_actions.clear()
-    t.ros+=400_000_000;t.wall+=.4
-    n._finish_goal_drain(t.ros,t.wall)
+    n._finish_goal_drain(t.ros, t.wall)
     assert not n._goal_unresolved and not n._fault_latched
-    tick(n,t)
-    assert len(n._nav2_action.goals)==2
+    assert n._behavior_status() == 'DIRECT'
+    for _ in range(4):
+        n._control_cycle()
+        assert n._last_selected_twist.linear.x == 0
+    assert len(n._nav2_action.goals) == 1 and h.cancels == 0
 
 
 @pytest.mark.parametrize('result',[GoalStatus.STATUS_CANCELED,GoalStatus.STATUS_SUCCEEDED])
@@ -402,27 +397,114 @@ def test_clear_path_recovery_wins_over_racing_terminal_result(episode,result):
     assert not n._goal_unresolved and len(n._nav2_action.goals)==1
 
 
-@pytest.mark.parametrize('stage',['draining','idle','sending'])
-def test_reacquisition_prevents_pending_historical_leg(episode,stage):
-    n,t,h=episode
-    forward_memory(n,t)
-    n._on_nav2_goal_result(NS(result=lambda:NS(status=GoalStatus.STATUS_SUCCEEDED)))
-    if stage!='draining':
+@pytest.mark.parametrize('stage', ['active', 'draining', 'idle'])
+def test_reacquisition_uses_normal_control_without_a_historical_leg(episode, stage):
+    n, t, h = episode
+    prepare_control_cycle(n, t)
+    forward_memory(n, t)
+    if stage != 'active':
+        n._on_nav2_goal_result(NS(result=lambda: NS(status=GoalStatus.STATUS_SUCCEEDED)))
+    if stage == 'idle':
         n._active_actions.clear()
-        t.ros+=400_000_000;t.wall+=.4
-        n._latest_detections.header.stamp=Time(nanoseconds=t.ros).to_msg()
-        n._detection_receipt=t.wall
-        n._finish_goal_drain(t.ros,t.wall)
-    if stage=='sending':
-        tick(n,t)
-    before=len(n._nav2_action.goals)
-    reacquire_point(n,t)
-    assert n._memory_goal is None and n._last_selected_twist.linear.x==0
-    if stage=='sending':
-        final=Handle(2)
-        n._on_nav2_goal_response(NS(result=lambda:final))
-        assert final.cancels==0 and n._goal_state=='active'
-    elif stage=='draining':
-        assert n._goal_finish_action=='recover'
-    tick(n,t)
-    assert len(n._nav2_action.goals)==before
+        t.ros += 400_000_000
+        t.wall += .4
+        n._finish_goal_drain(t.ros, t.wall)
+    reacquire_point(n, t)
+    assert n._memory_goal is None and n._latest_target_received_monotonic == t.wall
+    n._control_cycle()
+    assert not n._fault_latched and n._last_seen is not None
+    if stage == 'active':
+        assert n._goal_handle is h and h.cancels == 0
+    elif stage == 'draining':
+        assert n._goal_unresolved and n._goal_finish_action == 'recover'
+        assert n._last_selected_twist.linear.x == 0
+    for goal in n._nav2_action.goals:
+        assert (goal.pose.pose.position.x, goal.pose.pose.position.y) != pytest.approx(n._last_seen[:2])
+
+
+@pytest.mark.parametrize('interference', [None, 'client', 'namespace', 'navigate', 'paths', 'publisher'])
+def test_idle_acquire_client_preserves_owned_memory_and_foreign_rejection(episode, interference):
+    n, t, handle = episode
+    clients = [NS(node_namespace='/', node_name='bt_navigator_navigate_to_pose_rclcpp_node'),
+               NS(node_namespace='/', node_name='piracer_acquire')]
+    n.get_subscriptions_info_by_topic = lambda _: clients
+    n._local_grid.data[:] = [0] * len(n._local_grid.data)
+    n._latest_scan.ranges = [2.8] * len(n._latest_scan.ranges)
+    if interference == 'client':
+        clients.append(NS(node_namespace='/', node_name='foreign_client'))
+    elif interference == 'namespace':
+        clients[1].node_namespace = '/foreign'
+    elif interference == 'navigate':
+        n._active_actions['navigate_to_pose'][b'foreign'] = (2, t.ros)
+    elif interference == 'paths':
+        n._active_actions['follow_path'][b'foreign'] = (2, t.ros)
+    elif interference == 'publisher':
+        original = n.get_publishers_info_by_topic
+        n.get_publishers_info_by_topic = lambda topic: original(topic) + [
+            NS(node_namespace='/', node_name='foreign_publisher')]
+    assert forward_memory(n, t)
+    assert n._goal_handle is handle and len(n._nav2_action.goals) == 1
+    if interference is None:
+        assert n._memory_goal is not None and n._last_selected_source == 'nav2'
+        assert n._last_selected_twist.linear.x == pytest.approx(.04)
+        assert handle.cancels == 0
+    else:
+        assert n._last_selected_twist.linear.x == 0
+        assert n._memory_goal is None
+
+
+def test_disable_ack_waits_for_observation_result_drain(episode):
+    n, t, _ = episode
+    forward_memory(n, t)
+    n._on_nav2_goal_result(NS(result=lambda: NS(status=GoalStatus.STATUS_SUCCEEDED)))
+    assert not n._set_enabled(NS(data=False), NS()).success
+    n._finish_goal_drain(t.ros, t.wall + .4)
+    assert not n._set_enabled(NS(data=False), NS()).success
+    t.ros += 400_000_000
+    t.wall += .4
+    n._finish_goal_drain(t.ros, t.wall)
+    assert n._set_enabled(NS(data=False), NS()).success
+    assert not n._goal_unresolved and n._last_selected_twist.linear.x == 0
+
+
+@pytest.mark.parametrize('can_acquire', [True, False])
+def test_observation_completion_releases_normal_state_handoff(episode, can_acquire):
+    from piracer_state_manager.state_machine import ACQUIRE, FOLLOW, SEARCH, StateMachine, BehaviorEnableCoordinator
+    from test_state_machine import frame
+    n, t, _ = episode
+    forward_memory(n, t)
+    machine = StateMachine()
+    for stamp in range(1, 8):
+        frame(machine, stamp, True, stamp / 10)
+    assert machine.state == FOLLOW
+    for stamp in range(8, 13):
+        machine.observe(stamp, False, stamp / 10, can_acquire=can_acquire,
+                        target_visible=False, hold_follow=n._behavior_status() == 'AVOIDING')
+    assert machine.state == FOLLOW and machine.miss_streak == 0
+    n._on_nav2_goal_result(NS(result=lambda: NS(status=GoalStatus.STATUS_SUCCEEDED)))
+    assert n._behavior_status() == 'AVOIDING'
+    t.ros += 400_000_000
+    t.wall += .4
+    n._finish_goal_drain(t.ros, t.wall)
+    assert n._behavior_status() == 'DIRECT'
+    for stamp in range(13, 16):
+        machine.observe(stamp, False, stamp / 10, can_acquire=can_acquire,
+                        target_visible=False, hold_follow=n._behavior_status() == 'AVOIDING')
+        if stamp < 15:
+            assert machine.state == FOLLOW
+    expected = ACQUIRE if can_acquire else SEARCH
+    assert machine.state == expected
+    coordinator = BehaviorEnableCoordinator(('search', 'acquire', 'follow'))
+    coordinator.confirmed.update(search=False, acquire=False, follow=True)
+    ready = {name: True for name in coordinator.behavior_names}
+    target = expected.lower()
+    assert coordinator.next_request(target, ready) == ('follow', False)
+    assert coordinator.begin('follow', False)
+    assert coordinator.next_request(target, ready) is None
+    assert not coordinator.complete('follow', False, False)
+    assert coordinator.next_request(target, ready) == ('follow', False)
+    assert coordinator.begin('follow', False)
+    response = n._set_enabled(NS(data=False), NS())
+    assert response.success and coordinator.complete('follow', False, response.success)
+    assert coordinator.next_request(target, ready) == (target, True)
+    assert len(n._nav2_action.goals) == 1

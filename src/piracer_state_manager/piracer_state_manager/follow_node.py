@@ -962,13 +962,10 @@ class PiracerFollowNode(Node):
             self._goal_finish_action = "recover"
         elif (self._memory_goal is not None and self._goal_cancel_reason is None
               and status == GoalStatus.STATUS_SUCCEEDED):
-            if self._nav2_goal_offset is not None:
-                self._standoff_id = bytes(self._goal_handle.goal_id.uuid)
-                self._goal_finish_action = "last_seen"
-            else:
-                self.get_logger().info("FOLLOW reached the last observed suitcase position")
-                self._memory_goal = self._last_seen = None
-                self._goal_finish_action = "recover"
+            self.get_logger().info("FOLLOW reached the observation goal after target loss")
+            self._memory_goal = self._last_seen = None
+            self._nav2_goal_offset = self._nav2_goal_target_map = None
+            self._goal_finish_action = "recover"
         elif self._memory_goal is not None:
             self._memory_goal = self._last_seen = None
             self._fault_latched = True
@@ -1019,12 +1016,7 @@ class PiracerFollowNode(Node):
         self._goal_terminal_ros_ns = None
         self._goal_terminal_status = None
         self._goal_finish_action = None
-        if (finish_action == "last_seen" and self._memory_goal is not None
-                and self._enabled and not self._fault_latched):
-            self._nav2_goal_offset = None
-            self._mode = NAV2_PENDING
-            self._mode_reason = "last_seen_destination_pending"
-        elif finish_action == "hold" and self._enabled and not self._fault_latched:
+        if finish_action == "hold" and self._enabled and not self._fault_latched:
             self._mode = NAV2_PENDING
             self._mode_reason = "nav2_goal_reached_waiting_target"
         elif finish_action == "refresh" and self._enabled and not self._fault_latched:
@@ -1264,17 +1256,17 @@ class PiracerFollowNode(Node):
             sources = self.get_publishers_info_by_topic(topic)
             if [(p.node_namespace, p.node_name) for p in sources] != [("/", publisher)]:
                 return False
-        # Each FollowPath action client subscribes to feedback. Only our two
-        # standard navigator BTs may drive the shared controller in this profile.
+        # ACQUIRE keeps its feedback subscription while disabled. The coordinator
+        # confirms its disable before FOLLOW; active-goal checks remain separate.
         clients = self.get_subscriptions_info_by_topic("/piracer/follow_nav/follow_path/_action/feedback")
         allowed = {"bt_navigator_navigate_to_pose_rclcpp_node",
-                   "bt_navigator_navigate_through_poses_rclcpp_node"}
+                   "bt_navigator_navigate_through_poses_rclcpp_node", "piracer_acquire"}
         return (bool(clients) and all(c.node_namespace == "/" and c.node_name in allowed
                                       for c in clients)
                 and not self._active_actions.get("navigate_through_poses"))
 
     def _try_last_seen(self, now_ns, wall, clock_stalled):
-        """Finish the approach, then navigate once to the last observed position."""
+        """Finish the committed observation goal while the target is absent."""
         self._direct_clear_since_ns = None
         if (not self._follow_nav2_avoidance or not self._publish_cmd_vel
                 or not self._enabled or self._fault_latched or self._last_seen is None):
@@ -1283,7 +1275,7 @@ class PiracerFollowNode(Node):
         if starting and (self._mode != NAV2 or self._goal_state != "active"
                          or self._goal_handle is None or self._goal_cancel_reason is not None):
             return False
-        x, y, stamp, receipt = self._last_seen
+        stamp, receipt = self._last_seen[2:]
         max_age = float(self.get_parameter("max_target_age_s").value)
         point_fresh = not starting and stamped_input_is_fresh(stamp, now_ns, wall-receipt, max_age, 0.0)
         detection = self._latest_detections
@@ -1320,22 +1312,14 @@ class PiracerFollowNode(Node):
         if not self._exclusive_nav_stream():
             self._safe_stop("last_seen_foreign_command_source")
             return True
-        if not starting and self._goal_state == "idle" and self._nav2_goal_offset is None:
-            nav = self._active_actions.get("navigate_to_pose", {})
-            if set(nav) - {self._standoff_id}:
-                self._safe_stop("foreign_nav2_goal", latch=True)
-                return True
-            if not nav and not self._active_actions.get("follow_path"):
-                self._mode = NAV2_PENDING
-                self._mode_reason = "last_seen_destination_pending"
-                self._send_nav_goal(self._memory_goal, self._memory_goal[:2], self.get_clock().now())
-            self._publish_selected_command(Twist(), "stop")
-            return True
         if not self._memory_command_owned() or starting and not self._detour_forwarded:
             self._safe_stop("awaiting_target_confirmation")
             return True
         if starting:
-            self._memory_goal = (x, y, math.atan2(y - map_y, x - map_x))
+            goal_x, goal_y = self._nav2_goal_target_map
+            offset_x, offset_y = self._nav2_goal_offset or (0.0, 0.0)
+            goal_x, goal_y = goal_x + offset_x, goal_y + offset_y
+            self._memory_goal = (goal_x, goal_y, math.atan2(goal_y - map_y, goal_x - map_x))
             self._mode_reason = "continuing_committed_nav2_goal"
         self._forward_nav_command(local, wall, blocked_cost=99, map_xy=(map_x, map_y))
         return True
