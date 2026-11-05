@@ -147,7 +147,7 @@ global_costmap:
       publish_frequency: 1.0
       resolution: 0.05
       footprint: "[[-0.020, -0.1085], [0.246, -0.1085], [0.246, 0.1085], [-0.020, 0.1085]]"
-      footprint_padding: 0.02
+      footprint_padding: 0.03
       track_unknown_space: true
       transform_tolerance: 0.20
       plugins: [static_layer, obstacle_layer, inflation_layer]
@@ -199,7 +199,7 @@ local_costmap:
       height: 2
       resolution: 0.05
       footprint: "[[-0.020, -0.1085], [0.246, -0.1085], [0.246, 0.1085], [-0.020, 0.1085]]"
-      footprint_padding: 0.02
+      footprint_padding: 0.03
       track_unknown_space: true
       transform_tolerance: 0.20
       plugins: [static_layer, obstacle_layer, inflation_layer]
