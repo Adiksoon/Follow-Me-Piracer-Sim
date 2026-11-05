@@ -11,12 +11,16 @@ def node(sim=True):
     clock = SimpleNamespace(nanoseconds=0)
     result = SimpleNamespace(
         machine=StateMachine(), _last_sim_time_ns=None, _sim_epoch_start_ns=0,
+        _acquire_attempt_id=None, _acquire_results_pending={},
+        _target_stamp=None, _target_received=None, _follow_status=None,
+        _follow_status_received=None, _follow_enabled_wall=None,
+        behavior_coordinator=SimpleNamespace(confirmed={"follow": False}),
         get_parameter=lambda name: SimpleNamespace(value=sim),
         get_clock=lambda: SimpleNamespace(now=lambda: clock),
         get_logger=Mock(return_value=Mock()), _log_events=Mock(),
         _publish_changes=Mock(), _sync_behavior_services=Mock(),
     )
-    for name in ("_freshness_now", "_on_detections", "_on_timer", "_on_enable"):
+    for name in ("_freshness_now", "_on_detections", "_on_timer", "_on_enable", "_point_fresh", "_check_follow_health", "_follow_avoiding"):
         setattr(result, name, MethodType(getattr(StateManagerNode, name), result))
     return result, clock
 

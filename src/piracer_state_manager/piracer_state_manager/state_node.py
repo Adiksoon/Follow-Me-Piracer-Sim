@@ -1,11 +1,14 @@
 """ROS adapter for the pure detector-driven state machine."""
 
+import json
+import math
 import time
 
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from geometry_msgs.msg import PointStamped
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
 from vision_msgs.msg import Detection2DArray
@@ -25,15 +28,17 @@ class StateManagerNode(Node):
         super().__init__("piracer_state_manager")
         defaults = {
             "detection_topic": "/yolo/detections",
+            "target_point_topic": "/piracer/follow/target_point",
             "search_enable_service": "/search/enable",
             "acquire_enable_service": "/acquire/enable",
+            "acquire_result_topic": "/piracer/acquire/result",
             "follow_enable_service": "/follow/enable",
             "acquire_hits": 2,
             "acquire_window": 3,
             "follow_confirm_hits": 5,
             "follow_lost_misses": 3,
             "detector_timeout_s": 2.0,
-            "acquire_timeout_s": 10.0,
+            "acquire_timeout_s": 30.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -43,14 +48,19 @@ class StateManagerNode(Node):
             for name, value in values.items()
             if name not in {
                 "detection_topic",
+                "target_point_topic",
                 "search_enable_service",
                 "acquire_enable_service",
+                "acquire_result_topic",
                 "follow_enable_service",
             }
         }
         self.machine = StateMachine(**state_machine_parameters)
         self._last_sim_time_ns = None
         self._sim_epoch_start_ns = 0
+        self._target_stamp = self._target_received = None
+        self._follow_status = self._follow_status_received = None
+        self._follow_enabled_wall = None
         output_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -79,8 +89,19 @@ class StateManagerNode(Node):
         self._handoff_wait_logged = False
         self._blocking_service_logged = None
         self._behavior_enable_dispatched = False
+        self._acquire_attempt_id = None
+        self._acquire_results_pending = {}
+        self.result_subscription = self.create_subscription(
+            String, values["acquire_result_topic"], self._on_acquire_result, 10
+        )
         self.subscription = self.create_subscription(
             Detection2DArray, values["detection_topic"], self._on_detections, qos_profile_sensor_data
+        )
+        self.point_subscription = self.create_subscription(
+            PointStamped, values["target_point_topic"], self._on_target_point, 1
+        )
+        self.follow_status_subscription = self.create_subscription(
+            String, "/piracer/follow/status", self._on_follow_status, output_qos
         )
         self.service = self.create_service(SetBool, "/piracer/state/enable", self._on_enable)
         steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
@@ -104,7 +125,8 @@ class StateManagerNode(Node):
 
     def _log_events(self, events):
         for event in events:
-            if event in ("SEARCH_TO_ACQUIRE", "ACQUIRE_TO_FOLLOW", "FOLLOW_TO_ACQUIRE"):
+            if event in ("SEARCH_TO_ACQUIRE", "ACQUIRE_TO_FOLLOW", "FOLLOW_TO_ACQUIRE",
+                         "FOLLOW_TO_SEARCH", "ACQUIRE_TO_SEARCH"):
                 self.get_logger().info(f"State transition: {event}")
             elif event == "NO_DATA":
                 self.get_logger().warning("NO_DATA: detector stream timed out; paused in SEARCH")
@@ -114,6 +136,8 @@ class StateManagerNode(Node):
                 self.get_logger().info("MANUAL_STOP: state manager disabled")
             elif event == "MANUAL_ENABLE":
                 self.get_logger().info("Manual enable: restarted in SEARCH")
+            elif event == "ACQUIRE_FINISHED":
+                self.get_logger().info("ACQUIRE finished; disabled for this entry")
             elif event == "ACQUIRE_TIMEOUT":
                 self.get_logger().info("ACQUIRE attempt timed out; returned to SEARCH")
 
@@ -126,21 +150,81 @@ class StateManagerNode(Node):
         self._last_sim_time_ns = now_ns
         if previous_ns is not None and now_ns < previous_ns:
             self.machine.invalidate_detector_data()
+            self._acquire_attempt_id = None
+            self._acquire_results_pending.clear()
+            self._target_stamp = self._target_received = None
+            self._follow_status = self._follow_status_received = None
             self._sim_epoch_start_ns = now_ns
             self.get_logger().warning("Simulation clock moved backwards; detector data invalidated")
             return None
         return now_ns / 1_000_000_000 if now_ns > 0 else None
+
+    def _point_fresh(self, limit=0.5):
+        if self._target_stamp is None or self._target_received is None:
+            return False
+        sec, ns = self._target_stamp
+        age = (self.get_clock().now().nanoseconds - (sec * 1_000_000_000 + ns)) / 1e9
+        return (0 <= age <= limit
+                and 0 <= time.monotonic() - self._target_received <= limit)
+
+    def _on_target_point(self, message):
+        now = self._freshness_now()
+        if now is None:
+            return
+        events = self.machine.tick(now)
+        stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
+        stamp_ns = stamp[0] * 1_000_000_000 + stamp[1]
+        age_ns = self.get_clock().now().nanoseconds - stamp_ns
+        valid = (stamp[0] >= 0 and 0 <= stamp[1] < 1_000_000_000
+                 and stamp_ns > 0 and stamp_ns >= self._sim_epoch_start_ns
+                 and 0 <= age_ns <= 500_000_000 and bool(message.header.frame_id)
+                 and all(math.isfinite(v) for v in (message.point.x, message.point.y, message.point.z)))
+        if valid and (self._target_stamp is None or stamp > self._target_stamp):
+            if not self._point_fresh():
+                self.machine.invalidate_target_confirmation()
+            self._target_stamp, self._target_received = stamp, time.monotonic()
+            events += self.machine.confirm_target(stamp, now)
+        self._log_events(events)
+        self._publish_changes()
+        self._sync_behavior_services()
+
+    def _on_follow_status(self, message):
+        if message.data not in {"DISABLED", "DIRECT", "AVOIDING", "FAULT"}:
+            return
+        self._follow_status, self._follow_status_received = message.data, time.monotonic()
+        self._check_follow_health()
+        self._publish_changes()
+        self._sync_behavior_services()
+
+    def _check_follow_health(self):
+        if self.behavior_coordinator.confirmed["follow"] is not True:
+            return
+        receipt = self._follow_status_received
+        start = self._follow_enabled_wall if receipt is None else receipt
+        if self._follow_status == "FAULT" or (start is not None and time.monotonic() - start > 0.5):
+            if self.machine.enabled:
+                self.get_logger().error("FOLLOW fault or missing status; manual enable required")
+                self._log_events(self.machine.set_enabled(False))
+
+    def _follow_avoiding(self):
+        return (self._follow_status == "AVOIDING" and self._follow_status_received is not None
+                and 0 <= time.monotonic() - self._follow_status_received <= 0.5
+                and self.behavior_coordinator.confirmed["follow"] is True)
 
     def _on_detections(self, message):
         now = self._freshness_now()
         stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
         events = []
         if now is not None:
+            self._check_follow_health()
             valid_epoch = True
             if self.get_parameter("use_sim_time").value:
                 stamp_ns = stamp[0] * 1_000_000_000 + stamp[1]
                 valid_epoch = 0 < stamp_ns and self._sim_epoch_start_ns <= stamp_ns <= self._last_sim_time_ns
-            events = (self.machine.observe(stamp, bool(message.detections), now)
+            events = (self.machine.observe(
+                stamp, bool(message.detections), now,
+                can_acquire=self._point_fresh(3.0), target_visible=self._point_fresh(),
+                hold_follow=self._follow_avoiding(), target_stamp=self._target_stamp)
                       if valid_epoch else self.machine.tick(now))
         self._log_events(events)
         self._publish_changes()
@@ -149,6 +233,9 @@ class StateManagerNode(Node):
     def _on_timer(self):
         now = self._freshness_now()
         events = [] if now is None else self.machine.tick(now)
+        if not self._point_fresh():
+            self.machine.invalidate_target_confirmation()
+        self._check_follow_health()
         self._log_events(events)
         self._publish_changes()
         self._sync_behavior_services()
@@ -156,6 +243,10 @@ class StateManagerNode(Node):
     def _on_enable(self, request, response):
         now = self._freshness_now()
         events = self.machine.set_enabled(request.data, 0.0 if now is None else now)
+        self._target_stamp = self._target_received = None
+        if not request.data:
+            self._acquire_attempt_id = None
+            self._acquire_results_pending.clear()
         response.success = True
         response.message = "enabled" if request.data else "stopped"
         self._log_events(events)
@@ -163,13 +254,36 @@ class StateManagerNode(Node):
         self._sync_behavior_services()
         return response
 
+    def _on_acquire_result(self, message):
+        try:
+            result = json.loads(message.data)
+            if (not isinstance(result, dict) or not isinstance(result.get("attempt_id"), str)
+                    or result.get("outcome") not in {"exhausted", "already_close", "blocked", "failed", "canceled"}):
+                return
+        except (ValueError, TypeError):
+            return
+        if self.behavior_coordinator.pending == ("acquire", True):
+            # The result may arrive before the corresponding enable response.
+            self._acquire_results_pending[result["attempt_id"]] = message
+            return
+        if result["attempt_id"] != self._acquire_attempt_id:
+            return
+        events = (self.machine.set_enabled(False) if result["outcome"] == "failed"
+                  else self.machine.finish_acquire(result["outcome"]))
+        if events:
+            self.get_logger().info(f"Acquire result: {message.data}")
+            self._log_events(events)
+            self._publish_changes()
+            self._sync_behavior_services()
+
+
     def _sync_behavior_services(self):
         if not self.machine.active:
             target = None
         elif self.machine.state == SEARCH:
             target = "search"
         elif self.machine.state == ACQUIRE:
-            target = "acquire"
+            target = None if self.machine.acquire_finished else "acquire"
         elif self.machine.state == FOLLOW:
             target = "follow"
         else:
@@ -245,6 +359,9 @@ class StateManagerNode(Node):
         behavior, enabled = requested
         if not self.behavior_coordinator.begin(behavior, enabled):
             return
+        if behavior == "acquire" and enabled:
+            self._acquire_attempt_id = None
+            self._acquire_results_pending.clear()
         request = SetBool.Request()
         request.data = enabled
         self._handoff_started_monotonic = time.monotonic()
@@ -281,11 +398,27 @@ class StateManagerNode(Node):
             succeeded = response.success
             detail = response.message
         accepted = self.behavior_coordinator.complete(behavior, enabled, succeeded)
+        if behavior == "follow":
+            if enabled and succeeded and accepted:
+                self._follow_status = self._follow_status_received = None
+                self._follow_enabled_wall = time.monotonic()
+        if behavior in ("follow", "acquire") and not enabled and "fault_latched=true" in detail:
+            # Fault results and service responses can arrive in either order.
+            self._log_events(self.machine.set_enabled(False))
+            self._publish_changes()
+        if behavior == "acquire" and enabled:
+            self._acquire_attempt_id = detail.partition("attempt_id=")[2] if succeeded and accepted else None
+            pending = self._acquire_results_pending.get(self._acquire_attempt_id)
+            self._acquire_results_pending.clear()
+        else:
+            pending = None
         if succeeded and accepted:
             self._handoff_failure_logged = False
             self.get_logger().info(
                 f"{behavior.capitalize()} {'enabled' if enabled else 'disabled'} by behavior state"
             )
+            if pending is not None:
+                self._on_acquire_result(pending)
             self._sync_behavior_services()
         elif not self._handoff_failure_logged:
             self._handoff_failure_logged = True

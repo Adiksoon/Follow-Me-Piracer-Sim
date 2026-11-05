@@ -132,7 +132,7 @@ def test_state_manager_command_topic_flag_is_case_insensitive():
 def test_adapter_gate_accepts_only_confirmed_owner_and_selected_input():
     adapter = (ROOT.parent / "piracer_gazebo_plugins/src/ackermann_twist_adapter.cpp").read_text()
     assert 'declare_parameter<bool>("require_behavior_owner", false)' in adapter
-    assert 'if (!require_behavior_owner_ || command_owner_ == "search")' in adapter
+    assert 'if (!require_behavior_owner_ || command_owner_ == "search" || command_owner_ == "acquire")' in adapter
     assert 'if (require_behavior_owner_ && command_owner_ == "follow")' in adapter
     assert 'command_publisher_->publish(geometry_msgs::msg::Twist{});' in adapter
     assert "have_received_command_ = false;" in adapter
@@ -155,7 +155,7 @@ def test_adapter_first_owner_update_emits_zero_and_unselected_input_cannot_refre
 
     search_subscription = adapter.split('"cmd_vel", 10,', 1)[1].split('"/cmd_vel_follow", 10,', 1)[0]
     follow_subscription = adapter.split('"/cmd_vel_follow", 10,', 1)[1].split('"/piracer/state/command_owner",', 1)[0]
-    assert 'if (!require_behavior_owner_ || command_owner_ == "search")' in search_subscription
+    assert 'if (!require_behavior_owner_ || command_owner_ == "search" || command_owner_ == "acquire")' in search_subscription
     assert 'if (require_behavior_owner_ && command_owner_ == "follow")' in follow_subscription
     assert search_subscription.count("accept_command(*input)") == 1
     assert follow_subscription.count("accept_command(*input)") == 1

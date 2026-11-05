@@ -20,18 +20,21 @@ class _PublisherSpy:
         self.messages.append(message)
 
 
-def test_acquire_still_refuses_enable_and_accepts_disable():
+def test_acquire_accepts_enable_but_without_inputs_does_not_dispatch():
     was_initialized = rclpy.ok()
     if not was_initialized:
         rclpy.init()
     node = AcquireNode()
     try:
         enable = node._set_enabled(SetBool.Request(data=True), SetBool.Response())
-        assert not enable.success
-        assert "not implemented" in enable.message
+        assert enable.success
+        assert "attempt_id=" in enable.message
+        node._tick()
+        assert node._operation is None
         disable = node._set_enabled(SetBool.Request(data=False), SetBool.Response())
         assert disable.success
     finally:
+        node._tf_receiver.close()
         node.destroy_node()
         if not was_initialized and rclpy.ok():
             rclpy.shutdown()

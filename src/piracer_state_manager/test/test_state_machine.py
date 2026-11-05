@@ -11,17 +11,21 @@ from piracer_state_manager.state_machine import (
 
 
 def frame(machine, stamp, positive, now):
-    return machine.observe(stamp, positive, now)
+    events = machine.observe(stamp, positive, now, can_acquire=True,
+                             target_visible=positive, target_stamp=stamp)
+    if positive:
+        events += machine.confirm_target(stamp, now)
+    return events
 
 
-def test_temporary_follow_activates_on_first_fresh_detection_frame():
+def test_initial_search_activates_on_first_valid_result():
     machine = StateMachine()
     assert machine.state == SEARCH and not machine.active
     assert frame(machine, 1, False, 0) == []
-    assert machine.active and machine.state == FOLLOW
+    assert machine.active and machine.state == SEARCH
 
 
-def test_temporary_follow_holds_state_while_detection_frames_are_fresh():
+def test_enabled_machine_uses_existing_detection_thresholds_to_reach_follow():
     machine = StateMachine()
     for i in range(1, 20):
         frame(machine, i, True, i / 10)
@@ -29,24 +33,12 @@ def test_temporary_follow_holds_state_while_detection_frames_are_fresh():
     assert machine.state == FOLLOW
 
 
-def test_temporary_follow_requires_fresh_data_and_manual_stop_stays_latched():
-    machine = StateMachine(detector_timeout_s=1.0)
-    assert frame(machine, (0, 0), True, 0.0) == []
-    assert not machine.active and machine.state == SEARCH
-
-    assert frame(machine, (1, 0), False, 0.1) == []
-    assert machine.active and machine.state == FOLLOW
-    assert machine.tick(1.1) == ["NO_DATA"]
-    assert not machine.active and machine.state == SEARCH
-
-    assert frame(machine, (2, 0), False, 1.2) == ["DATA_RECOVERED"]
-    assert machine.active and machine.state == FOLLOW
-    assert machine.set_enabled(False, 1.3) == ["MANUAL_STOP"]
-    assert frame(machine, (3, 0), True, 1.4) == []
-    assert not machine.active and machine.state == SEARCH
 
 
-@pytest.mark.skip(reason="Temporary FOLLOW-only mode; restore transition test after controller experiments.")
+
+
+
+
 def test_rolling_search_window_and_two_initial_hits():
     machine = StateMachine(acquire_hits=2, acquire_window=3)
     frame(machine, 1, True, 0)
@@ -62,7 +54,6 @@ def test_rolling_search_window_and_two_initial_hits():
     assert frame(machine, 5, True, .4) == ["SEARCH_TO_ACQUIRE"]
 
 
-@pytest.mark.skip(reason="Temporary FOLLOW-only mode; restore transition test after controller experiments.")
 def test_transition_entry_frame_is_not_reused():
     machine = StateMachine()
     for i in range(1, 7):
@@ -72,9 +63,8 @@ def test_transition_entry_frame_is_not_reused():
     assert machine.state == FOLLOW  # Five new positives after entry (frames 3-7).
 
 
-@pytest.mark.skip(reason="Temporary FOLLOW-only mode; restore transition test after controller experiments.")
 def test_acquire_miss_resets_streak_and_sightings_do_not_extend_deadline():
-    machine = StateMachine(detector_timeout_s=20)
+    machine = StateMachine(detector_timeout_s=20, acquire_timeout_s=10)
     frame(machine, 1, True, 0)
     frame(machine, 2, True, .1)
     frame(machine, 3, True, .2)
@@ -89,7 +79,6 @@ def test_acquire_miss_resets_streak_and_sightings_do_not_extend_deadline():
     assert machine.state == SEARCH
 
 
-@pytest.mark.skip(reason="Temporary FOLLOW-only mode; restore transition test after controller experiments.")
 def test_follow_requires_consecutive_misses_and_hit_resets():
     machine = StateMachine()
     for i in range(1, 8):
@@ -105,9 +94,8 @@ def test_follow_requires_consecutive_misses_and_hit_resets():
     assert machine.state == ACQUIRE
 
 
-@pytest.mark.skip(reason="Temporary FOLLOW-only mode; restore transition test after controller experiments.")
 def test_acquire_expires_at_deadline_even_with_sightings_and_misses_do_not_exit():
-    machine = StateMachine(detector_timeout_s=20)
+    machine = StateMachine(detector_timeout_s=20, acquire_timeout_s=10)
     frame(machine, 1, True, 0)
     frame(machine, 2, True, .1)
     frame(machine, 3, False, .2)
@@ -131,7 +119,7 @@ def test_detector_timeout_ignores_bad_stamps_and_recovers_with_reset_stamp():
     assert machine.tick(2) == ["NO_DATA"]
     assert machine.state == SEARCH and not machine.active
     assert frame(machine, (1, 0), False, 2.1) == ["DATA_RECOVERED"]
-    assert machine.active and machine.state == FOLLOW
+    assert machine.active and machine.state == SEARCH
 
 
 def test_manual_stop_stays_latched_through_data_recovery():
@@ -147,9 +135,8 @@ def test_manual_stop_stays_latched_through_data_recovery():
     assert machine.state == SEARCH
 
 
-@pytest.mark.skip(reason="Temporary FOLLOW-only mode; restore transition test after controller experiments.")
 def test_deadlines_are_applied_before_same_time_frame_and_frame_counted_once():
-    machine = StateMachine(detector_timeout_s=20)
+    machine = StateMachine(detector_timeout_s=20, acquire_timeout_s=10)
     frame(machine, 1, True, 0)
     frame(machine, 2, True, .1)
     frame(machine, 3, False, .2)
@@ -164,9 +151,9 @@ def test_deadlines_are_applied_before_same_time_frame_and_frame_counted_once():
 def test_one_multi_box_message_is_one_positive_and_empty_is_negative():
     machine = StateMachine()
     frame(machine, 1, True, 0)  # nonempty array, regardless of box count
-    assert machine.state == FOLLOW
+    assert machine.state == SEARCH
     frame(machine, 2, False, .1)  # empty array
-    assert machine.state == FOLLOW
+    assert machine.state == SEARCH
 
 
 def test_configuration_validation():
@@ -178,15 +165,29 @@ def test_configuration_validation():
         StateMachine(acquire_hits=4, acquire_window=3)
 
 
+
+
+def test_normal_completion_preserves_existing_timeout_and_detection_rules():
+    machine = StateMachine(detector_timeout_s=20, acquire_timeout_s=10)
+    frame(machine, 1, True, 0.0)
+    frame(machine, 2, True, 0.1)
+    assert machine.finish_acquire() == ["ACQUIRE_FINISHED"]
+    assert machine.state == ACQUIRE
+    frame(machine, 3, False, 1.0)
+    assert machine.acquire_finished
+    assert machine.tick(10.2) == ["ACQUIRE_TIMEOUT"]
+    assert machine.state == SEARCH and not machine.acquire_finished
+
+
 def test_source_stamps_must_be_strictly_increasing_and_valid():
     machine = StateMachine()
     frame(machine, (12, 100), True, 0)
     frame(machine, (12, 99), True, .5)
     frame(machine, (12, 100), True, .6)
-    assert machine.state == FOLLOW
+    assert machine.state == SEARCH
     assert machine.last_receipt_time == 0
     frame(machine, (12, 101), True, .7)
-    assert machine.state == FOLLOW
+    assert machine.state == ACQUIRE
     assert machine.last_receipt_time == .7
 
 

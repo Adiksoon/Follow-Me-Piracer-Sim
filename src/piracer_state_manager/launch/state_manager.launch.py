@@ -10,6 +10,7 @@ def generate_launch_description():
     package_share = get_package_share_directory("piracer_state_manager")
     return LaunchDescription([
         DeclareLaunchArgument("use_sim_time", default_value="false"),
+        DeclareLaunchArgument("acquire_params_file", default_value=package_share + "/config/acquire.yaml"),
         DeclareLaunchArgument(
             "search_enable_service",
             default_value="/search/enable",
@@ -52,6 +53,11 @@ def generate_launch_description():
             executable="acquire_node",
             name="piracer_acquire",
             output="screen",
+            parameters=[
+                LaunchConfiguration("acquire_params_file"),
+                {"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool),
+                 "standoff_m": ParameterValue(LaunchConfiguration("follow_target_distance_m"), value_type=float)},
+            ],
         ),
         Node(
             package="piracer_state_manager",

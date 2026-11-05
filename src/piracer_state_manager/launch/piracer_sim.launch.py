@@ -25,14 +25,15 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument("acquire_params_file", default_value=PathJoinSubstitution(
+                [state_manager_share, "config", "acquire.yaml"])),
             DeclareLaunchArgument("gui", default_value="true"),
             DeclareLaunchArgument(
                 "start_paused",
                 default_value="true",
                 description=(
                     "Start Gazebo paused. Unpause it after checking the launched graph; "
-                    "fresh detector messages currently select FOLLOW; automatic "
-                    "SEARCH and ACQUIRE transitions are inactive."
+                    "fresh detector messages activate the SEARCH/ACQUIRE/FOLLOW state machine."
                 ),
             ),
             DeclareLaunchArgument("world", default_value=""),
@@ -102,6 +103,7 @@ def generate_launch_description():
                     "max_localization_age_sec": "1.0",
                     "tf_future_lead_sec": "0.2",
                     "use_sim_time": "true",
+                    "acquire_params_file": LaunchConfiguration("acquire_params_file"),
                     "follow_publish_cmd_vel": LaunchConfiguration("follow_publish_cmd_vel"),
                     "follow_max_speed_mps": LaunchConfiguration("follow_max_speed_mps"),
                     "follow_target_distance_m": LaunchConfiguration("follow_target_distance_m"),

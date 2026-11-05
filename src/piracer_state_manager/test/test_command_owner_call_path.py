@@ -32,7 +32,7 @@ class _StateNodeHarness:
     """Minimal fields consumed by the real StateManagerNode method."""
 
     def __init__(self, state, active, confirmed, pending=None, services_ready=True):
-        self.machine = SimpleNamespace(state=state, active=active)
+        self.machine = SimpleNamespace(state=state, active=active, acquire_finished=False)
         self.behavior_coordinator = BehaviorEnableCoordinator(
             ('search', 'acquire', 'follow'))
         self.behavior_coordinator.confirmed.update(confirmed)
@@ -74,10 +74,25 @@ def test_real_state_node_sync_publishes_lowercase_follow_and_search_owners():
     (FOLLOW, False, {'search': False, 'acquire': False, 'follow': False}, None, True),
     (FOLLOW, True, {'search': False, 'acquire': False, 'follow': True}, ('follow', True), True),
     (FOLLOW, True, {'search': False, 'acquire': False, 'follow': None}, ('follow', False), True),
-    (ACQUIRE, True, {'search': False, 'acquire': True, 'follow': False}, None, True),
     (FOLLOW, True, {'search': None, 'acquire': False, 'follow': True}, None, False),
 ])
 def test_real_state_node_sync_fails_closed_without_exclusive_confirmed_owner(
         state, active, confirmed, pending, services_ready):
     assert _owner_through_state_node(
         state, active, confirmed, pending, services_ready) == 'stop'
+
+
+def test_real_state_node_sync_grants_acquire_owner_on_exclusive_confirmation():
+    assert _owner_through_state_node(
+        ACQUIRE, True, {"search": False, "acquire": True, "follow": False}) == "acquire"
+
+
+def test_completed_acquire_immediately_publishes_stop_even_if_disable_service_unavailable():
+    node = _StateNodeHarness(
+        ACQUIRE, True, {"search": False, "acquire": True, "follow": False},
+        services_ready=False)
+    node.machine.acquire_finished = True
+    StateManagerNode._sync_behavior_services(node)
+    assert node.owners == ["stop"]
+    assert node.behavior_coordinator.confirmed["acquire"] is True
+    assert node.behavior_coordinator.pending is None

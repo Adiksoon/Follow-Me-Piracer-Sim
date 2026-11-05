@@ -42,7 +42,7 @@ def test_search_uses_xy_checker_and_other_trees_keep_general_checker():
     config = yaml.safe_load((ROOT / "config/nav2_params.yaml").read_text())
     controller = config["controller_server"]["ros__parameters"]
     assert controller["goal_checker_plugins"] == [
-        "general_goal_checker", "search_goal_checker",
+        "general_goal_checker", "search_goal_checker", "acquire_goal_checker",
     ]
     assert controller["search_goal_checker"] == {
         "plugin": "nav2_controller::PositionGoalChecker",
@@ -52,6 +52,10 @@ def test_search_uses_xy_checker_and_other_trees_keep_general_checker():
         "plugin": "nav2_controller::SimpleGoalChecker",
         "stateful": True, "xy_goal_tolerance": 0.05,
         "yaw_goal_tolerance": 0.15,
+    }
+    assert controller["acquire_goal_checker"] == {
+        "plugin": "nav2_controller::PositionGoalChecker",
+        "stateful": False, "xy_goal_tolerance": 0.05,
     }
     search_bt = (ROOT.parent / "piracer_search/behavior_trees"
                  / "search_navigate_to_pose.xml")

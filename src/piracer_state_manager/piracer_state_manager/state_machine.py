@@ -1,6 +1,7 @@
-"""Small, ROS-independent SEARCH/ACQUIRE/FOLLOW state machine."""
+"""ROS-independent SEARCH/ACQUIRE/FOLLOW state machine."""
 
 import math
+from collections import deque
 
 
 SEARCH = "SEARCH"
@@ -13,13 +14,14 @@ def confirmed_command_owner(target, active, confirmed, pending):
     if not active or pending is not None or not isinstance(target, str):
         return "stop"
     target_name = target.lower()
-    if target_name not in (SEARCH.lower(), FOLLOW.lower()):
+    if target_name not in (SEARCH.lower(), ACQUIRE.lower(), FOLLOW.lower()):
         return "stop"
     if confirmed.get(target_name) is not True:
         return "stop"
     if any(name != target_name and value is not False for name, value in confirmed.items()):
         return "stop"
     return target_name
+
 
 
 class BehaviorEnableCoordinator:
@@ -73,7 +75,7 @@ class StateMachine:
         follow_confirm_hits=5,
         follow_lost_misses=3,
         detector_timeout_s=2.0,
-        acquire_timeout_s=10.0,
+        acquire_timeout_s=30.0,
     ):
         for name, value in (
             ("acquire_hits", acquire_hits),
@@ -90,6 +92,7 @@ class StateMachine:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a positive finite duration")
         self.acquire_hits = acquire_hits
+        self.search_hits = deque(maxlen=acquire_window)
         self.follow_confirm_hits = follow_confirm_hits
         self.follow_lost_misses = follow_lost_misses
         self.detector_timeout_s = float(detector_timeout_s)
@@ -98,16 +101,24 @@ class StateMachine:
         self.active = False
         self.data_paused = False
         self.state = SEARCH
+        self.acquire_finished = False
         self.last_receipt_time = None
         self.last_stamp = None
         self.acquire_started = None
         self.hit_streak = 0
         self.miss_streak = 0
+        self._confirmation_stamp = None
 
-    def _reset_state(self, state=SEARCH, now=None):
+    def _reset_state(self, state=None, now=None):
+        if state is None:
+            state = SEARCH
+        if state != ACQUIRE or self.state != ACQUIRE:
+            self.acquire_finished = False
         self.state = state
+        self.search_hits.clear()
         self.hit_streak = 0
         self.miss_streak = 0
+        self._confirmation_stamp = self.last_stamp if state == ACQUIRE else None
         self.acquire_started = now if state == ACQUIRE else None
 
     def invalidate_detector_data(self):
@@ -139,7 +150,8 @@ class StateMachine:
         """Apply wall-clock deadlines; return event labels for one-time logging."""
         return self._apply_deadlines(float(now))
 
-    def observe(self, stamp, positive, now):
+    def observe(self, stamp, positive, now, *, can_acquire=False,
+                target_visible=False, hold_follow=False, target_stamp=None):
         """Process one Detection2DArray header stamp and target-filtered result."""
         now = float(now)
         events = self._apply_deadlines(now)
@@ -169,25 +181,66 @@ class StateMachine:
         self.active = self.enabled
         if not self.enabled:
             return events
-        # TEMPORARY: force FOLLOW while implementing and testing its controller.
-        self._reset_state(FOLLOW)
-        return events
+        if self.state == SEARCH:
+            self.search_hits.append(bool(positive))
+            if sum(self.search_hits) >= self.acquire_hits and can_acquire:
+                self._reset_state(ACQUIRE, now)
+                if target_stamp is not None:
+                    self._confirmation_stamp = max(stamp, target_stamp)
+                events.append("SEARCH_TO_ACQUIRE")
+            return events
 
         if self.state == ACQUIRE:
-            self.hit_streak = self.hit_streak + 1 if positive else 0
-            if self.hit_streak >= self.follow_confirm_hits:
-                self._reset_state(FOLLOW)
-                events.append("ACQUIRE_TO_FOLLOW")
+            if not positive:
+                self.invalidate_target_confirmation()
+                self._confirmation_stamp = stamp
         elif self.state == FOLLOW:
-            self.miss_streak = 0 if positive else self.miss_streak + 1
+            self.miss_streak = 0 if hold_follow or positive and target_visible else self.miss_streak + 1
             if self.miss_streak >= self.follow_lost_misses:
-                self._reset_state(ACQUIRE, now)
-                events.append("FOLLOW_TO_ACQUIRE")
+                self._reset_state(ACQUIRE if can_acquire else SEARCH, now)
+                if can_acquire and target_stamp is not None:
+                    self._confirmation_stamp = max(stamp, target_stamp)
+                events.append("FOLLOW_TO_ACQUIRE" if can_acquire else "FOLLOW_TO_SEARCH")
         return events
 
+    def confirm_target(self, stamp, now):
+        """Count each new valid 3D observation once, separately from YOLO frames."""
+        events = self.tick(now)
+        if not self.active or not self.enabled or self.data_paused:
+            return events
+        if self.state == SEARCH and sum(self.search_hits) >= self.acquire_hits:
+            self._reset_state(ACQUIRE, now)
+            self._confirmation_stamp = max(self.last_stamp, stamp)
+            return events + ["SEARCH_TO_ACQUIRE"]
+        if self.state != ACQUIRE or stamp <= self._confirmation_stamp:
+            return events
+        self._confirmation_stamp = stamp
+        self.hit_streak += 1
+        if self.hit_streak >= self.follow_confirm_hits:
+            self._reset_state(FOLLOW)
+            events.append("ACQUIRE_TO_FOLLOW")
+        return events
+
+    def invalidate_target_confirmation(self):
+        self.hit_streak = 0
+
+    def finish_acquire(self, outcome="already_close"):
+        """Normal completion releases to SEARCH; faults retain manual STOP."""
+        if not self.active or self.state != ACQUIRE or self.acquire_finished:
+            return []
+        if outcome == "failed":
+            return self.set_enabled(False)
+        if outcome != "already_close":
+            self._reset_state(SEARCH)
+            return ["ACQUIRE_TO_SEARCH"]
+        self.acquire_finished = True
+        return ["ACQUIRE_FINISHED"]
+
     def set_enabled(self, enabled, now=None):
-        """Latch manual enable/stop and restart behavioral state at SEARCH."""
+        """Latch manual enable/stop and restart at SEARCH."""
         self.enabled = bool(enabled)
+        if self.enabled:
+            self.acquire_finished = False
         self._reset_state()
         if not self.enabled:
             self.active = False

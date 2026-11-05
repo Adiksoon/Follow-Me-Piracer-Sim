@@ -277,6 +277,7 @@ def test_enable_dispatch_guard_survives_manual_stop_and_reenable():
     node = manager()
     node._behavior_enable_dispatched = True
     node.machine.set_enabled = Mock(return_value=[])
+    node._acquire_results_pending = {}
     node._freshness_now = Mock(return_value=1.0)
     node._log_events = Mock()
     node._publish_changes = Mock()

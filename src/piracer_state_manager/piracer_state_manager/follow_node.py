@@ -275,6 +275,11 @@ class PiracerFollowNode(Node):
             str(self.get_parameter("control_diagnostics_topic").value),
             10,
         )
+        self._status_publisher = self.create_publisher(
+            String, "/piracer/follow/status",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
 
         # A steady timer continues to send zero if simulation time pauses.
         # Message age still uses ROS time and the target's original stamp.
@@ -286,7 +291,7 @@ class PiracerFollowNode(Node):
             raise ValueError("max_target_age_s must be finite and positive")
         self._control_timer = self.create_timer(
             1.0 / control_rate_hz,
-            self._control_cycle,
+            self._control_tick,
             clock=Clock(clock_type=ClockType.STEADY_TIME),
         )
         # Only the thread-safe TF buffer is shared with this receiver.
@@ -554,6 +559,7 @@ class PiracerFollowNode(Node):
                 if response.success
                 else "Follow disabled; waiting for Nav2 terminal result and smoother drain"
             )
+            response.message += f"; fault_latched={str(self._fault_latched).lower()}"
             return response
         if was_enabled:
             self._publish_zero()
@@ -1476,6 +1482,19 @@ class PiracerFollowNode(Node):
         message.data = json.dumps(summary, separators=(",", ":"), allow_nan=False)
         self._control_diagnostics_publisher.publish(message)
         self._last_diagnostics_monotonic = monotonic_now
+
+    def _control_tick(self):
+        self._control_cycle()
+        self._status_publisher.publish(String(data=self._behavior_status()))
+
+    def _behavior_status(self):
+        if not self._enabled:
+            return "DISABLED"
+        if self._fault_latched:
+            return "FAULT"
+        if self._follow_nav2_avoidance and (self._goal_unresolved or self._memory_goal is not None):
+            return "AVOIDING"
+        return "DIRECT"
 
     def _control_cycle(self):
         monotonic_now = time.monotonic()

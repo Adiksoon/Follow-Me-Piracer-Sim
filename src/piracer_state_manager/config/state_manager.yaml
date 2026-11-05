@@ -7,4 +7,4 @@ piracer_state_manager:
     follow_confirm_hits: 5
     follow_lost_misses: 3
     detector_timeout_s: 2.0
-    acquire_timeout_s: 10.0
+    acquire_timeout_s: 30.0

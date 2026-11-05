@@ -27,7 +27,7 @@ public:
       "cmd_vel", 10,
       [this](geometry_msgs::msg::Twist::ConstSharedPtr input)
       {
-        if (!require_behavior_owner_ || command_owner_ == "search") {
+        if (!require_behavior_owner_ || command_owner_ == "search" || command_owner_ == "acquire") {
           accept_command(*input);
         }
       });

@@ -24,6 +24,7 @@ def generate_launch_description():
             description="OccupancyGrid topic consumed by Search.",
         ),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
+        DeclareLaunchArgument("acquire_params_file", default_value=package_share + "/config/acquire.yaml"),
         DeclareLaunchArgument(
             "follow_publish_cmd_vel",
             default_value="false",
@@ -66,6 +67,7 @@ def generate_launch_description():
             launch_arguments={
                 "search_enable_service": search_service,
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
+                "acquire_params_file": LaunchConfiguration("acquire_params_file"),
                 "follow_use_sim_time": LaunchConfiguration("use_sim_time"),
                 "follow_publish_cmd_vel": LaunchConfiguration("follow_publish_cmd_vel"),
                 "follow_max_speed_mps": LaunchConfiguration("follow_max_speed_mps"),

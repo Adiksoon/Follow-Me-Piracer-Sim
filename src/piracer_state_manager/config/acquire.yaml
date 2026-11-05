@@ -1,0 +1,24 @@
+piracer_acquire:
+  ros__parameters:
+    max_maneuvers: 3
+    turn_radius_m: 0.75
+    turn_angle_rad: 0.3
+    goal_checker_id: acquire_goal_checker
+    standoff_m: 2.2
+    max_goal_distance_m: 0.5
+    max_path_length_m: 1.0
+    max_travel_distance_m: 1.2
+    stop_margin_m: 0.15
+    max_maneuver_time_s: 30.0
+    observation_max_age_s: 3.0
+    max_target_shift_m: 0.25
+    localization_max_age_s: 1.0
+    scan_max_age_s: 1.0
+    plan_max_age_s: 2.0
+    start_tolerance_m: 0.10
+    start_yaw_tolerance_rad: 0.3
+    end_tolerance_m: 0.15
+    stop_linear_mps: 0.02
+    stop_angular_radps: 0.05
+    stop_confirmation_s: 2.0
+    stop_position_tolerance_m: 0.01

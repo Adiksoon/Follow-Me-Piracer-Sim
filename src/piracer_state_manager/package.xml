@@ -25,5 +25,7 @@
   <exec_depend>piracer_navigation</exec_depend>
   <exec_depend>piracer_search</exec_depend>
   <exec_depend>robot_perception</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>unique_identifier_msgs</test_depend>
   <export><build_type>ament_python</build_type></export>
 </package>

@@ -28,7 +28,7 @@ def test_command_owner_is_stop_until_exclusive_service_confirmation():
                                   coordinator.pending) == "search"
 
 
-def test_owner_stops_on_manual_disable_failure_or_unactuated_acquire():
+def test_owner_stops_on_manual_disable_failure_or_unconfirmed_acquire():
     confirmed = {"search": False, "acquire": False, "follow": True}
     assert confirmed_command_owner(FOLLOW, True, confirmed, None) == "follow"
     assert confirmed_command_owner(FOLLOW, True, confirmed, ("follow", False)) == "stop"
@@ -37,3 +37,12 @@ def test_owner_stops_on_manual_disable_failure_or_unactuated_acquire():
     assert confirmed_command_owner(
         FOLLOW, True, {"search": None, "acquire": False, "follow": True}, None
     ) == "stop"
+
+
+def test_acquire_gets_exclusive_owner_only_after_all_disable_and_enable_acks():
+    confirmed = {"search": False, "acquire": True, "follow": False}
+    assert confirmed_command_owner(ACQUIRE, True, confirmed, None) == "acquire"
+    for pending in (("acquire", True), ("acquire", False)):
+        assert confirmed_command_owner(ACQUIRE, True, confirmed, pending) == "stop"
+    assert confirmed_command_owner(ACQUIRE, False, confirmed, None) == "stop"
+    assert confirmed_command_owner(None, True, confirmed, None) == "stop"
