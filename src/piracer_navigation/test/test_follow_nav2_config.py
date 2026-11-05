@@ -28,7 +28,7 @@ def test_local_and_global_costmaps_share_static_and_live_scan_layers():
         assert depth["marking"] and depth["clearing"]
         assert depth["inf_is_valid"] is False
         assert params["footprint"] == global_params["footprint"]
-        assert params["footprint_padding"] == 0.03
+        assert params["footprint_padding"] == 0.02
     assert local_params["global_frame"] == "vo_odom"
     assert local_params["rolling_window"] is True
     assert local_params["resolution"] == global_params["resolution"] == 0.05
