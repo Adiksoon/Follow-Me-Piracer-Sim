@@ -293,6 +293,7 @@ def test_enable_dispatch_guard_survives_manual_stop_and_reenable():
 
 @pytest.mark.parametrize("pending,confirmed", [
     (("search", False), {"search": None, "acquire": None, "follow": None}),
+    (("acquire", False), {"search": False, "acquire": None, "follow": None}),
     (("follow", False), {"search": False, "acquire": False, "follow": None}),
     (("search", False), {"search": False, "acquire": False, "follow": False}),
 ])
@@ -459,3 +460,43 @@ def test_completed_future_at_timeout_boundary_is_not_discarded(monkeypatch):
     node._sync_behavior_services()
     assert node.behavior_coordinator.confirmed["search"] is False
     assert not node.behavior_clients["search"].remove_pending_request.called
+
+
+def test_initial_acquire_disable_retries_and_requires_the_current_ack(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr('piracer_state_manager.state_node.time.monotonic', lambda: now[0])
+    node = manager(state=FOLLOW)
+    node.get_parameter.return_value.value = True
+    node._sync_behavior_services()
+    node._handoff_future.set_result(SimpleNamespace(success=True, message='search stopped'))
+    old_future = node._handoff_future
+    assert node.behavior_coordinator.pending == ('acquire', False)
+    now[0] = 4.99
+    node._sync_behavior_services()
+    assert node.behavior_clients['acquire'].call_async.call_count == 1
+    now[0] = 5.0
+    node._sync_behavior_services()
+    node._sync_behavior_services()
+    current = node._handoff_future
+    assert old_future.cancelled() and current is not old_future
+    node._on_behavior_enable_result('acquire', False, old_future)
+    assert node._handoff_future is current
+    assert node.behavior_clients['follow'].call_async.call_count == 0
+    assert node.behavior_coordinator.confirmed == {'search': False, 'acquire': None, 'follow': None}
+    current.set_result(SimpleNamespace(success=True, message='acquire stopped'))
+    assert node.behavior_coordinator.pending == ('follow', False)
+    node._handoff_future.set_result(SimpleNamespace(success=True, message='follow stopped'))
+    assert node.behavior_coordinator.pending == ('follow', True)
+
+
+def test_initial_acquire_disable_is_not_time_retried_on_hardware(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr('piracer_state_manager.state_node.time.monotonic', lambda: now[0])
+    node = manager(state=FOLLOW)
+    node._sync_behavior_services()
+    node._handoff_future.set_result(SimpleNamespace(success=True, message='search stopped'))
+    previous = node._handoff_future
+    now[0] = 5.0
+    node._sync_behavior_services()
+    assert node._handoff_future is previous and not previous.cancelled()
+    assert node.behavior_clients['acquire'].call_async.call_count == 1

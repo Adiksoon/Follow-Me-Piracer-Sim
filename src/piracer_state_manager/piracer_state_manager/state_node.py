@@ -316,11 +316,17 @@ class StateManagerNode(Node):
                     and confirmed.get("acquire") is False
                     and confirmed.get("follow") is None
                 )
+                initial_acquire_disable = (
+                    pending == ("acquire", False)
+                    and confirmed.get("search") is False
+                    and confirmed.get("acquire") is None
+                    and confirmed.get("follow") is None
+                )
                 if (
                     elapsed >= 5.0
                     and self.get_parameter("use_sim_time").value
                     and not self._behavior_enable_dispatched
-                    and (initial_search_disable or initial_follow_disable)
+                    and (initial_search_disable or initial_acquire_disable or initial_follow_disable)
                     and self._handoff_future is not None
                     and not self._handoff_future.done()
                 ):
