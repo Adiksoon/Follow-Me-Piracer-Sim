@@ -22,9 +22,10 @@ def select_target_point(estimates, image_width, image_height):
             continue
         box = estimate.source_detection.bbox
         x, y = box.center.position.x, box.center.position.y
-        if (x - box.size_x / 2 <= 0 or x + box.size_x / 2 >= image_width
-                or y - box.size_y / 2 <= 0 or y + box.size_y / 2 >= image_height):
-            continue  # A clipped box's center pixel can fall on the background.
+        # Fractional bounds can leave a clipped detection just inside the image.
+        if (x - box.size_x / 2 <= 1.0 or x + box.size_x / 2 >= image_width - 1.0
+                or y - box.size_y / 2 <= 1.0 or y + box.size_y / 2 >= image_height - 1.0):
+            continue
         valid.append(estimate)
     if not valid:
         return None

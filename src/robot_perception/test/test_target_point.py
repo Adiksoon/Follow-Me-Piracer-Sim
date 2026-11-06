@@ -87,6 +87,9 @@ def test_returns_none_when_no_estimate_has_a_valid_point():
     (10., 180., 20., 80.), (630., 180., 20., 80.),
     (320., 20., 40., 40.), (320., 340., 40., 40.),
     (8.435725212097168, 144.022705078125, 16.871450424194336, 95.92831420898438),
+    (11., 180., 20., 80.), (629., 180., 20., 80.),
+    (320., 21., 40., 40.), (320., 339., 40., 40.),
+    (17.197505950927734, 164.13043212890625, 34.355628967285156, 107.61337280273438),
 ])
 def test_clipped_box_is_rejected_even_with_valid_background_depth(x,y,w,h):
     clipped = _estimate(0, .95, _point(0., 0., 1.))
@@ -98,7 +101,11 @@ def test_clipped_box_is_rejected_even_with_valid_background_depth(x,y,w,h):
     assert select_target_point([clipped, complete]) is complete.point
 
 
-def test_complete_box_near_border_remains_eligible():
+@pytest.mark.parametrize('x,y', [
+    (21.01, 180.), (618.99, 180.), (320., 41.01), (320., 318.99),
+])
+def test_complete_box_near_border_remains_eligible(x, y):
     complete = _estimate(0, .5, _point(0., 0., 3.))
-    complete.source_detection.bbox.center.position.x = 20.01
+    center = complete.source_detection.bbox.center.position
+    center.x, center.y = x, y
     assert select_target_point([complete]) is complete.point
