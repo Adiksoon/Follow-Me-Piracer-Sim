@@ -553,6 +553,8 @@ def _integrated_cycle_node(mode=DIRECT, local_grid=None, global_grid=None):
     )
     target = SimpleNamespace(point=SimpleNamespace(x=2.839554, y=0.013049, z=0.0))
     node = object.__new__(PiracerFollowNode)
+    node._pending_target_point = None
+    node._target_input_stamp_ns = None
     node._memory_goal = node._last_seen = None
     node._nav2_goal_offset = None
     node._enabled = True

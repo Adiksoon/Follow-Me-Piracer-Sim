@@ -387,7 +387,7 @@ class PiracerFollowNode(Node):
         if not self._follow_nav2_avoidance:
             self._accept_target_point(message, received)
             return
-        previous = getattr(self, "_target_input_stamp_ns", None)
+        previous = self._target_input_stamp_ns
         if previous is not None and stamp <= previous:
             return
         self._target_input_stamp_ns = stamp
@@ -405,12 +405,12 @@ class PiracerFollowNode(Node):
             self._latest_target_received_monotonic = None
             self._safe_stop("target_map_tf_invalid")
             return
-        if getattr(self, "_pending_target_point", None) is None:
+        if self._pending_target_point is None:
             self._pending_target_point = (message, received)
             self._retry_target_point()
 
     def _retry_target_point(self):
-        pending = getattr(self, "_pending_target_point", None)
+        pending = self._pending_target_point
         if pending is None:
             return False
         if self._fault_latched:
@@ -499,7 +499,7 @@ class PiracerFollowNode(Node):
 
     def _on_odom_info(self, message):
         if message.lost and (self._last_seen is not None
-                             or getattr(self, "_pending_target_point", None) is not None):
+                             or self._pending_target_point is not None):
             self._safe_stop("lost_or_stale_localization")
         self._odom_info = message
         self._odom_info_received_monotonic = time.monotonic()
@@ -1132,8 +1132,7 @@ class PiracerFollowNode(Node):
             self._publish_selected_command(Twist(), "stop")
             return
 
-        remaining = max(0.0, float(base_target.point.x) ** 2 +
-                        float(base_target.point.y) ** 2) ** 0.5
+        remaining = max(0.0, target_x ** 2 + target_y ** 2) ** 0.5
         remaining = max(0.0, remaining - self._controller.target_distance_m)
         horizon = min(0.6, remaining)
         direct_clear, collision_distance = swept_footprint_clear(
