@@ -64,46 +64,12 @@ through Nav2. To disable all behaviors, call `/piracer/state/enable` with
 its motion checks pass. See the [State Manager guide](../piracer_state_manager/README.md)
 for behavior transitions, command ownership and detector weights.
 
-## Historical DATA-01 suitcase dataset capture
+## DATA-01 dataset tools
 
-The commands below refer to the frozen DATA-01 inputs. The current classroom
-world differs from the approved capture world and fails its hash check.
-
-The dataset generator is installed as `suitcase_dataset_generator.py`. Without
-`--capture`, it plans camera viewpoints and checks the approved world and mesh
-offline; it does not contact ROS or start Gazebo. For example, to inspect a
-20-view pilot plan:
-
-```bash
-ros2 run robot_simulation suitcase_dataset_generator.py --sample-count 20
-```
-
-To capture that pilot, start the independent dataset-camera simulation in one
-terminal:
-
-```bash
-ros2 launch robot_simulation dataset_capture.launch.py scene:=production_room
-```
-
-After the launch is ready, run the generator in a second terminal:
-
-```bash
-ros2 run robot_simulation suitcase_dataset_generator.py --capture --sample-count 20
-```
-
-The default capture output is written under `verification/datasets/` in a
-timestamped `suitcase_pilot_*` directory. Capture mode uses the already-running
-DATA-01 camera session; it does not launch Gazebo itself. Diagnostic single
-captures use the separate `--diagnostic-single-shot` mode and require an
-explicit output directory.
-
-DATA-01 pins the exact source worlds, suitcase mesh, and furniture models before
-planning or capture. After removing the unused world-level `gazebo_ros_state`
-plugin on 2026-10-25, the production world SHA-256 is
-`a2db8fa83e785b87629c93dd750ec76e4744f44113989ed68e1eee70cdefe188`. This is now
-the production-world pin in both `dataset_capture.launch.py` and
-`suitcase_dataset_generator.py`. The independent empty-world, mesh, and furniture
-hashes remain unchanged; all integrity checks stay enabled.
+The historical generator, capture launch, 19 tests and pinned inputs are
+available on `archive/data01` at `5cf1f3a752b2b3f1f6c93199eea4f898ede510d9`.
+Use a separate checkout of that branch for dataset work. Its README lists
+the capture commands and the frozen scene requirements.
 
 ## Production classroom scene details
 
