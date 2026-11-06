@@ -54,16 +54,20 @@ behavior entrypoint is:
 ros2 launch piracer_state_manager piracer_sim.launch.py
 ```
 
-Gazebo starts paused by default. After inspecting the graph, press Play to
-advance simulation time and produce sensor data. The State Manager currently
-selects FOLLOW after each fresh detector message; automatic SEARCH and ACQUIRE
-transitions are inactive. `follow_publish_cmd_vel` defaults to `false`. Setting
-it to `true` permits Follow to publish drive output when its input, time, TF,
-localization, costmap, footprint, and command ownership checks pass; it does not
-guarantee movement. Use `start_paused:=false` only when automatic startup without
-an inspection pause is intended. This launcher does not start RViz.
+Gazebo starts paused. After checking the ROS graph, press Play to advance
+simulation time. The State Manager starts SEARCH after fresh detector data
+arrives and selects ACQUIRE and FOLLOW as observations are confirmed.
 
-## DATA-01 suitcase dataset capture
+`follow_publish_cmd_vel` defaults to `false`. SEARCH and ACQUIRE can still move
+through Nav2. To disable all behaviors, call `/piracer/state/enable` with
+`data: false`. Set `follow_publish_cmd_vel:=true` to allow FOLLOW output after
+its motion checks pass. See the [State Manager guide](../piracer_state_manager/README.md)
+for behavior transitions, command ownership and detector weights.
+
+## Historical DATA-01 suitcase dataset capture
+
+The commands below refer to the frozen DATA-01 inputs. The current classroom
+world differs from the approved capture world and fails its hash check.
 
 The dataset generator is installed as `suitcase_dataset_generator.py`. Without
 `--capture`, it plans camera viewpoints and checks the approved world and mesh
