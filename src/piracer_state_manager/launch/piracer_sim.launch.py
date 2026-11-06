@@ -45,7 +45,7 @@ def generate_launch_description():
             DeclareLaunchArgument("start_zone_enabled", default_value="true"),
             DeclareLaunchArgument("start_zone_radius", default_value="1.5"),
             DeclareLaunchArgument(
-                "follow_max_speed_mps", default_value="0.05", choices=["0.05", "0.075"],
+                "follow_max_speed_mps", default_value="0.075", choices=["0.05", "0.075"],
                 description="Forward speed limit for manual FOLLOW in simulation.",
             ),
             DeclareLaunchArgument("nav2_autostart", default_value="true"),
