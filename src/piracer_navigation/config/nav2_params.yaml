@@ -158,17 +158,7 @@ global_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
-        observation_sources: scan depth_obstacles
-        scan:
-          topic: /piracer/scan
-          data_type: LaserScan
-          marking: true
-          max_obstacle_height: 2.0
-          clearing: true
-          obstacle_min_range: 0.05
-          obstacle_max_range: 3.0
-          raytrace_min_range: 0.05
-          raytrace_max_range: 3.0
+        observation_sources: depth_obstacles
         depth_obstacles:
           topic: /piracer/obstacle_scan
           data_type: LaserScan
@@ -210,17 +200,7 @@ local_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
-        observation_sources: scan depth_obstacles
-        scan:
-          topic: /piracer/scan
-          data_type: LaserScan
-          marking: true
-          max_obstacle_height: 2.0
-          clearing: true
-          obstacle_min_range: 0.05
-          obstacle_max_range: 3.0
-          raytrace_min_range: 0.05
-          raytrace_max_range: 3.0
+        observation_sources: depth_obstacles
         depth_obstacles:
           topic: /piracer/obstacle_scan
           data_type: LaserScan

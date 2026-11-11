@@ -13,20 +13,19 @@ def test_local_and_global_costmaps_share_static_and_live_scan_layers():
     local_params = config["local_costmap"]["local_costmap"]["ros__parameters"]
     assert global_params["plugins"] == ["static_layer", "obstacle_layer", "inflation_layer"]
     assert local_params["plugins"] == ["static_layer", "obstacle_layer", "inflation_layer"]
-    assert global_params["obstacle_layer"]["scan"]["max_obstacle_height"] == 2.0
-    assert local_params["obstacle_layer"]["scan"]["max_obstacle_height"] == 2.0
     for params in (global_params, local_params):
         assert params["static_layer"]["map_topic"] == "/map"
         assert params["static_layer"]["map_subscribe_transient_local"] is True
-        assert params["obstacle_layer"]["scan"] == global_params["obstacle_layer"]["scan"]
-        assert params["obstacle_layer"]["scan"]["topic"] == "/piracer/scan"
-        assert params["obstacle_layer"]["scan"]["data_type"] == "LaserScan"
-        assert params["obstacle_layer"]["observation_sources"] == "scan depth_obstacles"
-        depth = params["obstacle_layer"]["depth_obstacles"]
+        layer = params["obstacle_layer"]
+        assert layer["observation_sources"] == "depth_obstacles"
+        assert "scan" not in layer
+        depth = layer["depth_obstacles"]
+        assert depth == global_params["obstacle_layer"]["depth_obstacles"]
         assert depth["topic"] == "/piracer/obstacle_scan"
         assert depth["data_type"] == "LaserScan"
         assert depth["marking"] and depth["clearing"]
         assert depth["inf_is_valid"] is False
+        assert depth["max_obstacle_height"] == 2.0
         assert params["footprint"] == global_params["footprint"]
         assert params["footprint_padding"] == 0.03
     assert local_params["global_frame"] == "vo_odom"

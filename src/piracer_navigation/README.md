@@ -171,7 +171,7 @@ goal remains BLOCKED_AT_D1; D2 and D3 have not been evaluated.
   internal odometry estimator is launched and no `cfg` INI is misused as ROS
   YAML. The system package is absent; the task-local overlay described above
   supplies the executable for the prepared launch.
-- Obstacle conversion: installed ROS 2 Humble `depthimage_to_laserscan` 2.5.1.
+- Historical D0/D1 obstacle conversion: ROS 2 Humble `depthimage_to_laserscan` 2.5.1.
   No upstream source code is copied.
 - Navigation: installed ROS 2 Humble Nav2 1.1.20, using its registered Smac
   Hybrid planner and Regulated Pure Pursuit controller plugins.
@@ -208,8 +208,12 @@ consumes. There is no command gate, central STOP latch, or arbitration between
 simultaneous publishers. Keep only one command source active. Nav2 and Follow
 retain their own configured speed limits; the adapter itself does not enforce
 the removed gate's scan, VO, TF, clock, command-shape, or manual-arm checks.
-The depth-to-scan converter and Nav2 obstacle layers remain available for
-costmaps, but they do not act as a movement interlock in this direct path.
+
+`slam_nav2.launch.py` starts `robot_perception/obstacle_scan_node`, which
+publishes a height-filtered `LaserScan` on `/piracer/obstacle_scan`. The full
+`piracer_sim.launch.py` includes this launch and uses the same publisher.
+This topic is the sole scan source for both Nav2 costmaps and also supplies
+ACQUIRE and integrated FOLLOW.
 
 The previous odometry bridge fallback and standalone mapping profile are
 archived under `artefakty/piracer_navigation/`; they are not part of the active

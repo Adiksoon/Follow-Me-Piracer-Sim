@@ -89,13 +89,6 @@ def generate_launch_description():
                 name="suitcase_point_node",
                 output="screen",
             ),
-            Node(
-                package="robot_perception",
-                executable="obstacle_scan_node",
-                name="obstacle_scan_node",
-                parameters=[{"use_sim_time": True}],
-                output="screen",
-            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(search_state_manager_launch),
                 launch_arguments={

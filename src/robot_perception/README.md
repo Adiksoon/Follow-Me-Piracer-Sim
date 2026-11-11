@@ -28,10 +28,9 @@ the historical `ros2_ws/` workspace.
   `/piracer/follow/target_point`. If no valid point is available, it publishes
   nothing. The node does not track detections between frames.
 - `scripts/obstacle_scan_node` samples the depth image across its height and
-  publishes a height-filtered `LaserScan` on `/piracer/obstacle_scan`. Integrated
-  Follow and both Nav2 costmaps use it to detect low obstacles that the existing
-  horizontal scan can miss. It uses the original image timestamp and TF into
-  `base_link`; it does not command motion.
+  publishes a height-filtered `LaserScan` on `/piracer/obstacle_scan` using the
+  original image timestamp and TF into `base_link`. The navigation launch starts
+  this node for both Nav2 costmaps, ACQUIRE and integrated FOLLOW.
 - `piracer_sim_base.launch.py` defaults this backend to the retained model under
   `verification/yolo11n_same_frame_20261008/weights/yolo11n.onnx` when no
   explicit `yolo_model_path` is supplied. YOLO remains disabled by default in
