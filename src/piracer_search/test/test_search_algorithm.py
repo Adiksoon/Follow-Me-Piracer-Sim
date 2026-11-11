@@ -111,7 +111,7 @@ class SearchAlgorithmTest(unittest.TestCase):
                          [c["cluster_id"] for c in result["candidates"]])
         self.assertEqual(result["candidates"][0]["id"], result["recommended"])
 
-    def test_equal_frontier_costs_use_bfs_access_then_anchor(self):
+    def test_equal_frontier_costs_use_anchor_even_with_bfs_detour(self):
         width, height = 20, 18
         data = [0] * (width * height)
         data[8 * width + 3] = data[8 * width + 15] = -1
@@ -127,8 +127,8 @@ class SearchAlgorithmTest(unittest.TestCase):
         data[8 * width + 7] = 100  # Force a detour to the left cluster.
         first, second = evaluate_search(grid, robot)["cluster_candidates"]
         self.assertEqual(first["score"], second["score"])
-        self.assertLess(first["distance_m"], second["distance_m"])
-        self.assertEqual([[3.875, 1.875], [0.875, 1.875]],
+        self.assertGreater(first["distance_m"], second["distance_m"])
+        self.assertEqual([[0.875, 1.875], [3.875, 1.875]],
                          [first["anchor_world"], second["anchor_world"]])
 
     def test_reachable_viewpoints_remain_distinct_when_clusters_share_best_point(self):

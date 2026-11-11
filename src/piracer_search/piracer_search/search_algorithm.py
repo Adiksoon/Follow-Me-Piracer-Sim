@@ -361,7 +361,7 @@ def evaluate_search(grid, robot_pose):
         c["cluster_size"] = c["size"]
         c["source_frontier_world"] = _cell_world(origin, resolution, best[5])
         c["source_seed_world"] = list(best[8])
-    ranked = sorted(coarse, key=lambda c: (-c["score"], c["distance_m"], c["anchor_world"][1], c["anchor_world"][0]))
+    ranked = sorted(coarse, key=lambda c: (-c["score"], c["anchor_world"][1], c["anchor_world"][0]))
     cluster_candidates = []
     for c in ranked:
         public = {k: v for k, v in c.items() if k != "options"}

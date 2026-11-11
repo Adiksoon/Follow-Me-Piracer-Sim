@@ -8,8 +8,8 @@ node. It groups FREE cells bordering UNKNOWN on a side into deterministic
 Here `r` is the map resolution, `d` is the minimum Euclidean distance in
 world metres from the robot position to a frontier cell centre in the cluster,
 and `n` is its frontier cell count. The node uses `score = -C`. Equal scores
-are ordered by increasing BFS access distance, then by the anchor's world Y
-and X. Candidate poses receive a full known-FREE footprint check at their
+are ordered by increasing anchor coordinates in world Y, then world X.
+Candidate poses receive a full known-FREE footprint check at their
 approach yaw, with nearby alternatives limited to 0.30 m. Nav2 plans the route.
 
 The node subscribes to its configured map topic and `/visual_vo/odom_info_lite`.
