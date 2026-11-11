@@ -2121,6 +2121,52 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual("higher_scoring_candidate", node._active_goal["cancel_reason"])
         self.assertIsNotNone(node._replacement_proposal)
 
+    def test_frontier_cost_improvement_switches_at_margin_after_active_cluster_splits(self):
+        width, height = 20, 18
+        data = [0] * (width * height)
+        for y in range(8, 15):
+            data[y * width + 3] = -1
+        data[8 * width + 15] = -1
+        initial_grid = {"width": width, "height": height, "resolution": 0.25,
+                        "origin": [0.0, 0.0, 0.0], "data": data}
+        initial_pose = (2.175, 2.125, 0.0)
+        active, challenger = self.module.evaluate_search(initial_grid, initial_pose)["candidates"]
+
+        split_data = list(data)
+        for y in range(9, 14):
+            split_data[y * width + 3] = 0
+        split_grid = dict(initial_grid, data=split_data)
+        for improvement, should_switch in ((0.06, False), (0.10, True), (0.14, True)):
+            with self.subTest(improvement=improvement):
+                node = self.make_node()
+                node._localization_pose = lambda frame: initial_pose
+                self.assertTrue(node._send_goal(active, "/tree.xml"))
+                handle = FakeHandle()
+                node._goal_response(Future(handle), node._pending_goal["token"])
+                node._now_ns = node._goal_switch_deadline_ns
+
+                # The two closest fragments to the left and right have equal
+                # sizes. Moving right of their midpoint improves the right
+                # cluster's cost by 2 * 3 * resolution times the displacement.
+                pose = (2.375 + improvement / 1.5, 2.125, 0.0)
+                node._grid = lambda: split_grid
+                node._localization_pose = lambda frame: pose
+                result = self.module.evaluate_search(split_grid, pose)
+                records = []
+                node._logger.info = records.append
+                node._consider_goal_switch(
+                    result, {c["id"]: c for c in result["candidates"]})
+
+                record = json.loads(records[0])
+                self.assertEqual(2, record["matched_clusters"])
+                self.assertAlmostEqual(improvement, record["delta"])
+                self.assertEqual(int(should_switch), handle.cancel_count)
+                if should_switch:
+                    self.assertEqual(challenger["cluster_id"],
+                                     node._replacement_proposal["candidate"]["cluster_id"])
+                else:
+                    self.assertIsNone(node._replacement_proposal)
+
     def test_goal_switch_diagnostic_records_keep_and_switch_decisions(self):
         for challenger_score, expected_decision, expected_reason in (
                 (0.29, "KEEP", "score_delta_below_margin"),

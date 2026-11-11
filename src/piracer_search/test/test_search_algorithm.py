@@ -57,7 +57,7 @@ class SearchAlgorithmTest(unittest.TestCase):
         ]}
         self.assertIsNone(match_active_frontiers(grid, old, result))
 
-    def test_goal02_visible_gain_cost_matches_independent_expected_geometry(self):
+    def test_goal02_frontier_cost_with_independent_expected_geometry(self):
         fixtures = FIXTURES
         source = json.loads((fixtures / "search_goal02_v5_cases.json").read_text())
         expected = json.loads((fixtures / "search_goal02_v5_expected.json").read_text())
@@ -77,8 +77,7 @@ class SearchAlgorithmTest(unittest.TestCase):
         robot = ((rx + 0.5) * resolution, (ry + 0.5) * resolution, case["robot"]["yaw_world"])
         result = evaluate_search(occupancy, robot)
 
-        # Preserve the hand-authored Goal02 frontier geometry while checking
-        # the current cluster-access costs and ranking below.
+        # Preserve the hand-authored Goal02 frontier geometry.
         self.assertIs(expected["expected_results_hand_authored"], True)
         oracle = next(item for item in expected["search_cases"] if item["case_id"] == case["case_id"])
         self.assertEqual([[6, 4], [4, 6]], oracle["frontier_cells"])
@@ -89,10 +88,76 @@ class SearchAlgorithmTest(unittest.TestCase):
         clusters = result["cluster_candidates"]
         self.assertEqual([1, 1], [c["cluster_size"] for c in clusters])
         self.assertEqual([0.0, 0.5], [c["cost_m"] for c in clusters])
-        self.assertAlmostEqual(0.5, clusters[0]["score"])
-        self.assertAlmostEqual(0.0, clusters[1]["score"])
+        self.assertAlmostEqual(-0.25 * (3.0 * math.sqrt(0.125) - 1.0), clusters[0]["score"])
+        self.assertAlmostEqual(-0.25 * (3.0 * math.sqrt(0.625) - 1.0), clusters[1]["score"])
         self.assertTrue(all("cluster_access_distance_m" in c for c in result["candidates"]))
         self.assertEqual([c["id"] for c in result["candidates"]], result["ranking"])
+
+    def test_larger_cluster_can_win_at_greater_euclidean_distance_in_rotated_map(self):
+        width, height = 20, 18
+        data = [0] * (width * height)
+        for x, y in ((4, 8), (13, 8), (13, 9)):
+            data[y * width + x] = -1
+        grid = {"width": width, "height": height, "resolution": 0.25,
+                "origin": [4.0, -2.0, math.pi / 2], "data": data}
+        # Local robot XY is (2.0, 2.125), between cell centres along X.
+        result = evaluate_search(grid, (1.875, 0.0, 0.0))
+        large, small = result["cluster_candidates"]
+        self.assertEqual([6, 4], [large["cluster_size"], small["cluster_size"]])
+        self.assertAlmostEqual(-0.25 * (3.0 * 1.125 - 6.0), large["score"])
+        self.assertAlmostEqual(-0.25 * (3.0 * 0.625 - 4.0), small["score"])
+        self.assertGreater(large["distance_m"], small["distance_m"])
+        self.assertEqual([large["cluster_id"], small["cluster_id"]],
+                         [c["cluster_id"] for c in result["candidates"]])
+        self.assertEqual(result["candidates"][0]["id"], result["recommended"])
+
+    def test_equal_frontier_costs_use_bfs_access_then_anchor(self):
+        width, height = 20, 18
+        data = [0] * (width * height)
+        data[8 * width + 3] = data[8 * width + 15] = -1
+        grid = {"width": width, "height": height, "resolution": 0.25,
+                "origin": [0.0, 0.0, 0.0], "data": data}
+        robot = (2.375, 2.125, 0.0)
+        first, second = evaluate_search(grid, robot)["cluster_candidates"]
+        self.assertEqual(first["score"], second["score"])
+        self.assertEqual(first["distance_m"], second["distance_m"])
+        self.assertEqual([[0.875, 1.875], [3.875, 1.875]],
+                         [first["anchor_world"], second["anchor_world"]])
+
+        data[8 * width + 7] = 100  # Force a detour to the left cluster.
+        first, second = evaluate_search(grid, robot)["cluster_candidates"]
+        self.assertEqual(first["score"], second["score"])
+        self.assertLess(first["distance_m"], second["distance_m"])
+        self.assertEqual([[3.875, 1.875], [0.875, 1.875]],
+                         [first["anchor_world"], second["anchor_world"]])
+
+    def test_reachable_viewpoints_remain_distinct_when_clusters_share_best_point(self):
+        width, height = 20, 18
+        data = [0] * (width * height)
+        data[8 * width + 3] = data[8 * width + 7] = -1
+        grid = {"width": width, "height": height, "resolution": 0.25,
+                "origin": [0.0, 0.0, 0.0], "data": data}
+        result = evaluate_search(grid, (1.375, 2.125, 0.0))
+        self.assertEqual([[5, 8], [5, 8]], [c["cell"] for c in result["cluster_candidates"]])
+        self.assertEqual([[5, 8], [5, 7]], [c["cell"] for c in result["candidates"]])
+
+    def test_bfs_excludes_nearer_larger_cluster_behind_wall(self):
+        width, height = 24, 20
+        data = [0] * (width * height)
+        for x, y in ((3, 13), (10, 8), (10, 9)):
+            data[y * width + x] = -1
+        grid = {"width": width, "height": height, "resolution": 0.25,
+                "origin": [0.0, 0.0, 0.0], "data": data}
+        robot = (1.625, 2.125, 0.0)
+        open_result = evaluate_search(grid, robot)
+        nearer, farther = open_result["cluster_candidates"]
+        self.assertEqual([2.625, 1.875], nearer["anchor_world"])
+        for y in range(height):
+            data[y * width + 8] = 100
+        result = evaluate_search(grid, robot)
+        self.assertIn([9, 8], result["frontier_cells"])
+        self.assertEqual([farther["cluster_id"]], [c["cluster_id"] for c in result["cluster_candidates"]])
+        self.assertEqual([farther["cluster_id"]], [c["cluster_id"] for c in result["candidates"]])
 
     def test_cluster_scoring_and_world_metadata_revalidation(self):
         w = h = 24; res = 0.05
@@ -109,11 +174,12 @@ class SearchAlgorithmTest(unittest.TestCase):
         self.assertEqual(c["score"], result["cluster_candidates"][0]["score"])
         fresh = __import__("piracer_search.search_algorithm", fromlist=["revalidate_candidate"]).revalidate_candidate(grid, (0.5,0.5,0), c)
         self.assertIsNotNone(fresh)
+        self.assertEqual(c["score"], fresh["score"])
         blocked = dict(grid); changed = list(data)
         fx, fy = c["source_frontier_cell"]; changed[fy*w+fx] = 100; blocked["data"] = changed
         self.assertIsNone(__import__("piracer_search.search_algorithm", fromlist=["revalidate_candidate"]).revalidate_candidate(blocked, (0.5,0.5,0), c))
 
-    def test_eight_neighbor_components_and_zero_access_denominator(self):
+    def test_eight_neighbor_components_and_zero_bfs_access_distance(self):
         self.assertEqual([[(0, 0), (1, 1)], [(5, 4)]], _frontier_clusters([(5, 4), (1, 1), (0, 0)]))
         # The helper verifies diagonal frontier cells form one 8-neighbor component.
         self.assertEqual([[(0, 0), (1, 1)]], _frontier_clusters([(0, 0), (1, 1)]))
@@ -125,7 +191,7 @@ class SearchAlgorithmTest(unittest.TestCase):
         result = evaluate_search(grid, ((18.5)*res, (12.5)*res, 0))
         self.assertEqual(1, len(result["cluster_candidates"]))
         self.assertEqual(0.0, result["cluster_candidates"][0]["cost_m"])
-        self.assertEqual(0.5, result["cluster_candidates"][0]["score"])
+        self.assertAlmostEqual(0.1925, result["cluster_candidates"][0]["score"])
 
     def test_continue_after_three_unsafe_cluster_points(self):
         from unittest.mock import patch

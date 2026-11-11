@@ -1,12 +1,16 @@
 # piracer_search
 
 A small ROS 2 package with a pure-Python frontier evaluator and one Search
-node. It groups cardinally detected frontier cells into deterministic 8-neighbor
-clusters and ranks eligible clusters with `0.5 * G/Gmax - 0.5 * D/Dmax`,
-where G is boundary-cell count and D is the minimum safe-cell BFS access
-distance. D is a grid access estimate, not a Nav2 route length. Candidate
-poses receive a full known-FREE footprint check at their approach yaw, with
-nearby alternatives limited to 0.30 m. Nav2 plans the route.
+node. It groups FREE cells bordering UNKNOWN on a side into deterministic
+8-neighbor clusters. It ranks eligible clusters by increasing cost
+`C = r * (3.0 * d - 1.0 * n)`, using the weights from
+[m-explore-ros2](https://github.com/robo-friends/m-explore-ros2/blob/326cf8a0b487c34246bb8f3326afbcd69576dc60/explore/config/params.yaml#L9-L14).
+Here `r` is the map resolution, `d` is the minimum Euclidean distance in
+world metres from the robot position to a frontier cell centre in the cluster,
+and `n` is its frontier cell count. The node uses `score = -C`. Equal scores
+are ordered by increasing BFS access distance, then by the anchor's world Y
+and X. Candidate poses receive a full known-FREE footprint check at their
+approach yaw, with nearby alternatives limited to 0.30 m. Nav2 plans the route.
 
 The node subscribes to its configured map topic and `/visual_vo/odom_info_lite`.
 It validates the latest eligible OdomInfo metadata and one coherent full
@@ -27,10 +31,11 @@ After an accepted goal has been active for 10 seconds, Search may compare one
 fresh result for a score-based switch. It matches the active goal's saved
 frontier sources to the current coarse clusters and uses the highest score of
 the matched clusters as the active score. All matched clusters are excluded
-from the challengers. A different ready, footprint-checked cluster must exceed
-the active score by the configured margin. Missing or invalid matches do not
-switch. Goals within 0.30 m of the robot are left alone. After each comparison,
-the next opportunity is 15 seconds later.
+from the challengers. A different ready, footprint-checked cluster must improve
+the active cost by at least `goal_switch_margin` (default 0.10 on the frontier
+cost scale, with a numerical tolerance). Missing or invalid matches do
+not switch. Goals within 0.30 m of the robot are left alone. After each
+comparison, the next opportunity is 15 seconds later.
 
 A switch is a single-use proposal. Search requests cancellation, retains
 ownership until Nav2 reports a terminal result, then checks the saved context,
@@ -45,9 +50,11 @@ the saved ranking, current map,
 world-coordinate frontier source, full footprint, localization and history.
 Only then can it send one next goal. Lower-ranked coarse points are never sent
 without that check. If no saved point is still admissible, the existing single
-worker computes a new ranking. There is no new scheduler or worker. Cluster
-access distance is the score input; `goal_cost_m` separately records the BFS
-cost of the chosen footprint-safe point, which can be farther after shifting.
+worker computes a new ranking. There is no new scheduler or worker. BFS
+filters reachable viewpoints and orders them within each cluster.
+`cluster_access_distance_m` records the minimum BFS access distance, and
+`goal_cost_m` records the BFS distance to the chosen footprint-safe point,
+which can be farther after shifting.
 
 The evaluator requires the entire configured rectangular footprint to intersect
 only known-FREE map cells at the natural approach yaw. This map check does not

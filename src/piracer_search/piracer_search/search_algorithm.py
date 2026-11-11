@@ -317,7 +317,7 @@ def _candidate_for(cluster_record, option, robot_pose, width, height, resolution
 
 
 def evaluate_search(grid, robot_pose):
-    """Rank frontier clusters by boundary-cell gain and BFS cluster-access distance."""
+    """Rank reachable frontier clusters by Euclidean distance and cell count."""
     if grid is None:
         return {"status": "WAITING_FOR_MAP", "candidates": [], "ranking": []}
     if robot_pose is None:
@@ -325,7 +325,8 @@ def evaluate_search(grid, robot_pose):
     width, height, resolution, origin, cells = _read_grid(grid)
     if not isinstance(robot_pose, (list, tuple)) or len(robot_pose) != 3 or not all(_number(v) for v in robot_pose):
         raise ValueError("robot_pose must contain finite world x, y, yaw")
-    start = world_to_cell({"origin": origin, "resolution": resolution}, robot_pose[0], robot_pose[1])
+    robot_xy = robot_pose[:2]
+    start = world_to_cell({"origin": origin, "resolution": resolution}, *robot_xy)
     if not _inside(start, width, height):
         return {"status": "INVALID_LOCALIZATION", "candidates": [], "ranking": []}
     safe_cells = _safe_free_cells(width, height, cells)
@@ -336,17 +337,17 @@ def evaluate_search(grid, robot_pose):
         options = _cluster_options(cluster, width, height, resolution, origin, cells, safe_cells, edge_counts)
         if options:
             access = min(item[0] for item in options)
+            frontiers_world = [_cell_world(origin, resolution, cell) for cell in cluster]
+            frontier_distance = min(math.dist(robot_xy, point) for point in frontiers_world)
+            frontier_cost = resolution * (3.0 * frontier_distance - 1.0 * len(cluster))
             coarse.append({"size": len(cluster), "distance_m": access, "options": options,
-                           "frontiers_world": [_cell_world(origin, resolution, c) for c in cluster],
-                           "anchor_world": _cell_world(origin, resolution, cluster[0])})
+                           "score": -frontier_cost, "frontiers_world": frontiers_world,
+                           "anchor_world": frontiers_world[0]})
     if not coarse:
         return {"status": "NO_ADMISSIBLE_CANDIDATE" if frontiers else "NO_FRONTIERS",
                 "frontier_cells": [list(c) for c in frontiers], "candidates": [], "ranking": [],
                 "clustered": True, "cluster_candidates": []}
-    max_gain = max(c["size"] for c in coarse)
-    max_distance = max(c["distance_m"] for c in coarse)
     for c in coarse:
-        c["score"] = 0.5 * (c["size"] / max_gain if max_gain else 0.0) - 0.5 * (c["distance_m"] / max_distance if max_distance else 0.0)
         c["cluster_id"] = _record_id(c["anchor_world"])
         best = c["options"][0]
         point = _cell_world(origin, resolution, best[4])
