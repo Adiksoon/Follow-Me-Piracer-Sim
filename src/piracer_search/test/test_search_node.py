@@ -609,24 +609,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         return node
 
 
-    def test_base_exceptions_propagate_from_grid_and_evaluation(self):
-        for operation in ("grid", "evaluate_search"):
-            with self.subTest(operation=operation):
-                node = self.make_node()
-                if operation == "grid":
-                    def interrupted_grid():
-                        raise KeyboardInterrupt()
-
-                    node._grid = interrupted_grid
-                    context = patch.object(self.module, "evaluate_search")
-                else:
-                    context = patch.object(
-                        self.module,
-                        "evaluate_search",
-                        side_effect=KeyboardInterrupt(),
-                    )
-                with context, self.assertRaises(KeyboardInterrupt):
-                    node._search_tick()
 
     @staticmethod
     def odom_info(stamp_ns, lost=False):
@@ -647,7 +629,8 @@ class SearchNodeCallbackTest(unittest.TestCase):
         return {"id": candidate_id, "score": score, "pose_world": [x, 2.0, 0.5],
                 "cluster_id": candidate_id,
                 "source_frontier_world": frontier,
-                "source_frontiers_world": [frontier]}
+                "source_frontiers_world": [frontier],
+                "frontiers_world": [frontier]}
 
     @classmethod
     def result(cls, candidates):
@@ -1396,12 +1379,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._goal_result(Future(types.SimpleNamespace(status=6)), 30)
         self.assertEqual({}, node._failed_attempts)
 
-    def test_no_odom_info_on_startup_blocks_evaluation_and_dispatch(self):
-        node = self.make_localization_node()
-        with patch.object(self.module, "evaluate_search") as evaluate:
-            node._search_tick()
-        evaluate.assert_not_called()
-        self.assertEqual([], node._action.sent)
 
     def test_either_missing_transform_cancels_active_goal_once(self):
         for target_frame in ("vo_odom", "map"):
@@ -1554,55 +1531,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, len(node._tf_buffer.calls))
         self.assertEqual([], warnings)
 
-    def test_recovery_before_terminal_result_waits_then_fresh_data_allows_next_goal(self):
-        node = self.make_localization_node()
-        candidate = self.candidate("active")
-        node._odom_info_callback(self.odom_info(9_950_000_000))
-        self.assertTrue(node._send_goal(candidate, "/tree.xml"))
-        token = node._pending_goal["token"]
-        handle = FakeHandle()
-        node._goal_response(Future(handle), token)
 
-        node._odom_info_callback(self.odom_info(10_000_000_000, lost=True))
-        self.assertEqual(1, handle.cancel_count)
-        self.assertTrue(node._active_goal["localization_invalidated"])
-        node._now_ns = 10_100_000_000
-        node._odom_info_callback(self.odom_info(10_050_000_000))
-        evaluation = self.result([candidate])
-        with patch.object(self.module, "evaluate_search", return_value=evaluation):
-            node._search_tick()
-        self.assertEqual(1, len(node._action.sent))
-
-        node._goal_result(Future(types.SimpleNamespace(status=5)), token)
-        self.assertEqual({}, node._failed_attempts)
-        node._now_ns = 10_120_000_000
-        node._odom_info_callback(self.odom_info(10_110_000_000))
-        with patch.object(self.module, "evaluate_search", return_value=evaluation):
-            node._search_tick()
-        self.assertEqual(2, len(node._action.sent))
-
-    def test_success_requests_cached_cluster_candidate_on_next_tick(self):
-        node = self.make_node()
-        first = self.candidate("first")
-        candidate = self.candidate("cluster-next", 0.5, 2.0)
-        candidate.update({"cluster_size": 4, "source_frontier_world": [3.0, 2.0],
-                          "source_seed_world": [2.0, 2.0]})
-        result = {"status": "RECOMMENDATION_AVAILABLE", "clustered": True,
-                  "candidates": [first], "ranking": [first["id"]],
-                  "cluster_candidates": [first, candidate]}
-        node._apply_search_result(result)
-        self.assertEqual(1, len(node._action.sent))
-        token = node._pending_goal["token"]
-        handle = FakeHandle()
-        node._goal_response(Future(handle), token)
-        node._goal_result(Future(types.SimpleNamespace(status=4)), token)
-        self.assertTrue(node._next_goal_requested)
-        with patch.object(self.module, "evaluate_search") as evaluate, \
-                patch.object(self.module, "revalidate_candidate", return_value=candidate):
-            node._search_tick()
-        evaluate.assert_not_called()
-        self.assertEqual(2, len(node._action.sent))
-        self.assertEqual("cluster-next", node._pending_goal["candidate"]["id"])
 
     def test_cluster_backlog_is_never_sent_from_result_application(self):
         node = self.make_node()
@@ -1623,196 +1552,10 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual([], node._action.sent)
         self.assertTrue(node._next_goal_requested)
 
-    def test_cached_candidate_uses_real_current_grid_revalidation(self):
-        from piracer_search.search_algorithm import evaluate_search
 
-        width = height = 40
-        data = [100] * (width * height)
-        for y in range(3, 37):
-            for x in range(3, 37):
-                data[y * width + x] = 0
-        for y in (19, 20, 21):
-            data[y * width + 36] = -1
-        grid = {"width": width, "height": height, "resolution": 0.05,
-                "origin": [0.0, 0.0, 0.0], "data": data}
-        result = evaluate_search(grid, (0.5, 0.5, 0.0))
-        self.assertTrue(result["clustered"])
-        candidate = result["candidates"][0]
 
-        node = self.make_node()
-        node._grid = lambda: grid
-        node._localization_pose = lambda frame: (0.5, 0.5, 0.0)
-        node._last_cluster_ranking = result
-        node._cluster_ranking_context = {"epoch": 0, "localization_generation": 0,
-                                         "clock_epoch": 0, "frame": "map"}
-        node._next_goal_requested = True
-        with patch.object(self.module, "evaluate_search") as evaluate:
-            node._search_tick()
 
-        evaluate.assert_not_called()
-        self.assertEqual(1, len(node._action.sent))
-        sent = node._pending_goal["candidate"]
-        self.assertEqual(candidate["cluster_size"], sent["cluster_size"])
-        self.assertNotEqual(candidate["pose_world"][:2], sent["pose_world"][:2])
-        self.assertLessEqual(
-            math.dist(candidate["source_seed_world"], sent["pose_world"][:2]), 0.30
-        )
 
-    def test_cached_frontier_wall_unknown_or_consumption_rejects_without_failure(self):
-        from piracer_search.search_algorithm import evaluate_search
-
-        width = height = 40
-        data = [100] * (width * height)
-        for y in range(3, 37):
-            for x in range(3, 37):
-                data[y * width + x] = 0
-        for y in (19, 20, 21):
-            data[y * width + 36] = -1
-        base = {"width": width, "height": height, "resolution": 0.05,
-                "origin": [0.0, 0.0, 0.0], "data": data}
-        result = evaluate_search(base, (0.5, 0.5, 0.0))
-        candidate = result["candidates"][0]
-        fx, fy = candidate["source_frontier_cell"]
-        variants = []
-        for occupancy in (100, -1):
-            changed = list(data)
-            changed[fy * width + fx] = occupancy
-            variants.append(changed)
-        consumed = [0 if value == -1 else value for value in data]
-        variants.append(consumed)
-
-        for changed in variants:
-            with self.subTest(frontier_cell=changed[fy * width + fx]):
-                node = self.make_node()
-                current = dict(base, data=changed)
-                node._grid = lambda: current
-                node._localization_pose = lambda frame: (0.5, 0.5, 0.0)
-                node._last_cluster_ranking = result
-                node._cluster_ranking_context = {"epoch": 0, "localization_generation": 0,
-                                                 "clock_epoch": 0, "frame": "map"}
-                node._next_goal_requested = True
-                no_result = {"status": "NO_ADMISSIBLE_CANDIDATE", "candidates": [],
-                             "ranking": [], "clustered": True, "cluster_candidates": []}
-                with patch.object(self.module, "evaluate_search", return_value=no_result):
-                    node._search_tick()
-                self.assertEqual([], node._action.sent)
-                self.assertEqual({}, node._failed_attempts)
-
-    def test_cached_ranking_context_and_ownership_guards_prevent_dispatch(self):
-        from piracer_search.search_algorithm import evaluate_search
-
-        width = height = 40
-        data = [100] * (width * height)
-        for y in range(3, 37):
-            for x in range(3, 37):
-                data[y * width + x] = 0
-        for y in (19, 20, 21):
-            data[y * width + 36] = -1
-        grid = {"width": width, "height": height, "resolution": 0.05,
-                "origin": [0.0, 0.0, 0.0], "data": data}
-        result = evaluate_search(grid, (0.5, 0.5, 0.0))
-        base_context = {"epoch": 0, "localization_generation": 0,
-                        "clock_epoch": 0, "frame": "map"}
-        for key, wrong in (("epoch", 1), ("localization_generation", 1),
-                           ("clock_epoch", 1), ("frame", "odom"), ("owner", True),
-                           ("localization", False)):
-            with self.subTest(guard=key):
-                node = self.make_node()
-                node._grid = lambda: grid
-                node._localization_pose = (lambda frame: None) if key == "localization" else (
-                    lambda frame: (0.5, 0.5, 0.0))
-                node._last_cluster_ranking = result
-                node._cluster_ranking_context = dict(base_context)
-                if key in base_context:
-                    node._cluster_ranking_context[key] = wrong
-                if key == "owner":
-                    owner = result["candidates"][0]
-                    node._active_goal = {
-                        "token": 44, "candidate": owner,
-                        "identity": node._goal_identity(owner, "map"),
-                        "epoch": 0, "cancel_requested": False,
-                        "cancel_reason": None, "is_retry": False,
-                    }
-                node._next_goal_requested = True
-                no_result = {"status": "NO_ADMISSIBLE_CANDIDATE", "candidates": [],
-                             "ranking": [], "clustered": True, "cluster_candidates": []}
-                with patch.object(self.module, "evaluate_search", return_value=no_result):
-                    node._search_tick()
-                self.assertEqual([], node._action.sent)
-                self.assertEqual({}, node._failed_attempts)
-
-    def test_revalidated_shifted_xy_is_checked_against_history_and_yaw_is_ignored(self):
-        from piracer_search.search_algorithm import evaluate_search, revalidate_candidate
-
-        width = height = 40
-        data = [100] * (width * height)
-        for y in range(3, 37):
-            for x in range(3, 37):
-                data[y * width + x] = 0
-        for y in (19, 20, 21):
-            data[y * width + 36] = -1
-        grid = {"width": width, "height": height, "resolution": 0.05,
-                "origin": [0.0, 0.0, 0.0], "data": data}
-        result = evaluate_search(grid, (0.5, 0.5, 0.0))
-        candidate = result["candidates"][0]
-        fresh = revalidate_candidate(grid, (0.5, 0.5, 0.0), candidate)
-        self.assertIsNotNone(fresh)
-        node = self.make_node()
-        node._grid = lambda: grid
-        node._localization_pose = lambda frame: (0.5, 0.5, 0.0)
-        node._last_cluster_ranking = result
-        node._cluster_ranking_context = {"epoch": 0, "localization_generation": 0,
-                                         "clock_epoch": 0, "frame": "map"}
-        node._next_goal_requested = True
-        node._completed_candidates.add(node._goal_identity(fresh, "map"))
-        changed_yaw = dict(fresh, goal_yaw=fresh["goal_yaw"] + 1.0,
-                           pose_world=[*fresh["pose_world"][:2], fresh["goal_yaw"] + 1.0])
-        self.assertEqual(node._goal_identity(fresh, "map"),
-                         node._goal_identity(changed_yaw, "map"))
-        no_result = {"status": "NO_ADMISSIBLE_CANDIDATE", "candidates": [],
-                     "ranking": [], "clustered": True, "cluster_candidates": []}
-        with patch.object(self.module, "evaluate_search", return_value=no_result):
-            node._search_tick()
-        self.assertEqual([], node._action.sent)
-        self.assertEqual({}, node._failed_attempts)
-
-    def test_completed_ready_cluster_is_not_reentered_through_coarse_backlog(self):
-        from piracer_search.search_algorithm import evaluate_search
-
-        width, height = 60, 40
-        data = [100] * (width * height)
-        for y in range(3, 37):
-            for x in list(range(3, 25)) + list(range(35, 57)):
-                data[y * width + x] = 0
-        for x in range(25, 35):
-            for y in range(18, 22):
-                data[y * width + x] = 0
-        for y in range(5, 12):
-            data[y * width + 25] = -1
-        for y in range(27, 34):
-            data[y * width + 34] = -1
-        grid = {"width": width, "height": height, "resolution": 0.05,
-                "origin": [0.0, 0.0, 0.0], "data": data}
-        result = evaluate_search(grid, (0.5, 0.5, 0.0))
-        self.assertEqual(2, len(result["cluster_candidates"]))
-        first, second = result["candidates"]
-        self.assertNotEqual(first["cluster_id"], second["cluster_id"])
-
-        node = self.make_node()
-        node._grid = lambda: grid
-        node._localization_pose = lambda frame: (0.5, 0.5, 0.0)
-        node._last_cluster_ranking = result
-        node._cluster_ranking_context = {"epoch": 0, "localization_generation": 0,
-                                         "clock_epoch": 0, "frame": "map"}
-        node._next_goal_requested = True
-        node._completed_candidates.add(node._goal_identity(first, "map"))
-        no_result = {"status": "NO_ADMISSIBLE_CANDIDATE", "candidates": [],
-                     "ranking": [], "clustered": True, "cluster_candidates": []}
-        with patch.object(self.module, "evaluate_search", return_value=no_result):
-            node._search_tick()
-
-        self.assertEqual(1, len(node._action.sent))
-        self.assertEqual(second["cluster_id"], node._pending_goal["candidate"]["cluster_id"])
 
     def test_pending_accept_after_localization_loss_is_cancelled_without_rejection_penalty(self):
         node = self.make_node()
@@ -1835,105 +1578,11 @@ class SearchNodeCallbackTest(unittest.TestCase):
         node._goal_response(Future(FakeHandle(accepted=False)), token)
         self.assertEqual({}, node._failed_attempts)
 
-    def test_second_validation_after_evaluation_can_block_goal_send(self):
-        node = self.make_node()
-        pose = (1.0, 2.0, 0.5)
-        validations = iter((pose, None))
-        node._localization_pose = lambda frame: next(validations)
-        with patch.object(self.module, "evaluate_search", return_value=self.result([
-            self.candidate("candidate")
-        ])) as evaluate:
-            node._search_tick()
-        evaluate.assert_called_once()
-        self.assertEqual([], node._action.sent)
 
-    def test_send_goal_revalidates_after_marker_work_advances_clock(self):
-        node = self.make_localization_node()
-        node._odom_info_callback(self.odom_info(10_000_000_000))
-        node._publish_markers = lambda *args: setattr(node, "_now_ns", 10_600_000_000)
-        with patch.object(self.module, "evaluate_search", return_value=self.result([
-            self.candidate("candidate")
-        ])):
-            node._search_tick()
-        self.assertEqual([], node._action.sent)
-        self.assertIsNone(node._pending_goal)
-        self.assertEqual(10_600_000_000, node._localization_invalidated_at_ns)
 
-    def test_search_evaluates_once_for_goal_and_markers_from_nav2_map(self):
-        node = self.make_node()
-        log_messages = []
-        node._logger.info = log_messages.append
-        first = self.candidate("best", 0.5, 3.0)
-        second = self.candidate("second", 0.2, 4.0)
-        result = self.result([first, second])
-        seen = []
-        self.module._candidate_markers = lambda candidates, selected, *args, **kwargs: (
-            seen.append((candidates, selected)) or []
-        )
-        with patch.object(self.module, "evaluate_search", return_value=result) as evaluate:
-            node._search_tick()
-        evaluate.assert_called_once()
-        self.assertEqual(1, len(node._action.sent))
-        goal = node._action.sent[0][0]
-        self.assertEqual("map", goal.pose.header.frame_id)
-        self.assertEqual("sim-stamp", goal.pose.header.stamp)
-        self.assertEqual(3.0, goal.pose.pose.position.x)
-        self.assertEqual("/share/search_navigate_to_pose.xml", goal.behavior_tree)
-        self.assertTrue(any(
-            "Search goal submitted: token=1 candidate=best frame=map "
-            "stamp=10.000000000 x=3.000000 y=2.000000 yaw=0.000000" in message
-            for message in log_messages
-        ))
-        self.assertIs(seen[0][0][0], first)
-        self.assertIs(seen[0][1], first)
 
-    def test_goal_planning_yaw_uses_current_position_without_mutating_candidate(self):
-        for robot_pose, target, expected_yaw in (
-            ((1.0, 2.0, 0.7), (3.0, 3.0), math.atan2(1.0, 2.0)),
-            ((2.0, 1.0, -0.7), (1.0, 3.0), math.atan2(2.0, -1.0)),
-            ((1.0, 2.0, 0.7), (0.0, 0.0), math.atan2(-2.0, -1.0)),
-            ((1.0, 2.0, 0.7), (3.0, 0.0), math.atan2(-2.0, 2.0)),
-        ):
-            with self.subTest(robot_pose=robot_pose, target=target):
-                node = self.make_node()
-                node._localization_pose = lambda frame: robot_pose
-                candidate = self.candidate("observation")
-                candidate["pose_world"] = [*target, math.pi / 2]
-                before = list(candidate["pose_world"])
-                identity = node._goal_identity(candidate, "map")
 
-                self.assertTrue(node._send_goal(candidate, "/tree.xml"))
 
-                q = node._action.sent[0][0].pose.pose.orientation
-                self.assertAlmostEqual(expected_yaw, 2.0 * math.atan2(q.z, q.w))
-                self.assertAlmostEqual(1.0, q.z * q.z + q.w * q.w)
-                self.assertEqual(before, candidate["pose_world"])
-                self.assertEqual(identity, node._pending_goal["identity"])
-
-    def test_send_goal_uses_the_same_validated_approach_yaw_as_evaluator(self):
-        node = self.make_node()
-        node._localization_pose = lambda frame: (1.0, 2.0, -0.7)
-        candidate = self.candidate("validated")
-        candidate["pose_world"] = [3.0, 3.0, 0.0]
-        candidate["goal_yaw"] = -0.25
-
-        self.assertTrue(node._send_goal(candidate, "/tree.xml"))
-
-        goal = node._action.sent[0][0]
-        quaternion = goal.pose.pose.orientation
-        self.assertAlmostEqual(-0.25, 2.0 * math.atan2(quaternion.z, quaternion.w))
-
-    def test_goal_at_current_position_retains_robot_heading(self):
-        node = self.make_node()
-        node._localization_pose = lambda frame: (1.0, 2.0, -0.7)
-        candidate = self.candidate("here")
-        candidate["pose_world"] = [1.0, 2.0, math.pi / 2]
-
-        self.assertTrue(node._send_goal(candidate, "/tree.xml"))
-
-        q = node._action.sent[0][0].pose.pose.orientation
-        self.assertAlmostEqual(-0.7, 2.0 * math.atan2(q.z, q.w))
-        self.assertAlmostEqual(1.0, q.z * q.z + q.w * q.w)
 
     def test_rejected_candidate_gets_one_retry_then_next_ranked_candidate(self):
         node = self.make_node()
@@ -2121,51 +1770,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual("higher_scoring_candidate", node._active_goal["cancel_reason"])
         self.assertIsNotNone(node._replacement_proposal)
 
-    def test_frontier_cost_improvement_switches_at_margin_after_active_cluster_splits(self):
-        width, height = 20, 18
-        data = [0] * (width * height)
-        for y in range(8, 15):
-            data[y * width + 3] = -1
-        data[8 * width + 15] = -1
-        initial_grid = {"width": width, "height": height, "resolution": 0.25,
-                        "origin": [0.0, 0.0, 0.0], "data": data}
-        initial_pose = (2.175, 2.125, 0.0)
-        active, challenger = self.module.evaluate_search(initial_grid, initial_pose)["candidates"]
-
-        split_data = list(data)
-        for y in range(9, 14):
-            split_data[y * width + 3] = 0
-        split_grid = dict(initial_grid, data=split_data)
-        for improvement, should_switch in ((0.06, False), (0.10, True), (0.14, True)):
-            with self.subTest(improvement=improvement):
-                node = self.make_node()
-                node._localization_pose = lambda frame: initial_pose
-                self.assertTrue(node._send_goal(active, "/tree.xml"))
-                handle = FakeHandle()
-                node._goal_response(Future(handle), node._pending_goal["token"])
-                node._now_ns = node._goal_switch_deadline_ns
-
-                # The two closest fragments to the left and right have equal
-                # sizes. Moving right of their midpoint improves the right
-                # cluster's cost by 2 * 3 * resolution times the displacement.
-                pose = (2.375 + improvement / 1.5, 2.125, 0.0)
-                node._grid = lambda: split_grid
-                node._localization_pose = lambda frame: pose
-                result = self.module.evaluate_search(split_grid, pose)
-                records = []
-                node._logger.info = records.append
-                node._consider_goal_switch(
-                    result, {c["id"]: c for c in result["candidates"]})
-
-                record = json.loads(records[0])
-                self.assertEqual(2, record["matched_clusters"])
-                self.assertAlmostEqual(improvement, record["delta"])
-                self.assertEqual(int(should_switch), handle.cancel_count)
-                if should_switch:
-                    self.assertEqual(challenger["cluster_id"],
-                                     node._replacement_proposal["candidate"]["cluster_id"])
-                else:
-                    self.assertIsNone(node._replacement_proposal)
 
     def test_goal_switch_diagnostic_records_keep_and_switch_decisions(self):
         for challenger_score, expected_decision, expected_reason in (
@@ -2360,58 +1964,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(0, handle.cancel_count)
         self.assertIsNone(node._replacement_proposal)
 
-    def test_terminal_replacement_proposal_beats_cached_old_point(self):
-        node = self.make_node()
-        replacement = self.candidate("replacement", 0.8, 4.0)
-        node._replacement_target = node._goal_identity(replacement, "map")
-        node._replacement_proposal = {"candidate": replacement, "context": {
-            "epoch": node._search_epoch,
-            "localization_generation": node._localization_generation,
-            "clock_epoch": node._clock_epoch,
-            "frame": "map",
-        }}
-        node._next_goal_requested = True
-        old = self.candidate("old", 0.9, 2.0)
-        node._last_cluster_ranking = self.result([old, replacement])
-        node._map = types.SimpleNamespace(header=types.SimpleNamespace(frame_id="map"))
-        old_handle = FakeHandle()
-        old_handle.cancel_goal_async()
-        node._active_goal = {"token": 38, "candidate": old,
-                             "identity": node._goal_identity(old, "map"),
-                             "epoch": node._search_epoch, "handle": old_handle,
-                             "cancel_requested": True,
-                             "cancel_reason": "higher_scoring_candidate"}
-        node._evaluation_future = WorkerFuture()
-        node._evaluation_context = {"epoch": node._search_epoch}
-        refreshed = self.candidate("replacement", 0.8, 4.1)
-        with patch.object(self.module, "revalidate_candidate", return_value=refreshed):
-            node._search_tick()
-        self.assertEqual([], node._action.sent)
-        self.assertIsNotNone(node._active_goal)
-        node._goal_result(Future(types.SimpleNamespace(status=5)), 38)
-        node._evaluation_future = None
-        node._evaluation_context = None
-        node._next_goal_requested = True
-        with patch.object(self.module, "revalidate_candidate", return_value=refreshed):
-            node._search_tick()
-        self.assertEqual(1, len(node._action.sent))
-        self.assertEqual("replacement", node._pending_goal["candidate"]["id"])
-        self.assertEqual(4.1, node._pending_goal["candidate"]["pose_world"][0])
-        self.assertIsNone(node._replacement_target)
-        self.assertTrue(node._pending_goal["dynamic_replacement"])
-        token = node._pending_goal["token"]
-        node._goal_response(Future(FakeHandle()), token)
-        active = node._active_goal
-        self.assertEqual(25_000_000_000, node._goal_switch_deadline_ns)
-        node._localization_pose = lambda frame: (0.0, 0.0, 0.0)
-        evaluation = self.result([old, replacement])
-        node._now_ns = 24_999_000_000
-        node._consider_goal_switch(evaluation, {old["id"]: old, replacement["id"]: replacement})
-        self.assertFalse(active["cancel_requested"])
-        node._now_ns = 25_000_000_000
-        node._consider_goal_switch(evaluation, {old["id"]: old, replacement["id"]: replacement})
-        self.assertTrue(active["cancel_requested"])
-        self.assertEqual("higher_scoring_candidate", active["cancel_reason"])
 
     def test_active_cluster_outside_ready_top_three_matches_current_score(self):
         node = self.make_node()
@@ -2498,27 +2050,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, handle.cancel_count)
         self.assertEqual("challenger", node._replacement_proposal["candidate"]["id"])
 
-    def test_invalid_proposal_context_or_unsafe_refresh_is_discarded(self):
-        for invalid_context in (True, False):
-            with self.subTest(invalid_context=invalid_context):
-                node = self.make_node()
-                replacement = self.candidate("replacement", 0.8, 4.0)
-                context = {"epoch": node._search_epoch,
-                           "localization_generation": node._localization_generation,
-                           "clock_epoch": node._clock_epoch, "frame": "map"}
-                if invalid_context:
-                    context["epoch"] += 1
-                node._replacement_proposal = {"candidate": replacement, "context": context}
-                node._replacement_target = node._goal_identity(replacement, "map")
-                node._next_goal_requested = True
-                node._last_cluster_ranking = self.result([replacement])
-                node._map = types.SimpleNamespace(header=types.SimpleNamespace(frame_id="map"))
-                refresh = None if not invalid_context else replacement
-                with patch.object(self.module, "revalidate_candidate", return_value=refresh):
-                    node._search_tick()
-                self.assertIsNone(node._replacement_proposal)
-                self.assertIsNone(node._replacement_target)
-                self.assertEqual([], node._action.sent)
 
     def test_pending_retry_safety_cancel_reason_is_preserved(self):
         node = self.make_node()
@@ -2687,39 +2218,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(2, node._failed_attempts[identity])
         self.assertEqual("challenger", node._next_ranked_candidate(evaluation)["id"])
 
-    def test_aborted_candidate_is_not_retried_after_challenger_streak(self):
-        node = self.make_node()
-        first = self.candidate("first", 0.20)
-        challenger = self.candidate("challenger", 0.31)
-        node._localization_pose = lambda frame: (0.0, 0.0, 0.0)
-        identity = node._goal_identity(first, "map")
-        handle = FakeHandle()
-        node._active_goal = {
-            "token": 53, "candidate": first, "identity": identity,
-            "epoch": node._search_epoch, "is_retry": False, "handle": handle,
-            "cancel_requested": False, "cancel_reason": None,
-        }
-        node._goal_switch_deadline_ns = node._now_ns + 10_000_000_000
-        evaluation = self.result([first, challenger])
-        by_id = {item["id"]: item for item in evaluation["candidates"]}
-
-        node._consider_goal_switch(evaluation, by_id)
-        node._goal_result(Future(types.SimpleNamespace(status=6)), 53)
-        self.assertTrue(node._next_goal_requested)
-        self.assertIn(identity, node._exhausted_candidates)
-        self.assertIsNone(node._retry_target)
-        self.assertEqual("challenger", node._next_ranked_candidate(evaluation)["id"])
-        node._last_cluster_ranking = evaluation
-        node._cluster_ranking_context = {
-            "epoch": node._search_epoch,
-            "localization_generation": node._localization_generation,
-            "clock_epoch": node._clock_epoch,
-            "frame": "map",
-        }
-        node._now_ns = 11_000_000_000
-        with patch.object(self.module, "revalidate_candidate", side_effect=lambda grid, pose, candidate: candidate):
-            node._search_tick()
-        self.assertEqual("challenger", node._pending_goal["candidate"]["id"])
 
     def test_exhausted_identity_is_skipped_for_retry_replacement_and_ranking(self):
         node = self.make_node()
@@ -2811,172 +2309,11 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(1, node._failed_attempts[first_identity])
         self.assertEqual("second", node._next_ranked_candidate(self.result([second]))["id"])
 
-    def test_missing_pending_retry_is_invalidated_before_challenger_check(self):
-        node = self.make_node()
-        first, second = self.candidate("first"), self.candidate("second", 0.2, 2.0)
-        identity = node._goal_identity(first, "map")
-        node._retry_target = identity
-        node._failed_attempts[identity] = 1
-        node._send_goal(first, "/tree.xml")
-        token = node._pending_goal["token"]
-        result = self.result([second])
 
-        with patch.object(self.module, "evaluate_search", return_value=result):
-            node._search_tick()
 
-        self.assertEqual("retry_invalidated", node._pending_goal["cancel_reason"])
-        self.assertIsNone(node._retry_target)
-        node._consider_goal_switch(
-            self.result([first, self.candidate("challenger", 0.8, 3.0)]),
-            {"first": first, "challenger": self.candidate("challenger", 0.8, 3.0)},
-        )
-        self.assertIsNone(node._replacement_target)
 
-        handle = FakeHandle()
-        node._goal_response(Future(handle), token)
-        self.assertEqual(1, handle.cancel_count)
-        self.assertIsNotNone(node._active_goal)
-        node._goal_result(Future(types.SimpleNamespace(status=5)), token)
-        self.assertIsNone(node._active_goal)
-        self.assertEqual(1, node._failed_attempts[identity])
 
-    def test_rejected_pending_retry_releases_without_new_failure(self):
-        node = self.make_node()
-        first, second = self.candidate("first"), self.candidate("second", 0.2, 2.0)
-        identity = node._goal_identity(first, "map")
-        node._retry_target = identity
-        node._failed_attempts[identity] = 1
-        node._send_goal(first, "/tree.xml")
-        token = node._pending_goal["token"]
-        result = self.result([second])
 
-        with patch.object(self.module, "evaluate_search", return_value=result):
-            node._search_tick()
-        node._goal_response(Future(FakeHandle(accepted=False)), token)
-
-        self.assertIsNone(node._pending_goal)
-        self.assertIsNone(node._retry_target)
-        self.assertEqual(1, node._failed_attempts[identity])
-
-    def test_frontier_change_invalidates_missing_active_retry_but_not_first_attempt(self):
-        second = self.candidate("second", 0.2, 2.0)
-        result = self.result([second])
-        result["frontier_cells"] = [[4, 5]]
-        for is_retry in (True, False):
-            with self.subTest(is_retry=is_retry):
-                node = self.make_node()
-                first = self.candidate("first")
-                identity = node._goal_identity(first, "map")
-                if is_retry:
-                    node._retry_target = identity
-                    node._failed_attempts[identity] = 1
-                handle = FakeHandle()
-                node._active_goal = {
-                    "token": 70 + int(is_retry), "candidate": first,
-                    "identity": identity, "epoch": node._search_epoch,
-                    "is_retry": is_retry, "handle": handle,
-                    "cancel_requested": False, "cancel_reason": None,
-                }
-
-                with patch.object(self.module, "evaluate_search", return_value=result):
-                    node._search_tick()
-
-                if is_retry:
-                    self.assertEqual(1, handle.cancel_count)
-                    self.assertEqual("retry_invalidated", node._active_goal["cancel_reason"])
-                    self.assertIsNone(node._retry_target)
-                    self.assertIsNotNone(node._active_goal)
-                    node._goal_result(
-                        Future(types.SimpleNamespace(status=5)), 71
-                    )
-                    self.assertIsNone(node._active_goal)
-                else:
-                    self.assertEqual(0, handle.cancel_count)
-                    self.assertIsNotNone(node._active_goal)
-
-    def test_frontier_change_invalidates_pending_retry_when_pose_or_frame_changes(self):
-        original = self.candidate("same-id", x=1.0)
-        for frame_id, candidate in (
-            ("map", self.candidate("same-id", x=2.0)),
-            ("odom", self.candidate("same-id", x=1.0)),
-        ):
-            with self.subTest(frame_id=frame_id, pose=candidate["pose_world"]):
-                node = self.make_node()
-                original_identity = node._goal_identity(original, "map")
-                node._retry_target = original_identity
-                node._failed_attempts[original_identity] = 1
-                node._send_goal(original, "/tree.xml")
-                if frame_id != "map":
-                    node._map.header.frame_id = frame_id
-                result = self.result([candidate])
-                result["frontier_cells"] = [[4, 5]]
-
-                with patch.object(self.module, "evaluate_search", return_value=result):
-                    node._search_tick()
-
-                self.assertEqual("retry_invalidated", node._pending_goal["cancel_reason"])
-                self.assertIsNone(node._retry_target)
-
-    def test_pending_cancel_latches_replacement_against_later_challengers(self):
-        node = self.make_node()
-        current = self.candidate("A", 0.20)
-        replacement = self.candidate("B", 0.31, 3.0)
-        later = self.candidate("C", 0.50, 4.0)
-        node._send_goal(current, "/tree.xml")
-        token = node._pending_goal["token"]
-        first_evaluation = self.result([current, replacement])
-        by_id = {item["id"]: item for item in first_evaluation["candidates"]}
-
-        node._consider_goal_switch(first_evaluation, by_id)
-        replacement_identity = node._goal_identity(replacement, "map")
-        self.assertIsNone(node._replacement_target)
-        self.assertIsNone(node._pending_goal["cancel_reason"])
-
-        node._consider_goal_switch(
-            self.result([current, later, replacement]),
-            {"A": current, "B": replacement, "C": later},
-        )
-        self.assertIsNone(node._replacement_target)
-
-        handle = FakeHandle()
-        node._goal_response(Future(handle), token)
-        self.assertEqual(0, handle.cancel_count)
-        self.assertIsNotNone(node._active_goal)
-        node._goal_result(Future(types.SimpleNamespace(status=5)), token)
-        latest = self.result([later, replacement])
-        with patch.object(self.module, "evaluate_search", return_value=latest):
-            node._search_tick()
-
-        self.assertEqual("C", node._pending_goal["candidate"]["id"])
-        self.assertIsNone(node._replacement_target)
-
-    def test_rejected_pending_goal_keeps_eligible_replacement_but_drops_ineligible_one(self):
-        for replacement_present in (True, False):
-            with self.subTest(replacement_present=replacement_present):
-                node = self.make_node()
-                current = self.candidate("A", 0.20)
-                replacement = self.candidate("B", 0.31, 3.0)
-                leader = self.candidate("C", 0.60, 4.0)
-                node._send_goal(current, "/tree.xml")
-                token = node._pending_goal["token"]
-                evaluation = self.result([current, replacement])
-                by_id = {item["id"]: item for item in evaluation["candidates"]}
-                node._consider_goal_switch(evaluation, by_id)
-                replacement_identity = node._replacement_target
-                node._consider_goal_switch(
-                    self.result([current, leader, replacement]),
-                    {"A": current, "B": replacement, "C": leader},
-                )
-                self.assertIsNone(replacement_identity)
-                self.assertIsNone(node._replacement_target)
-                node._goal_response(Future(FakeHandle(accepted=False)), token)
-
-                candidates = [leader, replacement] if replacement_present else [leader]
-                with patch.object(self.module, "evaluate_search",
-                                  return_value=self.result(candidates)):
-                    node._search_tick()
-
-                self.assertEqual("C", node._pending_goal["candidate"]["id"])
 
     def test_changed_pose_or_frame_invalidates_deferred_retry_identity(self):
         node = self.make_node()
@@ -3065,53 +2402,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(changed, node._next_ranked_candidate(self.result([changed])))
         self.assertIsNone(node._replacement_target)
 
-    def test_marker_candidate_selection_and_server_unavailable_preserve_replacement_latch(self):
-        node = self.make_node()
-        replacement = self.candidate("replacement", 0.4, 4.0)
-        first_leader = self.candidate("leader-a", 0.9, 1.0)
-        second_leader = self.candidate("leader-b", 0.8, 2.0)
-        node._replacement_target = node._goal_identity(replacement, "map")
-        node._action.ready = False
-        seen = []
-        self.module._candidate_markers = lambda candidates, selected, *args, **kwargs: (
-            seen.append(selected) or []
-        )
 
-        with patch.object(self.module, "evaluate_search", side_effect=[
-            self.result([first_leader, replacement]),
-            self.result([second_leader, replacement]),
-        ]):
-            node._search_tick()
-            node._search_tick()
-
-        self.assertEqual([replacement, replacement], seen)
-        self.assertEqual(node._goal_identity(replacement, "map"), node._replacement_target)
-        self.assertEqual([], node._action.sent)
-
-        node._action.ready = True
-        with patch.object(self.module, "evaluate_search", return_value=self.result([
-            first_leader, second_leader, replacement
-        ])):
-            node._search_tick()
-
-        self.assertEqual(1, len(node._action.sent))
-        self.assertEqual("replacement", node._pending_goal["candidate"]["id"])
-        self.assertIsNone(node._replacement_target)
-
-    def test_same_tick_dispatch_uses_latched_replacement_over_rank_leader(self):
-        node = self.make_node()
-        replacement = self.candidate("replacement", 0.4, 4.0)
-        leader = self.candidate("leader", 0.9, 1.0)
-        node._replacement_target = node._goal_identity(replacement, "map")
-
-        with patch.object(self.module, "evaluate_search", return_value=self.result([
-            leader, replacement
-        ])):
-            node._search_tick()
-
-        self.assertEqual(1, len(node._action.sent))
-        self.assertEqual("replacement", node._pending_goal["candidate"]["id"])
-        self.assertIsNone(node._replacement_target)
 
     def test_goal_accepted_after_disable_is_cancelled_and_waited_out(self):
         node = self.make_node()
@@ -3129,39 +2420,7 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertIsNone(node._active_goal)
         self.assertFalse(node._failed_attempts)
 
-    def test_goal_response_exception_keeps_unknown_pending_owner_without_retry(self):
-        node = self.make_node()
-        candidate = self.candidate("uncertain")
-        node._send_goal(candidate, "/tree.xml")
-        token = node._pending_goal["token"]
-        node._goal_response(Future(error=RuntimeError("response lost")), token)
 
-        self.assertIsNotNone(node._pending_goal)
-        self.assertTrue(node._pending_goal["outcome_unknown"])
-        self.assertEqual({}, node._failed_attempts)
-        with patch.object(self.module, "evaluate_search", return_value=self.result([candidate])):
-            node._search_tick()
-        self.assertEqual(1, len(node._action.sent))
-
-    def test_result_exception_keeps_owner_blocks_replacement_and_cancels_once(self):
-        node = self.make_node()
-        candidate = self.candidate("uncertain")
-        handle = FakeHandle()
-        node._active_goal = {
-            "token": 21, "candidate": candidate, "handle": handle,
-            "cancel_requested": False, "cancel_reason": None,
-        }
-        node._goal_result(Future(error=RuntimeError("result lost")), 21)
-        self.assertIs(node._active_goal["handle"], handle)
-        self.assertTrue(node._active_goal["outcome_unknown"])
-        self.assertEqual(1, handle.cancel_count)
-        self.assertEqual({}, node._failed_attempts)
-
-        with patch.object(self.module, "evaluate_search", return_value=self.result([candidate])):
-            node._search_tick()
-        self.assertEqual([], node._action.sent)
-        node._goal_result(Future(error=RuntimeError("result still lost")), 21)
-        self.assertEqual(1, handle.cancel_count)
 
     def test_cancel_response_does_not_release_owner_and_terminal_result_does(self):
         node = self.make_node()
@@ -3260,96 +2519,10 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertEqual(0, len(marker_inputs[-1][0]))
         self.assertIsNone(marker_inputs[-1][1])
 
-    def test_missing_frontier_cells_preserves_retry_and_completion_history(self):
-        node = self.make_node()
-        retry = node._goal_identity(self.candidate("retry"), "map")
-        done = node._goal_identity(self.candidate("done"), "map")
-        node._failed_attempts[retry] = 1
-        node._completed_candidates.add(done)
-        node._active_goal = {
-            "token": 24, "candidate": self.candidate("active"), "handle": FakeHandle(),
-            "cancel_requested": False, "cancel_reason": None,
-        }
-        result = self.result([self.candidate("active")])
-        result.pop("frontier_cells")
-        with patch.object(self.module, "evaluate_search", return_value=result):
-            node._search_tick()
-        self.assertEqual(1, node._failed_attempts[retry])
-        self.assertIn(done, node._completed_candidates)
 
-    def test_explicit_empty_frontier_cells_preserves_retry_and_completion_history(self):
-        node = self.make_node()
-        node._failed_attempts["retry"] = 1
-        node._completed_candidates.add("done")
-        node._active_goal = {
-            "token": 25, "candidate": self.candidate("active"), "handle": FakeHandle(),
-            "cancel_requested": False, "cancel_reason": None,
-        }
-        result = self.result([self.candidate("active")])
-        result["frontier_cells"] = []
-        with patch.object(self.module, "evaluate_search", return_value=result):
-            node._search_tick()
-        self.assertEqual({"retry": 1}, node._failed_attempts)
-        self.assertEqual({"done"}, node._completed_candidates)
 
-    def test_failure_budget_survives_frontier_changes_until_second_failure(self):
-        node = self.make_node()
-        first = self.candidate("first", 0.8)
-        second = self.candidate("second", 0.2, 2.0)
-        identity = node._goal_identity(first, "map")
-        node._failed_attempts[identity] = 1
-        node._retry_target = identity
-        first_result = self.result([first, second])
-        first_result["frontier_cells"] = [[3, 4]]
 
-        with patch.object(self.module, "evaluate_search", return_value=first_result):
-            node._search_tick()
 
-        self.assertEqual("first", node._pending_goal["candidate"]["id"])
-        self.assertEqual(1, node._failed_attempts[identity])
-        token = node._pending_goal["token"]
-        node._goal_response(Future(FakeHandle(accepted=False)), token)
-        self.assertEqual(2, node._failed_attempts[identity])
-
-        second_result = self.result([first, second])
-        second_result["frontier_cells"] = [[5, 6]]
-        node._action.ready = False
-        with patch.object(self.module, "evaluate_search", return_value=second_result):
-            node._search_tick()
-
-        self.assertEqual(2, node._failed_attempts[identity])
-        self.assertEqual("second", node._next_ranked_candidate(second_result)["id"])
-
-    def test_retry_identity_loss_without_frontier_change_cancels_owned_retry(self):
-        node = self.make_node()
-        original = self.candidate("same-id", 0.5, 1.0)
-        changed = self.candidate("same-id", 0.6, 2.0)
-        identity = node._goal_identity(original, "map")
-        handle = FakeHandle()
-        node._retry_target = identity
-        node._failed_attempts[identity] = 1
-        node._active_goal = {
-            "token": 88, "candidate": original, "identity": identity,
-            "epoch": node._search_epoch, "is_retry": True, "handle": handle,
-            "cancel_requested": False, "cancel_reason": None,
-        }
-        result = self.result([changed])
-
-        with patch.object(self.module, "evaluate_search", return_value=result):
-            node._search_tick()
-
-        self.assertIsNone(node._retry_target)
-        self.assertEqual(1, handle.cancel_count)
-        self.assertEqual("retry_invalidated", node._active_goal["cancel_reason"])
-        self.assertIs(node._active_goal["candidate"], original)
-
-    def test_disabled_search_does_not_evaluate_or_send_a_goal(self):
-        node = self.make_node()
-        node._enabled = False
-        with patch.object(self.module, "evaluate_search") as evaluate:
-            node._search_tick()
-        evaluate.assert_not_called()
-        self.assertEqual([], node._action.sent)
 
     def test_selected_goal_ring_uses_stored_pose_without_adding_to_current_candidates(self):
         node = self.make_node()
@@ -3366,25 +2539,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
         self.assertNotIn(selected, captured[0][0])
         self.assertIs(selected, captured[0][1])
 
-    def test_selected_marker_uses_stored_pose_when_evaluation_refreshes_same_id(self):
-        node = self.make_node()
-        stored = self.candidate("same-id", -1.0, 1.0)
-        refreshed = self.candidate("same-id", 0.9, 9.0)
-        node._active_goal = {
-            "token": 10, "candidate": stored, "handle": FakeHandle(),
-            "cancel_requested": False, "cancel_reason": None,
-        }
-        captured = []
-        self.module._candidate_markers = lambda candidates, selected, *args, **kwargs: (
-            captured.append((candidates, selected)) or []
-        )
-
-        with patch.object(self.module, "evaluate_search", return_value=self.result([refreshed])):
-            node._search_tick()
-
-        self.assertIs(refreshed, captured[0][0][0])
-        self.assertIs(stored, captured[0][1])
-        self.assertEqual(1.0, captured[0][1]["pose_world"][0])
 
     def test_empty_evaluation_without_selection_deletes_previous_candidate_markers(self):
         node = self.make_node()

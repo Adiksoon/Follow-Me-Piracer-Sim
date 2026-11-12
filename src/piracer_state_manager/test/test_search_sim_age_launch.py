@@ -31,6 +31,23 @@ def test_child_launch_defaults_to_half_second_and_types_parameter_as_float():
             SOURCE / "launch/search_state_manager.launch.py",
         )
     description = child.generate_launch_description()
+    map_argument = next(
+        entity for entity in description.entities
+        if isinstance(entity, DeclareLaunchArgument) and entity.name == "map_topic"
+    )
+    assert perform_substitutions(LaunchContext(), map_argument.default_value) == "/nav2/map"
+    core_node = next(
+        entity for entity in description.entities
+        if isinstance(entity, Node)
+        and entity._Node__node_name == "piracer_explore_frontier_core"
+    )
+    core_parameters = core_node._Node__parameters[0]
+    core_parameter = {
+        perform_substitutions(LaunchContext(), key): value
+        for key, value in core_parameters.items()
+    }
+    assert core_parameter["potential_scale"] == 3.0
+    assert core_parameter["gain_scale"] == 1.0
     argument = next(
         entity for entity in description.entities
         if isinstance(entity, DeclareLaunchArgument)

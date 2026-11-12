@@ -106,23 +106,8 @@ planner_server:
   ros__parameters:
     use_sim_time: true
     expected_planner_frequency: 5.0
-    planner_plugins: [Hybrid, FollowHybrid]
+    planner_plugins: [Hybrid]
     Hybrid:
-      plugin: nav2_smac_planner/SmacPlannerHybrid
-      tolerance: 0.10
-      downsample_costmap: false
-      allow_unknown: false
-      max_iterations: 1000000
-      max_on_approach_iterations: 1000
-      max_planning_time: 2.0
-      motion_model_for_search: DUBIN
-      # Leave steering margin for path tracking near the goal (Run10 overshot).
-      minimum_turning_radius: 0.50
-      angle_quantization_bins: 72
-      analytic_expansion_ratio: 3.5
-      allow_reverse_expansion: false
-    FollowHybrid:
-      # FOLLOW may plan around a partially mapped obstacle toward a known goal.
       plugin: nav2_smac_planner/SmacPlannerHybrid
       tolerance: 0.10
       downsample_costmap: false
@@ -131,6 +116,7 @@ planner_server:
       max_on_approach_iterations: 1000
       max_planning_time: 2.0
       motion_model_for_search: DUBIN
+      # Leave steering margin for path tracking near the goal (Run10 overshot).
       minimum_turning_radius: 0.50
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5

@@ -96,7 +96,8 @@ kinematic/configuration bounds, not measured vehicle performance.
 The collision geometry gives an overall unpadded XY envelope of approximately
 `x=[-0.010, 0.236] m`, `y=[-0.0985, 0.0985] m` around `base_link`. The costmap
 footprint adds 0.010 m on each side. The global costmap uses `/map` and retains
-UNKNOWN cells; the Hybrid planner rejects unknown space. The local rolling
+UNKNOWN cells; the shared Hybrid planner can plan through unknown space while
+the live obstacle and collision checks remain active. The local rolling
 costmap uses `vo_odom` and live scan observations. A map is not treated as a
 replacement for current obstacle data.
 

@@ -1,9 +1,9 @@
 """Search lifecycle, shared frontier evaluation, and Nav2 goal handoff."""
 
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 import json
 import math
+import time
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -25,11 +25,12 @@ from rclpy.time import Time
 from rclpy.utilities import try_shutdown
 from rtabmap_msgs.msg import OdomInfo
 from std_srvs.srv import SetBool
+from std_msgs.msg import String
 from tf2_ros import Buffer
 from visualization_msgs.msg import MarkerArray
 
 from .search_markers import _candidate_markers, _stale_marker_deletions
-from .search_algorithm import evaluate_search, match_active_frontiers, revalidate_candidate
+from .frontier_matching import match_active_frontiers
 from .tf_timing import SearchTfReceiver
 
 
@@ -44,11 +45,6 @@ def _map_subscription_qos():
 
 def _odom_info_subscription_qos():
     return qos_profile_sensor_data
-
-
-def _evaluate_frontier_snapshot(grid, robot_pose):
-    """Pure computation: no node, action client or navigation state in the worker."""
-    return evaluate_search(grid, robot_pose)
 
 
 # Conservative default for direct and physical launches. The full simulation
@@ -81,9 +77,7 @@ class SearchNode(Node):
         self._enabled = False
         self._search_epoch = 0
         self._localization_generation = 0
-        self._evaluation_executor = ThreadPoolExecutor(max_workers=1)
-        self._evaluation_future = None
-        self._evaluation_context = None
+        self._latest_frontier_result = None
         self._map = None
         self._last_cluster_ranking = None
         self._cluster_ranking_context = None
@@ -130,6 +124,13 @@ class SearchNode(Node):
             _map_subscription_qos(),
             callback_group=self._search_callback_group,
         )
+        self._frontier_pose = self.create_publisher(
+            PoseStamped, "/piracer/search/robot_pose", 10
+        )
+        self._frontier_results = self.create_subscription(
+            String, "/piracer/search/frontiers", self._frontier_result_callback, 10,
+            callback_group=self._search_callback_group,
+        )
         self._start_stop = self.create_service(
             SetBool, self.get_parameter("start_stop_service").value, self._set_search,
             callback_group=self._search_callback_group,
@@ -167,6 +168,18 @@ class SearchNode(Node):
 
     def _map_callback(self, message):
         self._map = message
+
+    def _frontier_result_callback(self, message):
+        try:
+            result = json.loads(message.data)
+            if (result.get("frame") != (self._map.header.frame_id if self._map else None)
+                    or not isinstance(result.get("candidates"), list)
+                    or not isinstance(result.get("ranking"), list)):
+                return
+            result["_received_monotonic_ns"] = time.monotonic_ns()
+            self._latest_frontier_result = result
+        except (TypeError, ValueError):
+            self.get_logger().warning("Ignoring invalid frontier-core result")
 
     @staticmethod
     def _stamp_ns(message):
@@ -569,126 +582,33 @@ class SearchNode(Node):
             return
         if (getattr(self, "_next_goal_requested", False) and not self._has_goal_ownership()
                 and getattr(self, "_last_cluster_ranking", None) is not None):
-            proposal = getattr(self, "_replacement_proposal", None)
-            if proposal is not None:
-                proposal_context = proposal["context"]
-                valid_context = (
-                    proposal_context.get("epoch") == self._search_epoch
-                    and proposal_context.get("localization_generation") == self._localization_generation
-                    and proposal_context.get("frame") == self._map.header.frame_id
-                    and proposal_context.get("clock_epoch") == self._clock_epoch
-                )
-                try:
-                    proposal_grid = self._grid()
-                except Exception:
-                    proposal_grid = None
-                original = proposal["candidate"]
-                original_identity = self._goal_identity(original, self._map.header.frame_id)
-                usable = (valid_context and proposal_grid is not None
-                          and original_identity not in self._completed_candidates
-                          and original_identity not in self._exhausted_candidates
-                          and self._failed_attempts.get(original_identity, 0) < 2)
-                fresh = (revalidate_candidate(proposal_grid, tuple(robot_pose), original)
-                         if usable else None)
-                identity = (self._goal_identity(fresh, self._map.header.frame_id)
-                            if fresh is not None else None)
-                if (fresh is not None and (identity in self._completed_candidates
-                        or identity in self._exhausted_candidates
-                        or self._failed_attempts.get(identity, 0) >= 2)):
-                    fresh = None
-                self._replacement_proposal = None
-                self._next_goal_requested = False
-                if fresh is not None and self._action.server_is_ready():
-                    self._next_goal_dynamic = True
-                    self._replacement_target = None
-                    behavior_tree = self.get_parameter("behavior_tree").value
-                    if behavior_tree and self._send_goal(fresh, behavior_tree):
-                        return
-                    self._next_goal_dynamic = False
-                self._replacement_target = None
-                self._last_cluster_ranking = None
-                self._cluster_ranking_context = None
-            # A dynamic cancellation must never fall through to the old cache.
-            else:
-                context = getattr(self, "_cluster_ranking_context", None) or {}
-                if (context.get("epoch") == self._search_epoch
-                        and context.get("localization_generation") == self._localization_generation
-                        and context.get("frame") == self._map.header.frame_id
-                        and context.get("clock_epoch") == self._clock_epoch):
-                    try:
-                        current_grid = self._grid()
-                    except Exception:
-                        current_grid = None
-                    if current_grid is not None:
-                        for candidate in self._ranked_candidates(
-                            self._last_cluster_ranking, include_coarse=True):
-                            old_identity = self._goal_identity(
-                                candidate, self._map.header.frame_id
-                            )
-                            if (old_identity in self._completed_candidates
-                                    or old_identity in self._exhausted_candidates
-                                    or self._failed_attempts.get(old_identity, 0) >= 2):
-                                continue
-                            fresh = revalidate_candidate(current_grid, tuple(robot_pose), candidate)
-                            if fresh is None:
-                                continue
-                            identity = self._goal_identity(fresh, self._map.header.frame_id)
-                            eligible = self._next_ranked_candidate({
-                                "candidates": [fresh], "ranking": [fresh["id"]]
-                            })
-                            if eligible is None or self._failed_attempts.get(identity, 0) >= 2:
-                                continue
-                            behavior_tree = self.get_parameter("behavior_tree").value
-                            if behavior_tree and self._action.server_is_ready():
-                                self._next_goal_requested = False
-                                if self._send_goal(fresh, behavior_tree):
-                                    return
-                                break
+            # A terminal result releases ownership. Re-evaluate upstream before
+            # dispatching another centroid so no stale cached goal is reused.
+            self._replacement_proposal = None
+            self._replacement_target = None
             self._next_goal_requested = False
             self._last_cluster_ranking = None
             self._cluster_ranking_context = None
-        if self._evaluation_future is None:
-            try:
-                grid = self._grid()
-            except Exception as error:
-                self.get_logger().debug(f"Search waits for current map/TF: {error}")
-                return
-            # These values belong to this job only. The worker never sees self.
-            self._evaluation_context = {
-                "epoch": self._search_epoch,
-                "localization_generation": self._localization_generation,
-                "frame": self._map.header.frame_id,
-                "grid": grid,
-            }
-            self._evaluation_future = self._evaluation_executor.submit(
-                _evaluate_frontier_snapshot, grid, tuple(robot_pose),
-            )
+        pose_msg = PoseStamped()
+        pose_msg.header.frame_id = self._map.header.frame_id
+        pose_msg.header.stamp = self.get_clock().now().to_msg()
+        pose_msg.pose.position.x, pose_msg.pose.position.y = robot_pose[:2]
+        pose_msg.pose.orientation.z = math.sin(robot_pose[2] / 2.0)
+        pose_msg.pose.orientation.w = math.cos(robot_pose[2] / 2.0)
+        self._frontier_pose.publish(pose_msg)
 
-        # Do not wait in the callback group, or queue a second evaluation.
-        if not self._evaluation_future.done():
+        result = self._latest_frontier_result
+        if result is None:
             return
-        future = self._evaluation_future
-        context = self._evaluation_context
-        self._evaluation_future = None
-        self._evaluation_context = None
-        try:
-            result = future.result()
-        except Exception as error:
-            self.get_logger().debug(f"Search evaluation failed: {error}")
+        if result.get("map_stamp_ns") != self._stamp_ns(self._map):
             return
-        try:
-            map_matches = context["grid"] == self._grid()
-        except Exception as error:
-            self.get_logger().debug(f"Search waits for current map/TF: {error}")
+        if time.monotonic_ns() - result.get("_received_monotonic_ns", 0) > 2_000_000_000:
             return
-        if (not self._enabled
-                or context["epoch"] != self._search_epoch
-                or context["localization_generation"] != self._localization_generation
-                or context["frame"] != self._map.header.frame_id
-                or not map_matches):
+        result_pose = result.get("robot_xy")
+        if (not isinstance(result_pose, list) or len(result_pose) != 2
+                or math.dist(result_pose, robot_pose[:2]) > 0.10):
             return
-        if self._localization_pose(self._map.header.frame_id) is None:
-            return
+        self._latest_frontier_result = None
         self._apply_search_result(result)
 
     def _apply_search_result(self, result):
@@ -867,17 +787,9 @@ class SearchNode(Node):
         goal.pose.header.stamp = now.to_msg()
         goal.pose.pose.position.x, goal.pose.pose.position.y = candidate["pose_world"][:2]
         goal.pose.pose.position.z = 0.0
-        # The evaluator checks the full footprint using this approach yaw. Keep
-        # the sent orientation identical to that check, even if the robot moves
-        # slightly while the worker result is being handed back.
-        yaw = candidate.get("goal_yaw")
-        if (not isinstance(yaw, (int, float)) or isinstance(yaw, bool)
-                or not math.isfinite(yaw)):
-            dx = goal.pose.pose.position.x - robot_pose[0]
-            dy = goal.pose.pose.position.y - robot_pose[1]
-            yaw = math.atan2(dy, dx) if math.hypot(dx, dy) > 1e-9 else robot_pose[2]
-        goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
-        goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        goal.pose.pose.orientation.z = 0.0
+        goal.pose.pose.orientation.w = 1.0
+        yaw = 0.0
         goal.behavior_tree = behavior_tree
 
         self._goal_sequence += 1
@@ -1178,7 +1090,6 @@ def main(args=None):
         if executor is not None:
             executor.shutdown()
         node._tf_receiver.close()
-        node._evaluation_executor.shutdown(wait=True, cancel_futures=True)
         node.destroy_node()
         try_shutdown()
 

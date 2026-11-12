@@ -20,7 +20,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "map_topic",
-            default_value="/map",
+            default_value="/nav2/map",
             description="OccupancyGrid topic consumed by Search.",
         ),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
@@ -41,6 +41,19 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("max_localization_age_sec", default_value="0.5"),
         DeclareLaunchArgument("tf_future_lead_sec", default_value="0.1"),
+        Node(
+            package="piracer_explore_core",
+            executable="frontier_eval_node",
+            name="piracer_explore_frontier_core",
+            output="screen",
+            parameters=[{
+                "map_topic": LaunchConfiguration("map_topic"),
+                "pose_topic": "/piracer/search/robot_pose",
+                "result_topic": "/piracer/search/frontiers",
+                "potential_scale": 3.0,
+                "gain_scale": 1.0,
+            }],
+        ),
         Node(
             package="piracer_search",
             executable="search_node",

@@ -48,16 +48,13 @@ def test_inflation_radius_covers_configured_footprint_circumradius():
         assert params["inflation_layer"]["inflation_radius"] >= circumradius
 
 
-def test_follow_and_search_planners_share_kinematics_and_keep_unknown_policy_separate():
+def test_search_acquire_and_follow_share_one_hybrid_planner_policy():
     from xml.etree import ElementTree as ET
     config = yaml.safe_load((ROOT / "config/nav2_params.yaml").read_text())
     planners = config["planner_server"]["ros__parameters"]
-    assert planners["planner_plugins"] == ["Hybrid", "FollowHybrid"]
-    assert planners["Hybrid"]["allow_unknown"] is False
-    assert planners["FollowHybrid"]["allow_unknown"] is True
-    assert planners["FollowHybrid"]["smooth_path"] is False
-    assert {k: v for k, v in planners["Hybrid"].items() if k != "allow_unknown"} == {
-        k: v for k, v in planners["FollowHybrid"].items() if k not in ("allow_unknown", "smooth_path")}
+    assert planners["planner_plugins"] == ["Hybrid"]
+    assert planners["Hybrid"]["allow_unknown"] is True
+    assert planners["Hybrid"]["smooth_path"] is False
     follow = ET.parse(ROOT / "behavior_trees/follow_navigate_to_pose.xml")
     pipeline = follow.find('./BehaviorTree/PipelineSequence')
     assert [node.tag for node in pipeline] == ['RateController', 'FollowPath']
@@ -70,7 +67,7 @@ def test_follow_and_search_planners_share_kinematics_and_keep_unknown_policy_sep
     assert 'nav2_goal_updater_node_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
     assert 'nav2_rate_controller_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
     assert 'nav2_pipeline_sequence_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
-    assert follow.find('.//ComputePathToPose').get('planner_id') == 'FollowHybrid'
+    assert follow.find('.//ComputePathToPose').get('planner_id') == 'Hybrid'
     assert follow.find('.//FollowPath').get('goal_checker_id') == 'search_goal_checker'
     search = ET.parse(ROOT.parent / "piracer_search/behavior_trees/search_navigate_to_pose.xml")
     assert search.find('.//ComputePathToPose').get('planner_id') == 'Hybrid'
