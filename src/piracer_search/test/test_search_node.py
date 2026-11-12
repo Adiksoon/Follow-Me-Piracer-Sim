@@ -652,11 +652,6 @@ class SearchNodeCallbackTest(unittest.TestCase):
             "frontier_cells": [[1, 2]],
             "ranking": [item["id"] for item in ranked],
             "candidates": candidates,
-            "cluster_candidates": [
-                {"cluster_id": item["cluster_id"], "score": item["score"],
-                 "frontiers_world": item["source_frontiers_world"], "id": item["id"]}
-                for item in candidates
-            ],
         }
 
     def test_map_subscription_uses_reliable_transient_local_depth_one_qos(self):

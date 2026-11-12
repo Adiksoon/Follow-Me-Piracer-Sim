@@ -100,11 +100,6 @@ private:
       if (i) {json << ",";}
       json << encoded[i];
     }
-    json << "],\"cluster_candidates\":[";
-    for (size_t i = 0; i < encoded.size(); ++i) {
-      if (i) {json << ",";}
-      json << encoded[i];
-    }
     json << "],\"ranking\":[";
     for (size_t i = 0; i < frontiers.size(); ++i) {
       if (i) {json << ",";}

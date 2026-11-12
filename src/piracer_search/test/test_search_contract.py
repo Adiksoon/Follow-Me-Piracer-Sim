@@ -102,7 +102,6 @@ def evaluation(candidates):
         "clustered": True,
         "candidates": ranked,
         "ranking": [item["id"] for item in ranked],
-        "cluster_candidates": ranked,
     }
 
 
