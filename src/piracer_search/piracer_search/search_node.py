@@ -30,7 +30,6 @@ from tf2_ros import Buffer
 from visualization_msgs.msg import MarkerArray
 
 from .search_markers import _candidate_markers, _stale_marker_deletions
-from .frontier_matching import match_active_frontiers
 from .tf_timing import SearchTfReceiver
 
 
@@ -53,7 +52,7 @@ DEFAULT_TF_FUTURE_LEAD_NS = 100_000_000
 
 
 class SearchNode(Node):
-    """Evaluate one map snapshot, visualize it, and own at most one Nav2 goal."""
+    """Evaluate frontiers and track every Search-owned Nav2 goal to settlement."""
 
     def __init__(self):
         super().__init__("piracer_search")
@@ -72,27 +71,26 @@ class SearchNode(Node):
         if not math.isfinite(tf_future_lead_sec) or tf_future_lead_sec < 0.0:
             raise ValueError("tf_future_lead_sec must be finite and non-negative")
         self._tf_future_lead_ns = round(tf_future_lead_sec * 1_000_000_000)
-        self.declare_parameter("goal_switch_margin", 0.10)
+        self.declare_parameter("progress_timeout", 30.0)
+        progress_timeout_sec = float(self.get_parameter("progress_timeout").value)
+        if not math.isfinite(progress_timeout_sec) or progress_timeout_sec <= 0.0:
+            raise ValueError("progress_timeout must be finite and positive")
+        self._progress_timeout_ns = round(progress_timeout_sec * 1_000_000_000)
 
         self._enabled = False
         self._search_epoch = 0
         self._localization_generation = 0
         self._latest_frontier_result = None
         self._map = None
-        self._last_cluster_ranking = None
-        self._cluster_ranking_context = None
-        self._next_goal_requested = False
-        self._failed_attempts = {}
-        self._exhausted_candidates = set()
-        self._completed_candidates = set()
-        self._retry_target = None
-        self._replacement_target = None
-        self._replacement_proposal = None
-        self._goal_switch_deadline_ns = None
-        self._next_goal_dynamic = False
         self._goal_sequence = 0
-        self._pending_goal = None
-        self._active_goal = None
+        self._owned_goals = {}
+        self._current_goal_token = None
+        self._active_goal_token = None
+        self._goal_active = False
+        self._blacklisted_frontiers = []
+        self._progress_goal_token = None
+        self._progress_min_distance = None
+        self._progress_started_ns = None
         self._published_marker_keys = set()
         self._odom_info = deque(maxlen=10)
         self._last_processed_odom_info_sequence = 0
@@ -231,14 +229,11 @@ class SearchNode(Node):
         return now_ns
 
     def _mark_owned_goal_localization_invalidated(self, reason):
-        if self._pending_goal is not None:
-            self._pending_goal["localization_invalidated"] = True
-            if self._pending_goal["cancel_reason"] is None:
-                self._pending_goal["cancel_reason"] = reason
-        if self._active_goal is not None:
-            self._active_goal["localization_invalidated"] = True
-            if not self._active_goal["cancel_requested"]:
-                self._cancel_active_goal(reason)
+        for goal in self._owned_goals.values():
+            goal["localization_invalidated"] = True
+            if goal["cancel_reason"] is None:
+                goal["cancel_reason"] = reason
+            self._cancel_goal(goal, reason)
 
     def _handle_clock_regression(self, now_ns):
         self._clock_epoch += 1
@@ -254,7 +249,6 @@ class SearchNode(Node):
         self._last_accepted_odom_stamp_ns = None
         self._last_accepted_full_tf_stamp_ns = None
         self._mark_owned_goal_localization_invalidated("clock_regression")
-        self._reset_challenger()
         if was_available or self._localization_reason != "ROS clock moved backwards":
             self.get_logger().warning("Search localization invalidated: ROS clock moved backwards")
         self._localization_reason = "ROS clock moved backwards"
@@ -297,7 +291,6 @@ class SearchNode(Node):
                     else after_odom_info_sequence
                 ),
             )
-        self._reset_challenger()
         self._mark_owned_goal_localization_invalidated("localization_invalidated")
         if was_available or self._localization_reason != reason:
             message = f"Search localization invalidated: {reason}"
@@ -517,32 +510,22 @@ class SearchNode(Node):
         if request.data:
             if not self._enabled:
                 self._search_epoch += 1
-                self._last_cluster_ranking = None
-                self._cluster_ranking_context = None
-                self._next_goal_requested = False
-                self._failed_attempts.clear()
-                self._exhausted_candidates.clear()
-                self._completed_candidates.clear()
-                self._retry_target = None
-                self._replacement_target = None
-                self._reset_challenger()
+                self._blacklisted_frontiers.clear()
+                self._reset_progress()
             self._enabled = True
             response.message = "Search enabled"
         else:
             if self._enabled:
                 self._search_epoch += 1
-            self._last_cluster_ranking = None
-            self._cluster_ranking_context = None
-            self._next_goal_requested = False
             self._enabled = False
-            if self._pending_goal is not None:
-                self._pending_goal["cancel_reason"] = "search_disabled"
-            self._cancel_active_goal("search_disabled")
-            self._reset_challenger()
+            for goal in self._owned_goals.values():
+                if goal["cancel_reason"] is None:
+                    goal["cancel_reason"] = "search_disabled"
+                self._cancel_goal(goal, "search_disabled")
             if self._has_goal_ownership():
-                selected = self._selected_for_markers({"candidates": []}, {})
+                selected = self._selected_for_markers({"candidates": []})
                 self._publish_markers({"candidates": []}, selected)
-                response.message = "Search disabled; waiting for Nav2 terminal result"
+                response.message = "Search disabled; waiting for Search-owned goals to settle"
             else:
                 self._publish_markers({"candidates": []}, None)
                 response.message = "Search disabled"
@@ -550,24 +533,7 @@ class SearchNode(Node):
         return response
 
     def _has_goal_ownership(self):
-        return self._pending_goal is not None or self._active_goal is not None
-
-    def _grid(self):
-        info = self._map.info
-        origin = info.origin
-        orientation = origin.orientation
-        origin_yaw = math.atan2(
-            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
-            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
-        )
-        return {
-            "width": info.width,
-            "height": info.height,
-            "resolution": info.resolution,
-            "origin": [origin.position.x, origin.position.y, origin_yaw],
-            "data": tuple(self._map.data),
-        }
-
+        return bool(self._owned_goals)
 
     def _search_tick(self):
         self._drain_odom_info_snapshot()
@@ -576,26 +542,9 @@ class SearchNode(Node):
 
         robot_pose = self._localization_pose(self._map.header.frame_id)
         if robot_pose is None:
-            self._last_cluster_ranking = None
-            self._cluster_ranking_context = None
-            self._next_goal_requested = False
             return
-        if (getattr(self, "_next_goal_requested", False) and not self._has_goal_ownership()
-                and getattr(self, "_last_cluster_ranking", None) is not None):
-            # A terminal result releases ownership. Re-evaluate upstream before
-            # dispatching another centroid so no stale cached goal is reused.
-            self._replacement_proposal = None
-            self._replacement_target = None
-            self._next_goal_requested = False
-            self._last_cluster_ranking = None
-            self._cluster_ranking_context = None
-        pose_msg = PoseStamped()
-        pose_msg.header.frame_id = self._map.header.frame_id
-        pose_msg.header.stamp = self.get_clock().now().to_msg()
-        pose_msg.pose.position.x, pose_msg.pose.position.y = robot_pose[:2]
-        pose_msg.pose.orientation.z = math.sin(robot_pose[2] / 2.0)
-        pose_msg.pose.orientation.w = math.cos(robot_pose[2] / 2.0)
-        self._frontier_pose.publish(pose_msg)
+        self._check_progress_timeout()
+        self._publish_frontier_pose(robot_pose)
 
         result = self._latest_frontier_result
         if result is None:
@@ -611,28 +560,22 @@ class SearchNode(Node):
         self._latest_frontier_result = None
         self._apply_search_result(result)
 
+    def _publish_frontier_pose(self, robot_pose):
+        pose_msg = PoseStamped()
+        pose_msg.header.frame_id = self._map.header.frame_id
+        pose_msg.header.stamp = self.get_clock().now().to_msg()
+        pose_msg.pose.position.x, pose_msg.pose.position.y = robot_pose[:2]
+        pose_msg.pose.orientation.z = math.sin(robot_pose[2] / 2.0)
+        pose_msg.pose.orientation.w = math.cos(robot_pose[2] / 2.0)
+        self._frontier_pose.publish(pose_msg)
+
     def _apply_search_result(self, result):
         """Only the Search callback consumes results and changes navigation state."""
-        candidates = {candidate["id"]: candidate for candidate in result["candidates"]}
-        if result.get("clustered"):
-            self._last_cluster_ranking = dict(result)
-            self._cluster_ranking_context = {
-                "epoch": self._search_epoch,
-                "localization_generation": self._localization_generation,
-                "clock_epoch": self._clock_epoch,
-                "frame": self._map.header.frame_id,
-            }
-        else:
-            self._last_cluster_ranking = None
-            self._cluster_ranking_context = None
-        self._invalidate_missing_owned_retry(candidates)
-        selected = self._selected_for_markers(result, candidates)
+        selected = self._selected_for_markers(result)
         self._publish_markers(result, selected)
-        self._consider_goal_switch(result, candidates)
-
-        if self._pending_goal is not None or self._active_goal is not None:
+        if not self._enabled or result["status"] != "RECOMMENDATION_AVAILABLE":
             return
-        if result["status"] != "RECOMMENDATION_AVAILABLE":
+        if any(goal.get("localization_invalidated") for goal in self._owned_goals.values()):
             return
         if not self._action.server_is_ready():
             return
@@ -642,49 +585,27 @@ class SearchNode(Node):
             self.get_logger().warning("Search has no NavigateToPose behavior_tree configured")
             return
         candidate = self._next_ranked_candidate(result)
-        if candidate is not None:
-            self._send_goal(candidate, behavior_tree)
-        elif (result.get("clustered") and result.get("cluster_candidates")
-                and self._ranked_candidates(result, include_coarse=True)):
-            # Detailed safe options can all be consumed while lower ranked coarse
-            # options remain. Let the next timer tick validate that backlog.
-            self._next_goal_requested = True
+        if candidate is None:
+            return
+        current = self._owned_goals.get(self._current_goal_token)
+        if (self._goal_active and current is not None
+                and self._same_point(current["candidate"], candidate)):
+            self._update_progress(current, candidate)
+            return
+        self._send_goal(candidate, behavior_tree)
 
-    def _selected_for_markers(self, result, candidates):
-        current = self._pending_goal or self._active_goal
+    def _selected_for_markers(self, result):
+        current = self._latest_owned_goal()
         if current is not None:
             return current["candidate"]
         return self._next_ranked_candidate(result)
-
-    def _invalidate_missing_owned_retry(self, candidates):
-        eligible_identities = {
-            self._goal_identity(candidate, self._map.header.frame_id)
-            for candidate in candidates.values()
-        }
-        if (self._retry_target is not None
-                and self._retry_target not in eligible_identities):
-            self._retry_target = None
-        owner = self._pending_goal or self._active_goal
-        if owner is None or not owner.get("is_retry"):
-            return
-        identity = owner["identity"]
-        if identity in eligible_identities:
-            return
-        if self._retry_target == identity:
-            self._retry_target = None
-        if owner.get("cancel_reason") is not None:
-            return
-        if owner is self._pending_goal:
-            owner["cancel_reason"] = "retry_invalidated"
-        else:
-            self._cancel_active_goal("retry_invalidated")
 
     def _publish_markers(self, result, selected):
         if self._map is None:
             return
         candidates = list(result.get("candidates", []))
         frame = self._map.header.frame_id or "map"
-        current = self._pending_goal or self._active_goal
+        current = self._latest_owned_goal()
         selected_frame = current.get("frame_id", frame) if current is not None else frame
         stamp = self.get_clock().now().to_msg()
         message = MarkerArray()
@@ -706,74 +627,75 @@ class SearchNode(Node):
         self._markers.publish(message)
 
     def _next_ranked_candidate(self, result):
-        ranked = self._ranked_candidates(result)
-
-        if self._replacement_target is not None:
-            replacement = next(
-                (candidate for candidate in ranked
-                 if self._goal_identity(candidate, self._map.header.frame_id)
-                 == self._replacement_target
-                 and self._goal_identity(candidate, self._map.header.frame_id)
-                 not in self._completed_candidates
-                 and self._replacement_target not in self._exhausted_candidates
-                 and self._failed_attempts.get(self._replacement_target, 0) < 2),
-                None,
-            )
-            if replacement is not None:
-                return replacement
-            self._replacement_target = None
-
-        if self._retry_target is not None:
-            retry = next(
-                (candidate for candidate in ranked
-                 if self._goal_identity(candidate, self._map.header.frame_id)
-                 == self._retry_target
-                 and self._retry_target not in self._completed_candidates
-                 and self._retry_target not in self._exhausted_candidates
-                 and self._failed_attempts.get(self._retry_target, 0) < 2),
-                None,
-            )
-            if retry is not None:
-                return retry
-            self._retry_target = None
-
         return next(
-            (
-                candidate for candidate in ranked
-                if self._goal_identity(candidate, self._map.header.frame_id)
-                not in self._completed_candidates
-                and self._goal_identity(candidate, self._map.header.frame_id)
-                not in self._exhausted_candidates
-                and self._failed_attempts.get(
-                    self._goal_identity(candidate, self._map.header.frame_id), 0
-                ) < 2
-            ),
+            (candidate for candidate in self._ranked_candidates(result)
+             if not self._is_blacklisted(candidate)),
             None,
         )
 
     @staticmethod
-    def _ranked_candidates(result, include_coarse=False):
+    def _ranked_candidates(result):
         candidates = list(result.get("candidates", []))
         by_id = {candidate["id"]: candidate for candidate in candidates}
-        extra = (list(result.get("cluster_candidates", []))
-                 if include_coarse and result.get("clustered") else [])
-        ready_clusters = {candidate.get("cluster_id") for candidate in candidates
-                          if candidate.get("cluster_id") is not None}
-        for candidate in extra:
-            cluster_id = candidate.get("cluster_id")
-            if cluster_id is not None and cluster_id in ready_clusters:
-                continue
-            by_id.setdefault(candidate["id"], candidate)
-        ordering = list(result.get("ranking", []))
-        ordering.extend(c["id"] for c in extra if c["id"] not in ordering)
-        return [by_id[candidate_id] for candidate_id in ordering if candidate_id in by_id]
+        return [by_id[candidate_id] for candidate_id in result.get("ranking", [])
+                if candidate_id in by_id]
+
+    def _is_blacklisted(self, candidate):
+        x, y = (float(value) for value in candidate["pose_world"][:2])
+        tolerance = 5.0 * float(self._map.info.resolution)
+        return any(
+            abs(x - blacklisted_x) < tolerance
+            and abs(y - blacklisted_y) < tolerance
+            for blacklisted_x, blacklisted_y in self._blacklisted_frontiers
+        )
 
     @staticmethod
-    def _goal_identity(candidate, frame_id):
-        if "cluster_size" in candidate:
-            x, y = candidate["pose_world"][:2]
-            return ("cluster", frame_id, round(float(x), 6), round(float(y), 6))
-        return (candidate["id"], frame_id, tuple(candidate["pose_world"]))
+    def _same_point(first, second):
+        return math.hypot(
+            float(first["pose_world"][0]) - float(second["pose_world"][0]),
+            float(first["pose_world"][1]) - float(second["pose_world"][1]),
+        ) < 0.01
+
+    def _latest_owned_goal(self):
+        return max(self._owned_goals.values(), key=lambda goal: goal["token"], default=None)
+
+    def _reset_progress(self, token=None, candidate=None):
+        self._progress_goal_token = token
+        self._progress_min_distance = None
+        self._progress_started_ns = None
+        if token is not None and candidate is not None:
+            self._progress_min_distance = candidate.get("min_distance")
+            self._progress_started_ns = self._current_ros_time_ns()
+
+    def _update_progress(self, goal_record, candidate):
+        if goal_record["token"] != self._progress_goal_token:
+            return
+        distance = candidate.get("min_distance")
+        if (not isinstance(distance, (int, float)) or isinstance(distance, bool)
+                or not math.isfinite(distance)):
+            return
+        if self._progress_min_distance is None or distance < self._progress_min_distance:
+            self._progress_min_distance = float(distance)
+            self._progress_started_ns = self._current_ros_time_ns()
+
+    def _check_progress_timeout(self):
+        token = self._progress_goal_token
+        goal_record = self._owned_goals.get(token)
+        if (goal_record is None
+                or not self._goal_active
+                or goal_record.get("localization_invalidated")
+                or self._progress_started_ns is None):
+            return
+        if self._current_ros_time_ns() - self._progress_started_ns <= self._progress_timeout_ns:
+            return
+        self._blacklisted_frontiers.append(tuple(
+            float(value) for value in goal_record["candidate"]["pose_world"][:2]
+        ))
+        self._reset_progress()
+
+    def _publish_disabled_markers_if_settled(self):
+        if not self._has_goal_ownership():
+            self._publish_markers({"candidates": []}, None)
 
     def _send_goal(self, candidate, behavior_tree):
         robot_pose = self._localization_pose(self._map.header.frame_id)
@@ -794,22 +716,21 @@ class SearchNode(Node):
 
         self._goal_sequence += 1
         token = self._goal_sequence
-        pending = {
+        goal_record = {
             "token": token,
             "epoch": self._search_epoch,
             "candidate": candidate,
             "frame_id": self._map.header.frame_id,
-            "identity": self._goal_identity(candidate, self._map.header.frame_id),
-            "is_retry": self._retry_target == self._goal_identity(
-                candidate, self._map.header.frame_id
-            ),
-            "dynamic_replacement": bool(getattr(self, "_next_goal_dynamic", False)),
+            "handle": None,
+            "cancel_requested": False,
             "cancel_reason": None,
+            "localization_invalidated": False,
+            "state": "pending",
         }
-        self._next_goal_dynamic = False
-        self._pending_goal = pending
-        if self._replacement_target == pending["identity"]:
-            self._replacement_target = None
+        self._owned_goals[token] = goal_record
+        self._current_goal_token = token
+        self._goal_active = True
+        self._reset_progress(token, candidate)
         future = self._action.send_goal_async(goal)
         stamp_sec, stamp_nanosec = divmod(int(now.nanoseconds), 1_000_000_000)
         self.get_logger().info(
@@ -824,199 +745,65 @@ class SearchNode(Node):
         return True
 
     def _goal_response(self, future, token):
-        pending = self._pending_goal
-        if pending is None or pending["token"] != token:
+        goal_record = self._owned_goals.get(token)
+        if goal_record is None:
             return
         try:
             handle = future.result()
         except Exception as error:
             self.get_logger().warning(f"Nav2 goal request failed: {error}")
-            pending["outcome_unknown"] = True
+            goal_record["outcome_unknown"] = True
             return
 
-        self._pending_goal = None
         if not handle.accepted:
-            candidate_id = pending["candidate"]["id"]
+            candidate_id = goal_record["candidate"]["id"]
             self.get_logger().info(f"Nav2 rejected Search candidate {candidate_id}")
-            if (pending["epoch"] == self._search_epoch
-                    and not pending.get("localization_invalidated", False)):
-                if pending["cancel_reason"] not in (
-                    "higher_scoring_candidate", "retry_invalidated"
-                ):
-                    self._record_failure(pending)
+            self._owned_goals.pop(token, None)
+            if self._current_goal_token == token:
+                self._current_goal_token = None
+                self._goal_active = False
+                self._reset_progress()
             if not self._enabled:
-                self._publish_markers({"candidates": []}, None)
+                self._publish_disabled_markers_if_settled()
             return
 
-        self._active_goal = {
-            **pending,
-            "handle": handle,
-            "cancel_requested": False,
-        }
-        self._goal_switch_deadline_ns = (
-            self.get_clock().now().nanoseconds
-            + (15 if pending.get("dynamic_replacement") else 10) * 1_000_000_000
-        )
+        goal_record["handle"] = handle
+        goal_record["state"] = "active"
+        self._active_goal_token = token
+        if self._current_goal_token == token and self._progress_goal_token != token:
+            self._reset_progress(token, goal_record["candidate"])
         result_future = handle.get_result_async()
         result_future.add_done_callback(
             lambda completed: self._goal_result(completed, token)
         )
         if (
-            pending["cancel_reason"] is not None
+            goal_record["cancel_reason"] is not None
             or not self._enabled
-            or pending["epoch"] != self._search_epoch
+            or goal_record.get("localization_invalidated")
         ):
-            self._cancel_active_goal(
-                pending["cancel_reason"] or "search_state_changed"
+            self._cancel_goal(
+                goal_record, goal_record["cancel_reason"] or "search_state_changed"
             )
 
-    def _consider_goal_switch(self, result, candidates):
-        if not self._enabled:
+    def _cancel_goal(self, goal_record, reason):
+        if goal_record["handle"] is None or goal_record["cancel_requested"]:
             return
-        self._invalidate_missing_owned_retry(candidates)
-        if self._pending_goal is not None:
-            return
-        current = self._active_goal
-        if current is None:
-            return
-        if current is not None and current.get("epoch", self._search_epoch) != self._search_epoch:
-            return
-        if (current.get("cancel_requested") or current.get("localization_invalidated")
-                or current.get("outcome_unknown")):
-            return
-        now_ns = self._current_ros_time_ns()
-        if self._goal_switch_deadline_ns is None or now_ns < self._goal_switch_deadline_ns:
-            return
-
-        diagnostic = {
-            "event": "goal_switch_evaluation",
-            "ros_time_ns": now_ns,
-            "active_score": None,
-            "challenger_score": None,
-            "delta": None,
-            "distance_m": None,
-            "matched_clusters": None,
-        }
-
-        def emit(decision, reason):
-            try:
-                record = dict(diagnostic, decision=decision, reason=reason)
-                for field in (
-                    "ros_time_ns", "active_score", "challenger_score", "delta", "distance_m",
-                ):
-                    value = record[field]
-                    try:
-                        valid_number = (
-                            isinstance(value, (int, float)) and not isinstance(value, bool)
-                            and math.isfinite(value)
-                        )
-                    except (TypeError, ValueError, OverflowError):
-                        valid_number = False
-                    if not valid_number:
-                        record[field] = None
-                message = json.dumps(record, allow_nan=False, sort_keys=True)
-                self.get_logger().info(message)
-            except Exception:
-                # Diagnostics must not affect goal selection or cancellation.
-                pass
-
-        target_identity = current.get("identity", self._goal_identity(
-            current["candidate"], self._map.header.frame_id
-        ))
-        current_candidate = current["candidate"]
-        grid = self._grid()
-        active_clusters = match_active_frontiers(grid, current_candidate, result)
-        if active_clusters is None:
-            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
-            emit("SKIP", "active_frontier_unmatched")
-            return
-        active_cluster_ids = {cluster["cluster_id"] for cluster in active_clusters}
-        active_score = max(cluster["score"] for cluster in active_clusters)
-        diagnostic["active_score"] = active_score
-        diagnostic["matched_clusters"] = len(active_cluster_ids)
-        robot_pose = self._localization_pose(self._map.header.frame_id)
-        distance = None if robot_pose is None else math.hypot(
-                current_candidate["pose_world"][0] - robot_pose[0],
-                current_candidate["pose_world"][1] - robot_pose[1])
-        diagnostic["distance_m"] = distance
-        if robot_pose is None or distance <= 0.30 + 1e-12:
-            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
-            reason = (
-                "localization_unavailable" if robot_pose is None
-                else "goal_within_switch_distance"
-            )
-            emit("SKIP", reason)
-            return
-        challenger = None
-        for candidate in result.get("candidates", []):
-            identity = self._goal_identity(candidate, self._map.header.frame_id)
-            if (candidate.get("cluster_id") in active_cluster_ids
-                    or identity in self._completed_candidates
-                    or identity in self._exhausted_candidates
-                    or self._failed_attempts.get(identity, 0) >= 2):
-                continue
-            challenger = candidate
-            break
-        margin = float(self.get_parameter("goal_switch_margin").value)
-        if challenger is None:
-            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
-            emit("SKIP", "no_eligible_challenger")
-            return
-        challenger_cluster = next((cluster for cluster in result.get("cluster_candidates", [])
-                                   if cluster.get("cluster_id") == challenger.get("cluster_id")), None)
-        challenger_score = challenger_cluster.get("score") if challenger_cluster else None
-        diagnostic["challenger_score"] = challenger_score
-        invalid_challenger_score = (
-            challenger_cluster is None or not isinstance(challenger_score, (int, float))
-            or isinstance(challenger_score, bool) or not math.isfinite(challenger_score)
-        )
-        if invalid_challenger_score:
-            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
-            emit("SKIP", "challenger_score_unavailable")
-            return
-        delta = challenger_score - active_score
-        diagnostic["delta"] = delta
-        if delta + 1e-12 < margin:
-            self._goal_switch_deadline_ns = now_ns + 15_000_000_000
-            emit("KEEP", "score_delta_below_margin")
-            return
-        emit("SWITCH", "challenger_score_delta_met_margin")
-        challenger_identity = self._goal_identity(challenger, self._map.header.frame_id)
-        self._replacement_target = challenger_identity
-        self._replacement_proposal = {"candidate": challenger, "context": {
-            "epoch": self._search_epoch,
-            "localization_generation": self._localization_generation,
-            "clock_epoch": self._clock_epoch,
-            "frame": self._map.header.frame_id,
-        }}
-        self._next_goal_requested = True
-        if self._retry_target == target_identity:
-            self._retry_target = None
-        self._cancel_active_goal("higher_scoring_candidate")
-
-    def _cancel_active_goal(self, reason):
-        if self._active_goal is None or self._active_goal["cancel_requested"]:
-            return
-        self._active_goal["cancel_requested"] = True
-        self._active_goal["cancel_reason"] = reason
-        self._active_goal["handle"].cancel_goal_async()
+        goal_record["cancel_requested"] = True
+        if goal_record["cancel_reason"] is None:
+            goal_record["cancel_reason"] = reason
+        goal_record["handle"].cancel_goal_async()
 
     def _goal_result(self, future, token):
-        active = self._active_goal
-        if active is None or active["token"] != token:
+        goal_record = self._owned_goals.get(token)
+        if goal_record is None:
             return
-        candidate_id = active["candidate"]["id"]
-        active.setdefault("identity", self._goal_identity(
-            active["candidate"], self._map.header.frame_id
-        ))
-        active.setdefault("epoch", self._search_epoch)
-        active.setdefault("is_retry", False)
+        candidate_id = goal_record["candidate"]["id"]
         try:
             wrapped_result = future.result()
         except Exception as error:
             self.get_logger().warning(f"Nav2 result failed for {candidate_id}: {error}")
-            active["outcome_unknown"] = True
-            self._cancel_active_goal("result_unknown")
+            goal_record["outcome_unknown"] = True
+            self._cancel_goal(goal_record, "result_unknown")
             return
 
         status = getattr(wrapped_result, "status", None)
@@ -1026,53 +813,35 @@ class SearchNode(Node):
             GoalStatus.STATUS_CANCELED,
         }
         if status not in terminal_statuses:
-            active["outcome_unknown"] = True
-            self._cancel_active_goal("result_unknown")
+            goal_record["outcome_unknown"] = True
+            self._cancel_goal(goal_record, "result_unknown")
             return
 
-        if status == GoalStatus.STATUS_SUCCEEDED:
-            if (active["epoch"] == self._search_epoch
-                    and not active.get("localization_invalidated", False)):
-                self._completed_candidates.add(active["identity"])
-                self._next_goal_requested = True
-        elif not active.get("localization_invalidated", False) and not (
-            status == GoalStatus.STATUS_CANCELED
-            and active["cancel_reason"] is not None
-        ) and active["cancel_reason"] not in (
-            "higher_scoring_candidate", "retry_invalidated"
-        ):
-            # Only an intentional canceled result avoids a failed attempt.
-            if active["epoch"] == self._search_epoch:
-                self._record_failure(active)
-                if status == GoalStatus.STATUS_ABORTED:
-                    self._exhausted_candidates.add(active["identity"])
-                    if self._retry_target == active["identity"]:
-                        self._retry_target = None
-
-        self._active_goal = None
-        if active["cancel_reason"] in ("retry_invalidated", "higher_scoring_candidate"):
-            self._retry_target = None
-        if (status == GoalStatus.STATUS_ABORTED and self._enabled
-                and active["epoch"] == self._search_epoch
-                and not active.get("localization_invalidated", False)
-                and active.get("cancel_reason") is None):
-            self._next_goal_requested = True
+        is_current = self._active_goal_token == token
+        current_and_valid = (
+            is_current and self._enabled
+            and goal_record["epoch"] == self._search_epoch
+            and not goal_record.get("localization_invalidated", False)
+        )
+        self._owned_goals.pop(token, None)
+        if current_and_valid and status == GoalStatus.STATUS_ABORTED:
+            self._blacklisted_frontiers.append(tuple(
+                float(value) for value in goal_record["candidate"]["pose_world"][:2]
+            ))
+        if is_current:
+            self._active_goal_token = None
+            self._goal_active = False
+        if is_current:
+            if self._current_goal_token == token:
+                self._current_goal_token = None
+                self._reset_progress()
+        if (current_and_valid and status == GoalStatus.STATUS_SUCCEEDED
+                and self._map is not None):
+            robot_pose = self._localization_pose(self._map.header.frame_id)
+            if robot_pose is not None:
+                self._publish_frontier_pose(robot_pose)
         if not self._enabled:
-            self._publish_markers({"candidates": []}, None)
-
-    def _record_failure(self, goal):
-        identity = goal["identity"]
-        count = self._failed_attempts.get(identity, 0) + 1
-        self._failed_attempts[identity] = count
-        if count == 1 and goal["cancel_reason"] != "higher_scoring_candidate":
-            self._retry_target = identity
-        elif count >= 2 and self._retry_target == identity:
-            self._retry_target = None
-
-    def _reset_challenger(self):
-        self._replacement_proposal = None
-        self._goal_switch_deadline_ns = None
-        self._next_goal_dynamic = False
+            self._publish_disabled_markers_if_settled()
 
 
 def main(args=None):

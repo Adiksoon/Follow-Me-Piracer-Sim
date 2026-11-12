@@ -80,6 +80,7 @@ private:
         << "\"cluster_size\":" << f.size << ","
         << "\"score\":" << -f.cost << ","
         << "\"cost\":" << f.cost << ","
+        << "\"min_distance\":" << f.min_distance << ","
         << "\"pose_world\":[" << f.centroid.x << "," << f.centroid.y << ",0],"
         << "\"frontiers_world\":[";
       for (size_t j = 0; j < f.points.size(); ++j) {

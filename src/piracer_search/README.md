@@ -13,12 +13,18 @@ cluster centroid in the map frame with yaw 0, and does not add a footprint
 search or local path planner. Original upstream source notices and BSD license
 are retained in `piracer_explore_core/third_party/m-explore-ros2`.
 
-Search owns only the goal it submitted. Disable or a qualifying goal switch
-stops new submissions and requests cancellation of that goal only. Search
-retains ownership until the action result is terminal. Goal replacement uses a
-fresh upstream ranking after the previous result; the 0.10 switch margin is
-compared on one ranking update. Localization loss prevents further goal
-submission and retains the existing stop behavior.
+Search follows the upstream ranked frontier selection. It sends a changed top
+centroid while an earlier Search goal can still be active; a centroid within
+0.01 m keeps the current goal. The adapter carries upstream `min_distance` and
+Search uses `min_distance` for the upstream 30 second progress timeout and
+blacklists the centroid after timeout or abort using the upstream 5-cell
+coordinate tolerance.
+
+Search tracks each goal request by its own token. Disable and untrusted
+localization stop new submissions and cancel only accepted Search-owned goals.
+The disable service reports success after every Search-owned request is
+rejected or has a terminal result, so the State Manager can wait before
+starting ACQUIRE.
 
 The offline regression suite can be run from the workspace root:
 

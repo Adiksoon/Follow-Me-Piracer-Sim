@@ -26,5 +26,6 @@ TEST(FrontierSearchTest, UsesUpstreamClusterCentroidAndCost)
   EXPECT_EQ(frontiers.front().size, 20u);
   EXPECT_NEAR(frontiers.front().centroid.x, 3.475, 1e-9);
   EXPECT_NEAR(frontiers.front().centroid.y, 3.375, 1e-9);
+  EXPECT_NEAR(frontiers.front().min_distance, 2.0, 1e-9);
   EXPECT_NEAR(frontiers.front().cost, -14.0, 1e-9);
 }
