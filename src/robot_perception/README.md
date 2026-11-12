@@ -18,7 +18,7 @@ the historical `ros2_ws/` workspace.
   per-frame ROS and monotonic timing diagnostics on `/piracer/yolo/timing`.
 - In the generic COCO profile, an empty `class_filter`, `suitcase`, or `28`
   selects COCO `suitcase`, class ID 28. The full-system FT01 profile instead
-  selects class ID 0 at confidence `0.35`, as configured in
+  selects class ID 0 at confidence `0.90`, as configured in
   `config/detector_ft01_test.yaml`.
 - `scripts/suitcase_point_node` synchronizes detections, depth, and color and
   depth `CameraInfo` messages by exact timestamp. It checks the qualified
@@ -43,7 +43,7 @@ plus 80 COCO scores). The offline fine-tuned model uses the same input and
 output `output0`: `[1, 5, 8400]` (four box channels plus one suitcase score,
 class ID 0). Both layouts are decoded by the same pipeline. The full-system
 `piracer_sim.launch.py` loads `config/detector_ft01_test.yaml`, which selects
-this class-0 model at confidence `0.35`. Its weights are delivered externally
+this class-0 model at confidence `0.90`. Its weights are delivered externally
 and must be present at the absolute path recorded in that YAML:
 `/home/zygar/dev_praca_inz/symulacja/verification/yolo_ft01_20261012/runs/yolo11n_suitcase_ft01_final/weights/best.onnx`.
 To relocate those weights, edit `model_path` in

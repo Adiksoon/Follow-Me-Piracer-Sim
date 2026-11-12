@@ -6,7 +6,7 @@ yolo11n_node:
     detection_topic: "/yolo/detections"
     debug_image_topic: "/piracer/yolo/debug_image"
     imgsz: 640
-    confidence: 0.35
+    confidence: 0.90
     nms_iou: 0.5
     class_filter: "0"
     opencv_num_threads: 4
