@@ -21,6 +21,31 @@ The simulation launch accepts `follow_max_speed_mps:=0.075` as an optional Follo
 
 Direct Follow requires a fresh, valid target point and usable TF. Integrated mode also checks localization and costmap freshness, the current and swept footprint, and Nav2 goal ownership before forwarding commands, including continuation to the committed observation goal after target loss. After target loss, FOLLOW finishes that same goal without sending a second goal to the remembered object surface. Successful arrival clears target memory; the existing Nav2 result and both 0.3 s drain clocks resolve before the miss counter can select ACQUIRE or SEARCH. Fresh reacquisition uses the existing direct-path checks. Stale required inputs stop the selected output. SEARCH, ACQUIRE, and FOLLOW share the Hybrid planner with unknown cells enabled and path smoothing disabled; live obstacle sensing and collision checks remain active. Costmaps, RPP and the velocity smoother are shared by both behaviors. Controller samples on `/piracer/follow/control_sample` are observational and do not drive the robot; accumulated diagnostics are published on `/piracer/follow/control_diagnostics`.
 
+## Optional FOLLOW terms and diagnostic interface
+
+FOLLOW defaults to P/P: both I gains and both D gains are zero. Optional D
+terms now use the unfiltered error difference divided by the interval between
+new measurement stamps; direction uses the normalized angular difference.
+Repeated stamps hold the last derivative. Reset, regressing stamps and hard
+stop clear derivative history. I terms, their limits and command limits remain
+available with the same rules.
+
+The controller no longer accepts `distance_filter_tau_s` or
+`direction_filter_tau_s`. The ROS node no longer declares these parameters,
+and these keys are also removed from `FOLLOW_CONFIG`.
+`FollowCommand` no longer exposes `distance_d_filtered_mps` or
+`direction_d_filtered_radps`. The control-sample JSON (schema version 2) drops
+`distance_filtered_derivative_mps` and replaces
+`direction_filtered_derivative_radps` with `direction_raw_derivative_radps`.
+The retained `distance_raw_derivative_mps` and new direction key report the
+derivative used by D, including the held value on a repeated stamp and zero
+after a reset. Gain-weighted `distance_d_mps` and `direction_d_rad` keep their
+names. No field-specific consumer of these samples exists in the tracked
+runtime code. External consumers must use the raw keys and remove tau
+overrides. Older PD/PID experiments with positive D gains used filtered
+derivatives and therefore describe a different controller version; their
+recorded data and analyses remain unchanged.
+
 ## Development evidence
 
 Implementation and offline evidence are maintained on development branch `codex/follow-suitcase`, under `/home/zygar/dev_praca_inz/worktrees/follow-suitcase/verification/follow_01/`. The implementation archive is `/home/zygar/dev_praca_inz/worktrees/follow-suitcase/verification/follow_01/IMPLEMENTATION/`; the dated preparation and source regression receipts are under `/home/zygar/dev_praca_inz/worktrees/follow-suitcase/verification/follow_production_preparation_20261102/`. These are development records, not evidence of live hardware validation or production readiness.

@@ -84,13 +84,11 @@ class PiracerFollowNode(Node):
             "distance_kp": 0.10,
             "distance_ki": 0.0,
             "distance_kd": 0.0,
-            "distance_filter_tau_s": 0.3,
             "distance_integral_limit_mps": 0.0,
             "direction_kp": 1.0,
             "direction_kd": 0.0,
             "direction_ki": 0.0,
             "direction_integral_limit_rad": 0.02,
-            "direction_filter_tau_s": 0.3,
             # Conservative initial cap. The active Gazebo plugin allows 0.20 m/s.
             "max_speed_mps": 0.05,
             "max_steer_rad": 0.554,
@@ -179,13 +177,11 @@ class PiracerFollowNode(Node):
             "distance_kp": self._controller.distance_kp,
             "distance_ki": self._controller.distance_ki,
             "distance_kd": self._controller.distance_kd,
-            "distance_filter_tau_s": self._controller.distance_filter_tau_s,
             "distance_integral_limit_mps": self._controller.distance_integral_limit_mps,
             "direction_kp": self._controller.direction_kp,
             "direction_kd": self._controller.direction_kd,
             "direction_ki": self._controller.direction_ki,
             "direction_integral_limit_rad": self._controller.direction_integral_limit_rad,
-            "direction_filter_tau_s": self._controller.direction_filter_tau_s,
             "target_distance_m": self._controller.target_distance_m,
             "max_speed_mps": self._controller.max_speed_mps,
             "max_steering_rad": self._controller.max_steer_rad,
@@ -343,7 +339,6 @@ class PiracerFollowNode(Node):
             distance_kp=float(self.get_parameter("distance_kp").value),
             distance_ki=float(self.get_parameter("distance_ki").value),
             distance_kd=float(self.get_parameter("distance_kd").value),
-            distance_filter_tau_s=float(self.get_parameter("distance_filter_tau_s").value),
             distance_integral_limit_mps=float(
                 self.get_parameter("distance_integral_limit_mps").value
             ),
@@ -353,7 +348,6 @@ class PiracerFollowNode(Node):
             direction_integral_limit_rad=float(
                 self.get_parameter("direction_integral_limit_rad").value
             ),
-            direction_filter_tau_s=float(self.get_parameter("direction_filter_tau_s").value),
             max_speed_mps=float(self.get_parameter("max_speed_mps").value),
             max_steer_rad=float(self.get_parameter("max_steer_rad").value),
         )
@@ -1591,7 +1585,7 @@ class PiracerFollowNode(Node):
 
     def _publish_control_sample(self, command, target, sim_time_ns):
         sample = {
-            "schema_version": 1,
+            "schema_version": 2,
             "process_id": os.getpid(),
             "sim_time_ns": int(sim_time_ns),
             "target_stamp_ns": (
@@ -1611,11 +1605,10 @@ class PiracerFollowNode(Node):
             "direction_p_rad": float(command.direction_p_rad),
             "direction_d_rad": float(command.direction_d_rad),
             "direction_i_rad": float(command.direction_i_rad),
-            "direction_filtered_derivative_radps": float(command.direction_d_filtered_radps),
+            "direction_raw_derivative_radps": float(command.direction_d_raw_radps),
             "distance_p_mps": float(command.distance_p_mps),
             "distance_i_mps": float(command.distance_i_mps),
             "distance_d_mps": float(command.distance_d_mps),
-            "distance_filtered_derivative_mps": float(command.distance_d_filtered_mps),
             "distance_raw_derivative_mps": float(command.distance_d_raw_mps),
             "distance_integral_m_s": (
                 float(command.integral_state_mps / self._controller.distance_ki)

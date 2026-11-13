@@ -38,29 +38,36 @@ def test_derivative_sign_tracks_increasing_and_decreasing_bearing(direction):
     controller = FollowPController(direction_kd=0.5)
     _update_bearing(controller, 0.2, 1_000_000_000)
     result = _update_bearing(controller, 0.3 if direction > 0 else 0.1, 1_100_000_000)
-    assert result.direction_d_filtered_radps * direction > 0.0
+    assert result.direction_d_raw_radps * direction > 0.0
     assert result.direction_d_rad * direction > 0.0
 
 
-def test_derivative_wraps_at_pi_and_uses_variable_measurement_dt_filter():
-    controller = FollowPController(direction_kd=1.0, direction_filter_tau_s=0.3)
+def test_derivative_wraps_at_pi_and_uses_variable_measurement_dt():
+    controller = FollowPController(direction_kd=0.1)
     assert _normalized_angle_delta(-3.13, 3.13) == pytest.approx(0.02318530717958669)
     _update_bearing(controller, 0.1, 1_000_000_000)
     result = _update_bearing(controller, 0.2, 1_100_000_000)
     wrapped_delta = 0.1
     assert result.direction_d_raw_radps == pytest.approx(wrapped_delta / 0.1)
-    assert result.direction_d_filtered_radps == pytest.approx(wrapped_delta / 0.4)
+    assert result.direction_d_rad == pytest.approx(0.1 * wrapped_delta / 0.1)
+
+    duplicate = _update_bearing(controller, 0.2, 1_100_000_000)
+    assert not duplicate.measurement_new and duplicate.measurement_dt_s == 0.0
+    assert duplicate.direction_d_raw_radps == result.direction_d_raw_radps
+    assert duplicate.direction_d_rad == result.direction_d_rad
+    assert duplicate.angular_z == result.angular_z
 
     result = _update_bearing(controller, 0.4, 1_300_000_000)
     assert result.measurement_dt_s == pytest.approx(0.2)
-    assert result.direction_d_filtered_radps == pytest.approx(
-        0.3 / 0.5 * (wrapped_delta / 0.4) + 0.2 / 0.5
-    )
+    assert result.direction_d_raw_radps == pytest.approx(0.2 / 0.2)
+    assert result.direction_d_rad == pytest.approx(0.1 * 0.2 / 0.2)
+    unchanged = _update_bearing(controller, 0.4, 1_500_000_000)
+    assert unchanged.direction_d_raw_radps == unchanged.direction_d_rad == 0.0
 
 
 def test_combined_direction_pid_sums_terms_from_one_new_measurement():
-    pid = FollowPController(direction_kp=1.0, direction_ki=0.01, direction_kd=0.5)
-    pd = FollowPController(direction_kp=1.0, direction_ki=0.0, direction_kd=0.5)
+    pid = FollowPController(direction_kp=1.0, direction_ki=0.01, direction_kd=0.1)
+    pd = FollowPController(direction_kp=1.0, direction_ki=0.0, direction_kd=0.1)
     pi = FollowPController(direction_kp=1.0, direction_ki=0.01, direction_kd=0.0)
     for controller in (pid, pd, pi):
         _update_bearing(controller, 0.1, 1_000_000_000)
@@ -70,10 +77,10 @@ def test_combined_direction_pid_sums_terms_from_one_new_measurement():
     pi_result = _update_bearing(pi, 0.2, 1_100_000_000)
     assert result.measurement_dt_s == pytest.approx(0.1)
     assert result.direction_p_rad == pytest.approx(0.2)
-    assert result.direction_d_filtered_radps == pytest.approx(0.25)
-    assert result.direction_d_rad == pytest.approx(0.125)
+    assert result.direction_d_raw_radps == pytest.approx(1.0)
+    assert result.direction_d_rad == pytest.approx(0.1)
     assert result.direction_i_rad == pytest.approx(0.0002)
-    assert result.steering_angle_rad == pytest.approx(0.3252)
+    assert result.steering_angle_rad == pytest.approx(0.3002)
     assert result.direction_i_rad == pytest.approx(pi_result.direction_i_rad)
     assert pd_result.direction_i_rad == 0.0
     assert result.direction_p_rad == pd_result.direction_p_rad
@@ -91,9 +98,9 @@ def test_combined_pid_antiwindup_accounts_for_positive_and_negative_d(sign):
     assert saturated.direction_i_rad == 0.0
 
     negative_d = FollowPController(direction_kp=0.0, direction_ki=0.01, direction_kd=0.5)
-    _update_bearing(negative_d, sign * 1.2, 1_000_000_000)
-    accumulated = _update_bearing(negative_d, sign * 1.2, 2_000_000_000)
-    assert accumulated.direction_i_rad == pytest.approx(sign * 0.012)
+    _update_bearing(negative_d, sign * 1.05, 1_000_000_000)
+    accumulated = _update_bearing(negative_d, sign * 1.05, 2_000_000_000)
+    assert accumulated.direction_i_rad == pytest.approx(sign * 0.0105)
     negative_d.direction_kp = 1.0
 
     saturated = _update_bearing(negative_d, sign * 1.0, 2_100_000_000)
@@ -104,16 +111,14 @@ def test_combined_pid_antiwindup_accounts_for_positive_and_negative_d(sign):
     opposite_saturated = _update_bearing(negative_d, -sign * 0.2, 2_200_000_000)
     assert opposite_saturated.direction_saturated
     assert opposite_saturated.direction_i_rad == accumulated.direction_i_rad
-    still_saturated = _update_bearing(negative_d, -sign * 0.2, 3_200_000_000)
-    assert still_saturated.direction_saturated
-    assert still_saturated.direction_i_rad == accumulated.direction_i_rad
-    unwinding = _update_bearing(negative_d, -sign * 0.2, 4_200_000_000)
+    unwinding = _update_bearing(negative_d, -sign * 0.2, 3_200_000_000)
+    assert unwinding.direction_d_rad == 0.0
     assert not unwinding.direction_saturated
     assert abs(unwinding.direction_i_rad) < abs(accumulated.direction_i_rad)
 
 
 def test_first_duplicate_and_regressing_timestamps_have_defined_history():
-    controller = FollowPController(direction_kd=0.5, direction_ki=0.01, distance_ki=0.1)
+    controller = FollowPController(direction_kd=0.1, direction_ki=0.01, distance_ki=0.1)
     first = controller.update(3.0, 0.0, measurement_stamp_ns=2_000_000_000)
     assert first.measurement_new
     assert first.measurement_dt_s == 0.0
@@ -125,7 +130,7 @@ def test_first_duplicate_and_regressing_timestamps_have_defined_history():
     assert newer.measurement_new and newer.measurement_dt_s == pytest.approx(0.1)
     assert newer.direction_i_rad > 0.0
     assert not duplicate.measurement_new and duplicate.measurement_dt_s == 0.0
-    assert duplicate.direction_d_filtered_radps == newer.direction_d_filtered_radps
+    assert duplicate.direction_d_raw_radps == newer.direction_d_raw_radps
     assert duplicate.direction_i_rad == newer.direction_i_rad
     assert duplicate.integral_state_mps == newer.integral_state_mps
 
@@ -143,13 +148,13 @@ def test_invalid_timestamp_resets_and_raises_only_when_extension_is_active(stamp
     controller.update(2.3, 0.2, measurement_stamp_ns=1_000_000_000)
     controller.update(2.4, 0.3, measurement_stamp_ns=2_000_000_000)
     assert controller._distance_i_mps > 0.0
-    assert controller._distance_d_filtered_mps > 0.0
+    assert controller._distance_d_raw_mps > 0.0
     with pytest.raises(ValueError):
         controller.update(3.0, 0.2, measurement_stamp_ns=stamp)
     assert controller._last_measurement_stamp_ns is None
     assert controller._last_distance_error_m is None
     assert controller._distance_i_mps == 0.0
-    assert controller._distance_d_filtered_mps == 0.0
+    assert controller._distance_d_raw_mps == 0.0
     # The legacy P-only call keeps its two-argument API and no stamp requirement.
     assert FollowPController().update(3.0, 0.2).linear_x > 0.0
 
@@ -169,36 +174,43 @@ def test_pi_integrates_new_measurements_in_meters_per_second_and_holds_duplicate
 
 
 @pytest.mark.parametrize("sign", [1.0, -1.0])
-def test_distance_derivative_sign_filter_dt_duplicates_and_reacquisition(sign):
-    controller = FollowPController(
-        distance_kp=0.0, distance_kd=0.05, distance_filter_tau_s=0.3
-    )
+def test_distance_derivative_sign_dt_duplicates_and_reacquisition(sign):
+    controller = FollowPController(distance_kp=0.0, distance_kd=0.05)
     first = controller.update(2.25 + sign * 0.1, 0.0, measurement_stamp_ns=1_000_000_000)
     assert first.distance_d_mps == 0.0
     result = controller.update(2.25 + sign * 0.2, 0.0, measurement_stamp_ns=1_100_000_000)
     assert result.distance_d_raw_mps == pytest.approx(sign * 1.0)
-    assert result.distance_d_filtered_mps == pytest.approx(sign * 0.25)
-    assert result.distance_d_mps == pytest.approx(sign * 0.0125)
+    assert result.distance_d_mps == pytest.approx(sign * 0.05)
     assert 0.0 <= result.linear_x <= controller.max_speed_mps
     assert result.angular_z == 0.0
 
+    duplicate = controller.update(
+        2.25 + sign * 0.2, 0.0, measurement_stamp_ns=1_100_000_000
+    )
+    assert not duplicate.measurement_new and duplicate.measurement_dt_s == 0.0
+    assert duplicate.distance_d_raw_mps == result.distance_d_raw_mps
+    assert duplicate.distance_d_mps == result.distance_d_mps
+    assert duplicate.linear_x == result.linear_x
+
+    # A changed point with the same stamp must not replace derivative history.
+    duplicate = controller.update(2.25, 0.0, measurement_stamp_ns=1_100_000_000)
+    assert duplicate.distance_d_mps == result.distance_d_mps
     variable_dt = controller.update(
-        2.25 + sign * 0.2, 0.0, measurement_stamp_ns=1_300_000_000
+        2.25 + sign * 0.15, 0.0, measurement_stamp_ns=1_300_000_000
     )
     assert variable_dt.measurement_dt_s == pytest.approx(0.2)
-    assert variable_dt.distance_d_raw_mps == 0.0
-    assert variable_dt.distance_d_filtered_mps == pytest.approx(sign * 0.15)
-    duplicate = controller.update(
-        2.25 + sign * 0.1, 0.0, measurement_stamp_ns=1_300_000_000
+    assert variable_dt.distance_d_raw_mps == pytest.approx(-sign * 0.05 / 0.2)
+    assert variable_dt.distance_d_mps == pytest.approx(-sign * 0.0125)
+    unchanged = controller.update(
+        2.25 + sign * 0.15, 0.0, measurement_stamp_ns=1_400_000_000
     )
-    assert not duplicate.measurement_new
-    assert duplicate.distance_d_filtered_mps == variable_dt.distance_d_filtered_mps
+    assert unchanged.distance_d_raw_mps == unchanged.distance_d_mps == 0.0
 
     reacquired = controller.update(
         2.25 + sign * 0.15, 0.0, measurement_stamp_ns=1_200_000_000
     )
     assert reacquired.measurement_dt_s == 0.0
-    assert reacquired.distance_d_raw_mps == reacquired.distance_d_filtered_mps == 0.0
+    assert reacquired.distance_d_raw_mps == 0.0
     assert reacquired.distance_d_mps == 0.0
 
 
@@ -207,22 +219,20 @@ def test_distance_pid_sums_p_i_d_and_clamps_only_enabled_integral_contribution()
         distance_kp=0.1,
         distance_ki=0.00008,
         distance_kd=0.05,
-        distance_filter_tau_s=0.3,
         distance_integral_limit_mps=0.0005,
     )
     controller.update(2.35, 0.0, measurement_stamp_ns=1_000_000_000)
-    result = controller.update(2.45, 0.0, measurement_stamp_ns=1_100_000_000)
+    result = controller.update(2.45, 0.0, measurement_stamp_ns=1_200_000_000)
     assert result.distance_p_mps == pytest.approx(0.02)
-    assert result.distance_d_raw_mps == pytest.approx(1.0)
-    assert result.distance_d_filtered_mps == pytest.approx(0.25)
-    assert result.distance_d_mps == pytest.approx(0.0125)
-    assert result.distance_i_mps == pytest.approx(0.0000016)
+    assert result.distance_d_raw_mps == pytest.approx(0.5)
+    assert result.distance_d_mps == pytest.approx(0.025)
+    assert result.distance_i_mps == pytest.approx(0.0000032)
     assert result.distance_unsaturated_mps == pytest.approx(
         result.distance_p_mps + result.distance_i_mps + result.distance_d_mps
     )
 
     for index in range(1, 41):
-        result = controller.update(2.45, 0.0, measurement_stamp_ns=(1_100_000_000 + index * 1_000_000_000))
+        result = controller.update(2.45, 0.0, measurement_stamp_ns=(1_200_000_000 + index * 1_000_000_000))
     assert result.distance_i_mps == pytest.approx(0.0005)
     assert result.distance_unsaturated_mps <= controller.max_speed_mps
 
@@ -312,7 +322,7 @@ def test_distance_derivative_and_integral_reset_on_hard_stop():
     assert stopped.linear_x == stopped.angular_z == 0.0
     assert stopped.distance_i_mps == 0.0
     assert stopped.distance_d_mps == 0.0
-    assert stopped.distance_d_filtered_mps == 0.0
+    assert stopped.distance_d_raw_mps == 0.0
     assert controller._last_measurement_stamp_ns is None
 
 
@@ -371,7 +381,7 @@ def test_direction_integral_freezes_at_zero_speed_and_does_not_command_yaw():
     assert stopped.angular_z == stopped_again.angular_z == 0.0
     assert stopped.direction_i_rad == stopped_again.direction_i_rad == moving_before.direction_i_rad
     assert stopped.direction_d_rad < 0.0
-    assert stopped_again.direction_d_rad < 0.0
+    assert stopped_again.direction_d_rad == 0.0
 
     moving = controller.update(
         *_point(-0.2, distance=3.0), measurement_stamp_ns=3_200_000_000
@@ -388,16 +398,16 @@ def test_direction_integral_is_cleared_by_hard_stop_and_reset_for_reacquisition(
     _update_bearing(controller, 0.2, 1_000_000_000)
     integrated = _update_bearing(controller, 0.3, 2_000_000_000)
     assert integrated.direction_i_rad > 0.0
-    assert integrated.direction_d_filtered_radps > 0.0
+    assert integrated.direction_d_raw_radps > 0.0
     stopped = controller.update(1.9, 0.0, measurement_stamp_ns=3_000_000_000)
     assert stopped.direction_i_rad == 0.0
-    assert stopped.direction_d_filtered_radps == 0.0
+    assert stopped.direction_d_raw_radps == 0.0
     assert controller._last_measurement_stamp_ns is None
 
     _update_bearing(controller, 0.2, 4_000_000_000)
     reacquired = _update_bearing(controller, 0.2, 5_000_000_000)
     assert reacquired.direction_i_rad > 0.0
-    assert reacquired.direction_d_filtered_radps == 0.0
+    assert reacquired.direction_d_raw_radps == 0.0
     controller.reset("target_reacquired")
     assert controller._direction_i_rad == 0.0
     assert controller._last_measurement_stamp_ns is None
