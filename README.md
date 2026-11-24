@@ -15,7 +15,7 @@ git clone --branch main-sim https://github.com/Adiksoon/Follow-Me-Piracer.git
 cd Follow-Me-Piracer
 source /opt/ros/humble/setup.bash
 rosdep update
-rosdep install --from-paths src --ignore-src --rosdistro humble -r -y
+rosdep install --from-paths src --ignore-src --rosdistro humble -y
 colcon build --symlink-install
 source install/setup.bash
 ```

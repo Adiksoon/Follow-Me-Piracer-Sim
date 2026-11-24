@@ -5,7 +5,7 @@
   <description>Frontier Search ranking and Nav2 goal adapter for PiRacer.</description>
   <maintainer email="adrian@example.com">Adrian</maintainer>
   <license>MIT</license>
-  <buildtool_depend>ament_python</buildtool_depend>
+  <buildtool_depend>python3-setuptools</buildtool_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>piracer_explore_core</exec_depend>
