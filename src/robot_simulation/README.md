@@ -63,10 +63,8 @@ for behavior transitions, command ownership and detector weights.
 
 ## DATA-01 dataset tools
 
-The historical generator, capture launch, 19 tests and pinned inputs are
-available on `archive/data01` at `5cf1f3a752b2b3f1f6c93199eea4f898ede510d9`.
-Use a separate checkout of that branch for dataset work. Its README lists
-the capture commands and the frozen scene requirements.
+The historical dataset generator and capture inputs are kept outside this
+public checkout. They are not required to build or run the simulation.
 
 ## Production classroom scene details
 
