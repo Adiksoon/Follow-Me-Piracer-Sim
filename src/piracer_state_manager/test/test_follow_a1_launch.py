@@ -84,7 +84,8 @@ def test_full_simulation_forwards_motion_gate_without_enabling_it():
     )
     description = launch.generate_launch_description()
     assert _default_argument(description, "follow_publish_cmd_vel") == "false"
-    assert _default_argument(description, "follow_max_speed_mps") == "0.05"
+    default_speed = _default_argument(description, "follow_max_speed_mps")
+    assert default_speed == "0.075"
     assert _default_argument(description, "follow_target_distance_m") == "2.25"
     search_state_manager = next(
         entity
@@ -93,7 +94,12 @@ def test_full_simulation_forwards_motion_gate_without_enabling_it():
         and "follow_publish_cmd_vel" in dict(entity.launch_arguments)
     )
     forwarded = dict(search_state_manager.launch_arguments)["follow_publish_cmd_vel"]
+    forwarded_speed = dict(search_state_manager.launch_arguments)["follow_max_speed_mps"]
     context = LaunchContext()
+    context.launch_configurations["follow_max_speed_mps"] = default_speed
+    assert forwarded_speed.perform(context) == "0.075"
+    context.launch_configurations["follow_max_speed_mps"] = "0.05"
+    assert forwarded_speed.perform(context) == "0.05"
     context.launch_configurations["follow_target_distance_m"] = "1.0"
     assert dict(search_state_manager.launch_arguments)["follow_target_distance_m"].perform(context) == "1.0"
     assert isinstance(forwarded, LaunchConfiguration)

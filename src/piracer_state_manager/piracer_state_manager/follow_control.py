@@ -32,7 +32,6 @@ class FollowCommand:
     distance_unsaturated_mps: float = 0.0
     direction_p_rad: float = 0.0
     direction_d_rad: float = 0.0
-    direction_d_filtered_radps: float = 0.0
     direction_d_raw_radps: float = 0.0
     distance_saturated_low: bool = False
     distance_saturated_high: bool = False
@@ -42,7 +41,6 @@ class FollowCommand:
     measurement_dt_s: float = 0.0
     direction_i_rad: float = 0.0
     distance_d_mps: float = 0.0
-    distance_d_filtered_mps: float = 0.0
     distance_d_raw_mps: float = 0.0
 
 
@@ -51,6 +49,8 @@ class FollowPController:
 
     Distance uses horizontal base_link range. Direction uses horizontal bearing.
     Both P gains are provisional and must be tuned in repeatable experiments.
+    Optional D terms use the raw error difference over the measurement interval,
+    held until the next measurement. Direction differences wrap at pi.
     """
 
     def __init__(
@@ -61,13 +61,11 @@ class FollowPController:
         distance_kp: float = 0.10,
         distance_ki: float = 0.0,
         distance_kd: float = 0.0,
-        distance_filter_tau_s: float = 0.3,
         distance_integral_limit_mps: float = 0.0,
         direction_kp: float = 1.0,
         direction_kd: float = 0.0,
         direction_ki: float = 0.0,
         direction_integral_limit_rad: float = 0.02,
-        direction_filter_tau_s: float = 0.3,
         max_speed_mps: float = 0.05,
         wheelbase_m: float = ACKERMANN_WHEELBASE_M,
         max_steer_rad: float = ACKERMANN_MAX_STEER_RAD,
@@ -78,13 +76,11 @@ class FollowPController:
             distance_kp,
             distance_ki,
             distance_kd,
-            distance_filter_tau_s,
             distance_integral_limit_mps,
             direction_kp,
             direction_kd,
             direction_ki,
             direction_integral_limit_rad,
-            direction_filter_tau_s,
             max_speed_mps,
             wheelbase_m,
             max_steer_rad,
@@ -97,14 +93,10 @@ class FollowPController:
                 or direction_kp < 0.0
                 or direction_kd < 0.0 or direction_ki < 0.0):
             raise ValueError("Controller gains must be non-negative")
-        if distance_filter_tau_s <= 0.0:
-            raise ValueError("distance_filter_tau_s must be positive")
         if distance_integral_limit_mps < 0.0:
             raise ValueError("distance_integral_limit_mps must be non-negative")
         if direction_integral_limit_rad <= 0.0:
             raise ValueError("direction_integral_limit_rad must be positive")
-        if direction_filter_tau_s <= 0.0:
-            raise ValueError("direction_filter_tau_s must be positive")
         if not 0.0 < max_speed_mps <= ACKERMANN_PLUGIN_MAX_SPEED_MPS:
             raise ValueError("max_speed_mps exceeds the Ackermann plugin limit")
         if not 0.0 < wheelbase_m or not 0.0 < max_steer_rad <= ACKERMANN_MAX_STEER_RAD:
@@ -115,13 +107,11 @@ class FollowPController:
         self.distance_kp = distance_kp
         self.distance_ki = distance_ki
         self.distance_kd = distance_kd
-        self.distance_filter_tau_s = distance_filter_tau_s
         self.distance_integral_limit_mps = distance_integral_limit_mps
         self.direction_kp = direction_kp
         self.direction_kd = direction_kd
         self.direction_ki = direction_ki
         self.direction_integral_limit_rad = direction_integral_limit_rad
-        self.direction_filter_tau_s = direction_filter_tau_s
         self.max_speed_mps = max_speed_mps
         self.wheelbase_m = wheelbase_m
         self.max_steer_rad = max_steer_rad
@@ -133,8 +123,8 @@ class FollowPController:
         self._last_measurement_stamp_ns = None
         self._last_distance_error_m = None
         self._last_direction_error_rad = None
-        self._distance_d_filtered_mps = 0.0
-        self._direction_d_filtered_radps = 0.0
+        self._distance_d_raw_mps = 0.0
+        self._direction_d_raw_radps = 0.0
         self._direction_i_rad = 0.0
         self._distance_i_mps = 0.0
         self._last_reset_reason = str(reason)
@@ -158,8 +148,6 @@ class FollowPController:
         )
         measurement_new = False
         dt_s = 0.0
-        direction_d_raw_radps = 0.0
-        distance_d_raw_mps = 0.0
         if extensions_active:
             try:
                 if isinstance(measurement_stamp_ns, bool):
@@ -187,28 +175,18 @@ class FollowPController:
                 measurement_new = True
                 if self.distance_kd > 0.0:
                     delta_distance = distance_error_m - self._last_distance_error_m
-                    distance_d_raw_mps = delta_distance / dt_s
-                    tau = self.distance_filter_tau_s
-                    self._distance_d_filtered_mps = (
-                        tau / (tau + dt_s) * self._distance_d_filtered_mps
-                        + delta_distance / (tau + dt_s)
-                    )
+                    self._distance_d_raw_mps = delta_distance / dt_s
                 if self.direction_kd > 0.0:
                     delta = _normalized_angle_delta(
                         direction_error_rad, self._last_direction_error_rad
                     )
-                    direction_d_raw_radps = delta / dt_s
-                    tau = self.direction_filter_tau_s
-                    self._direction_d_filtered_radps = (
-                        tau / (tau + dt_s) * self._direction_d_filtered_radps
-                        + delta / (tau + dt_s)
-                    )
+                    self._direction_d_raw_radps = delta / dt_s
                 self._last_measurement_stamp_ns = stamp_ns
                 self._last_distance_error_m = distance_error_m
                 self._last_direction_error_rad = direction_error_rad
 
         distance_p_mps = self.distance_kp * distance_error_m
-        distance_d_mps = self.distance_kd * self._distance_d_filtered_mps
+        distance_d_mps = self.distance_kd * self._distance_d_raw_mps
         if extensions_active and self.distance_ki > 0.0 and measurement_new and dt_s > 0.0:
             candidate_i = self._distance_i_mps + self.distance_ki * distance_error_m * dt_s
             if self.distance_integral_limit_mps > 0.0:
@@ -234,7 +212,7 @@ class FollowPController:
         # Keep the steering P output independent from distance control, even
         # at the setpoint. A Twist cannot steer an Ackermann vehicle at rest.
         direction_p_rad = self.direction_kp * direction_error_rad
-        direction_d_rad = self.direction_kd * self._direction_d_filtered_radps
+        direction_d_rad = self.direction_kd * self._direction_d_raw_radps
         if (self.direction_ki > 0.0 and measurement_new and dt_s > 0.0
                 and speed_mps > 0.0):
             delta_i = self.direction_ki * direction_error_rad * dt_s
@@ -271,8 +249,7 @@ class FollowPController:
             distance_unsaturated_mps,
             direction_p_rad,
             direction_d_rad,
-            self._direction_d_filtered_radps,
-            direction_d_raw_radps,
+            self._direction_d_raw_radps,
             distance_unsaturated_mps < 0.0,
             distance_unsaturated_mps > self.max_speed_mps,
             abs(direction_unsaturated_rad) > self.max_steer_rad,
@@ -281,6 +258,5 @@ class FollowPController:
             dt_s,
             self._direction_i_rad,
             distance_d_mps,
-            self._distance_d_filtered_mps,
-            distance_d_raw_mps,
+            self._distance_d_raw_mps,
         )

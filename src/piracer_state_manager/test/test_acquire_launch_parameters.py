@@ -5,21 +5,54 @@ from unittest.mock import patch
 import pytest
 
 from launch import LaunchContext
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.utilities import perform_substitutions
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
+from launch_ros.utilities import evaluate_parameters
 
 SOURCE = Path(__file__).parents[1]
 
 
-def test_simulation_supplies_the_configured_low_obstacle_scan():
+def test_acquire_uses_the_low_obstacle_scan():
     import yaml
     params = yaml.safe_load((SOURCE / "config/acquire.yaml").read_text())["piracer_acquire"]["ros__parameters"]
     assert params["scan_topic"] == "/piracer/obstacle_scan"
-    description = launch_description("piracer_sim.launch.py")
-    assert any(isinstance(entity, Node) and entity._Node__node_name == "obstacle_scan_node"
-               for entity in description.entities)
+
+
+@pytest.mark.parametrize("avoidance", ["false", "true"])
+def test_simulation_inherits_one_obstacle_scan_from_navigation(avoidance):
+    def package_share(name):
+        return str(SOURCE.parent / name)
+
+    simulation = launch_description("piracer_sim.launch.py")
+    navigation_include, = (
+        entity for entity in simulation.entities
+        if isinstance(entity, IncludeLaunchDescription)
+        and "nav2_autostart" in dict(entity.launch_arguments)
+    )
+    context = LaunchContext()
+    context.launch_configurations["follow_nav2_avoidance"] = avoidance
+    with patch.object(FindPackageShare, "find", side_effect=package_share), patch(
+        "ament_index_python.packages.get_package_share_directory", side_effect=package_share
+    ):
+        navigation = navigation_include.launch_description_source.get_launch_description(context)
+        build, = (entity for entity in navigation.entities if isinstance(entity, OpaqueFunction))
+        navigation_actions = build.execute(context)
+
+    def scan_nodes(actions):
+        return [
+            entity for entity in actions
+            if isinstance(entity, Node)
+            and entity.node_executable == "obstacle_scan_node"
+        ]
+
+    assert not scan_nodes(simulation.entities)
+    scan, = scan_nodes(navigation_actions)
+    assert scan.node_package == "robot_perception"
+    parameters, = evaluate_parameters(context, scan._Node__parameters)
+    assert parameters["use_sim_time"] is True
 
 
 def launch_description(filename):

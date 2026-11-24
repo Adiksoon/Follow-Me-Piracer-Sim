@@ -20,8 +20,9 @@ provides the camera transforms.
 The camera publishes 640 × 360 images at 30 Hz. Its optical frame is
 `sim_camera_optical_frame`. The camera link sits at x = 0.236 m and z = 0.320 m
 relative to the chassis, with zero pitch. Field of view and occlusion limit
-coverage. Nav2 uses a depth scan for live obstacle observations. The full
-workflow also provides `/piracer/obstacle_scan` from the RGB-D obstacle scan node.
+coverage. The RGB-D obstacle scan node publishes `/piracer/obstacle_scan`,
+which supplies live obstacle observations to both Nav2 costmaps, ACQUIRE
+and integrated FOLLOW.
 
 ## Map and motion
 
@@ -34,10 +35,11 @@ to pass through `/map`, or set `start_zone_radius` to change the radius.
 The start zone is an engineering assumption about the initial area.
 
 The Nav2 configuration uses Smac Hybrid and Regulated Pure Pursuit with a
-0.50 m minimum planning radius and a 0.10 m/s desired linear speed. The
-standard planner excludes unknown cells. The FOLLOW planner can include
-them while live obstacle and collision checks apply. The configured paths
-use forward motion without rotation in place.
+0.50 m minimum planning radius and a 0.10 m/s desired linear speed. SEARCH,
+ACQUIRE and FOLLOW share the Hybrid planner. It allows planning through
+unknown cells and its path smoothing is disabled. Live obstacle and
+collision checks still apply. The configured paths use forward motion
+without rotation in place.
 
 Standalone navigation sends smoothed commands on `/cmd_vel`. Keep one
 command source active in this profile. In the full workflow, the State

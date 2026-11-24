@@ -106,23 +106,8 @@ planner_server:
   ros__parameters:
     use_sim_time: true
     expected_planner_frequency: 5.0
-    planner_plugins: [Hybrid, FollowHybrid]
+    planner_plugins: [Hybrid]
     Hybrid:
-      plugin: nav2_smac_planner/SmacPlannerHybrid
-      tolerance: 0.10
-      downsample_costmap: false
-      allow_unknown: false
-      max_iterations: 1000000
-      max_on_approach_iterations: 1000
-      max_planning_time: 2.0
-      motion_model_for_search: DUBIN
-      # Leave steering margin for path tracking near the goal (Run10 overshot).
-      minimum_turning_radius: 0.50
-      angle_quantization_bins: 72
-      analytic_expansion_ratio: 3.5
-      allow_reverse_expansion: false
-    FollowHybrid:
-      # FOLLOW may plan around a partially mapped obstacle toward a known goal.
       plugin: nav2_smac_planner/SmacPlannerHybrid
       tolerance: 0.10
       downsample_costmap: false
@@ -131,6 +116,7 @@ planner_server:
       max_on_approach_iterations: 1000
       max_planning_time: 2.0
       motion_model_for_search: DUBIN
+      # Leave steering margin for path tracking near the goal (Run10 overshot).
       minimum_turning_radius: 0.50
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
@@ -158,17 +144,7 @@ global_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
-        observation_sources: scan depth_obstacles
-        scan:
-          topic: /piracer/scan
-          data_type: LaserScan
-          marking: true
-          max_obstacle_height: 2.0
-          clearing: true
-          obstacle_min_range: 0.05
-          obstacle_max_range: 3.0
-          raytrace_min_range: 0.05
-          raytrace_max_range: 3.0
+        observation_sources: depth_obstacles
         depth_obstacles:
           topic: /piracer/obstacle_scan
           data_type: LaserScan
@@ -210,17 +186,7 @@ local_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
-        observation_sources: scan depth_obstacles
-        scan:
-          topic: /piracer/scan
-          data_type: LaserScan
-          marking: true
-          max_obstacle_height: 2.0
-          clearing: true
-          obstacle_min_range: 0.05
-          obstacle_max_range: 3.0
-          raytrace_min_range: 0.05
-          raytrace_max_range: 3.0
+        observation_sources: depth_obstacles
         depth_obstacles:
           topic: /piracer/obstacle_scan
           data_type: LaserScan

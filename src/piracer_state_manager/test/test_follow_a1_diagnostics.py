@@ -1,6 +1,8 @@
 import json
+import math
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +25,54 @@ class _PublisherSpy:
         self.messages.append(message)
 
 
+def test_raw_derivative_sample_matches_held_command_without_ros_node():
+    controller = FollowPController(distance_kd=0.01, direction_kd=0.1)
+    target = PointStamped()
+    target.header.stamp.sec = 1
+    node = SimpleNamespace(
+        _controller=controller, _latest_target_point=target,
+        _control_sample_publisher=_PublisherSpy(), _publish_cmd_vel=False,
+        _last_selected_source="none",
+        _last_selected_twist=SimpleNamespace(
+            linear=SimpleNamespace(x=0.0), angular=SimpleNamespace(z=0.0)),
+        _mode="DIRECT", _mode_reason="test", _goal_state="idle",
+        _goal_unresolved=False,
+    )
+    controller.update(2.35, 0.0, measurement_stamp_ns=1_000_000_000)
+    target.point.x = 2.45 * math.cos(0.1)
+    target.point.y = 2.45 * math.sin(0.1)
+    target.header.stamp.nanosec = 200_000_000
+    for new_measurement in (True, False):
+        command = controller.update(
+            target.point.x, target.point.y, measurement_stamp_ns=1_200_000_000)
+        PiracerFollowNode._publish_control_sample(node, command, target, 1_200_000_000)
+        sample = json.loads(node._control_sample_publisher.messages[-1].data)
+        assert sample["schema_version"] == 2
+        assert sample["new_measurement"] is new_measurement
+        assert sample["distance_raw_derivative_mps"] == pytest.approx(0.5)
+        assert sample["direction_raw_derivative_radps"] == pytest.approx(0.5)
+        assert sample["distance_d_mps"] == pytest.approx(0.005)
+        assert sample["direction_d_rad"] == pytest.approx(0.05)
+        assert "distance_filtered_derivative_mps" not in sample
+        assert "direction_filtered_derivative_radps" not in sample
+
+
+def test_controller_parameter_wiring_needs_no_tau_without_ros_node():
+    params = dict(
+        target_distance_m=2.25, distance_kp=0.1, distance_ki=0.0,
+        distance_kd=0.05, distance_integral_limit_mps=0.0,
+        direction_kp=1.0, direction_ki=0.0, direction_kd=0.1,
+        direction_integral_limit_rad=0.02, max_speed_mps=0.05,
+        max_steer_rad=0.554,
+    )
+    node = SimpleNamespace(get_parameter=lambda key: SimpleNamespace(value=params[key]))
+    controller = PiracerFollowNode._make_controller(node)
+    controller.update(2.35, 0.0, measurement_stamp_ns=1_000_000_000)
+    command = controller.update(2.45, 0.0, measurement_stamp_ns=1_200_000_000)
+    assert command.distance_d_mps == pytest.approx(0.025)
+    assert controller.direction_kd == 0.1
+
+
 def test_startup_log_reports_constructed_controller_and_samples_its_process(monkeypatch, capfd):
     was_initialized = rclpy.ok()
     if not was_initialized:
@@ -39,14 +89,11 @@ def test_startup_log_reports_constructed_controller_and_samples_its_process(monk
         config = json.loads(lines[0].split("FOLLOW_CONFIG ", 1)[1])
         assert config == {"process_id": os.getpid(), "node": "/piracer_follow",
                           "distance_kp": 0.20, "distance_ki": 0.0,
-                          "distance_kd": 0.0, "distance_filter_tau_s": 0.3,
-                          "distance_integral_limit_mps": 0.0,
-                          "distance_kd": 0.0, "distance_filter_tau_s": 0.3,
+                          "distance_kd": 0.0,
                           "distance_integral_limit_mps": 0.0,
                           "direction_kp": 1.0, "direction_kd": 0.0,
                           "direction_ki": 0.0,
                           "direction_integral_limit_rad": 0.02,
-                          "direction_filter_tau_s": 0.3,
                           "target_distance_m": 2.25, "max_speed_mps": 0.05,
                           "max_steering_rad": 0.554, "publish_cmd_vel": False}
         samples, commands = _PublisherSpy(), _PublisherSpy()
@@ -60,7 +107,7 @@ def test_startup_log_reports_constructed_controller_and_samples_its_process(monk
         assert json.loads(samples.messages[0].data)["process_id"] == config["process_id"]
         sample = json.loads(samples.messages[0].data)
         assert sample["distance_integral_m_s"] == 0.0
-        assert sample["direction_filtered_derivative_radps"] == 0.0
+        assert sample["direction_raw_derivative_radps"] == 0.0
         assert commands.messages == []
     finally:
         node.stop_and_destroy()
@@ -252,7 +299,7 @@ def test_active_extension_uses_original_target_stamp_and_stop_path_resets_histor
 
         def prime_history():
             node._controller._last_measurement_stamp_ns = source_stamp_ns
-            node._controller._direction_d_filtered_radps = 0.25
+            node._controller._direction_d_raw_radps = 0.25
             node._controller._distance_i_mps = 0.01
 
         _fresh_point(node)
@@ -262,7 +309,7 @@ def test_active_extension_uses_original_target_stamp_and_stop_path_resets_histor
         )
         node._control_cycle()
         assert node._controller._last_measurement_stamp_ns is None
-        assert node._controller._direction_d_filtered_radps == 0.0
+        assert node._controller._direction_d_raw_radps == 0.0
         assert node._controller._distance_i_mps == 0.0
 
         _fresh_point(node)
@@ -275,7 +322,7 @@ def test_active_extension_uses_original_target_stamp_and_stop_path_resets_histor
         prime_history()
         node._set_enabled(SetBool.Request(data=False), SetBool.Response())
         assert node._controller._last_measurement_stamp_ns is None
-        assert node._controller._direction_d_filtered_radps == 0.0
+        assert node._controller._direction_d_raw_radps == 0.0
         assert node._controller._distance_i_mps == 0.0
         node._set_enabled(SetBool.Request(data=True), SetBool.Response())
         assert node._controller._last_measurement_stamp_ns is None
@@ -284,7 +331,7 @@ def test_active_extension_uses_original_target_stamp_and_stop_path_resets_histor
         node._last_ros_time_ns = source_stamp_ns + 10_000
         assert not node._observe_ros_time(source_stamp_ns, time.monotonic(), 0.5)
         assert node._controller._last_measurement_stamp_ns is None
-        assert node._controller._direction_d_filtered_radps == 0.0
+        assert node._controller._direction_d_raw_radps == 0.0
         assert node._controller._distance_i_mps == 0.0
 
         node._tf_buffer.transform = lambda message, *_: message

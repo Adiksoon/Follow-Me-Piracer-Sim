@@ -18,7 +18,7 @@ the historical `ros2_ws/` workspace.
   per-frame ROS and monotonic timing diagnostics on `/piracer/yolo/timing`.
 - In the generic COCO profile, an empty `class_filter`, `suitcase`, or `28`
   selects COCO `suitcase`, class ID 28. The full-system FT01 profile instead
-  selects class ID 0 at confidence `0.35`, as configured in
+  selects class ID 0 at confidence `0.90`, as configured in
   `config/detector_ft01_test.yaml`.
 - `scripts/suitcase_point_node` synchronizes detections, depth, and color and
   depth `CameraInfo` messages by exact timestamp. It checks the qualified
@@ -28,10 +28,9 @@ the historical `ros2_ws/` workspace.
   `/piracer/follow/target_point`. If no valid point is available, it publishes
   nothing. The node does not track detections between frames.
 - `scripts/obstacle_scan_node` samples the depth image across its height and
-  publishes a height-filtered `LaserScan` on `/piracer/obstacle_scan`. Integrated
-  Follow and both Nav2 costmaps use it to detect low obstacles that the existing
-  horizontal scan can miss. It uses the original image timestamp and TF into
-  `base_link`; it does not command motion.
+  publishes a height-filtered `LaserScan` on `/piracer/obstacle_scan` using the
+  original image timestamp and TF into `base_link`. The navigation launch starts
+  this node for both Nav2 costmaps, ACQUIRE and integrated FOLLOW.
 - `piracer_sim_base.launch.py` defaults this backend to the retained model under
   `verification/yolo11n_same_frame_20261008/weights/yolo11n.onnx` when no
   explicit `yolo_model_path` is supplied. YOLO remains disabled by default in
@@ -44,7 +43,7 @@ plus 80 COCO scores). The offline fine-tuned model uses the same input and
 output `output0`: `[1, 5, 8400]` (four box channels plus one suitcase score,
 class ID 0). Both layouts are decoded by the same pipeline. The full-system
 `piracer_sim.launch.py` loads `config/detector_ft01_test.yaml`, which selects
-this class-0 model at confidence `0.35`. Its weights are delivered externally
+this class-0 model at confidence `0.90`. Its weights are delivered externally
 and must be present at the absolute path recorded in that YAML:
 `/home/zygar/dev_praca_inz/symulacja/verification/yolo_ft01_20261012/runs/yolo11n_suitcase_ft01_final/weights/best.onnx`.
 To relocate those weights, edit `model_path` in

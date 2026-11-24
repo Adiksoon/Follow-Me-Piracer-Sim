@@ -13,20 +13,19 @@ def test_local_and_global_costmaps_share_static_and_live_scan_layers():
     local_params = config["local_costmap"]["local_costmap"]["ros__parameters"]
     assert global_params["plugins"] == ["static_layer", "obstacle_layer", "inflation_layer"]
     assert local_params["plugins"] == ["static_layer", "obstacle_layer", "inflation_layer"]
-    assert global_params["obstacle_layer"]["scan"]["max_obstacle_height"] == 2.0
-    assert local_params["obstacle_layer"]["scan"]["max_obstacle_height"] == 2.0
     for params in (global_params, local_params):
         assert params["static_layer"]["map_topic"] == "/map"
         assert params["static_layer"]["map_subscribe_transient_local"] is True
-        assert params["obstacle_layer"]["scan"] == global_params["obstacle_layer"]["scan"]
-        assert params["obstacle_layer"]["scan"]["topic"] == "/piracer/scan"
-        assert params["obstacle_layer"]["scan"]["data_type"] == "LaserScan"
-        assert params["obstacle_layer"]["observation_sources"] == "scan depth_obstacles"
-        depth = params["obstacle_layer"]["depth_obstacles"]
+        layer = params["obstacle_layer"]
+        assert layer["observation_sources"] == "depth_obstacles"
+        assert "scan" not in layer
+        depth = layer["depth_obstacles"]
+        assert depth == global_params["obstacle_layer"]["depth_obstacles"]
         assert depth["topic"] == "/piracer/obstacle_scan"
         assert depth["data_type"] == "LaserScan"
         assert depth["marking"] and depth["clearing"]
         assert depth["inf_is_valid"] is False
+        assert depth["max_obstacle_height"] == 2.0
         assert params["footprint"] == global_params["footprint"]
         assert params["footprint_padding"] == 0.03
     assert local_params["global_frame"] == "vo_odom"
@@ -49,16 +48,13 @@ def test_inflation_radius_covers_configured_footprint_circumradius():
         assert params["inflation_layer"]["inflation_radius"] >= circumradius
 
 
-def test_follow_and_search_planners_share_kinematics_and_keep_unknown_policy_separate():
+def test_search_acquire_and_follow_share_one_hybrid_planner_policy():
     from xml.etree import ElementTree as ET
     config = yaml.safe_load((ROOT / "config/nav2_params.yaml").read_text())
     planners = config["planner_server"]["ros__parameters"]
-    assert planners["planner_plugins"] == ["Hybrid", "FollowHybrid"]
-    assert planners["Hybrid"]["allow_unknown"] is False
-    assert planners["FollowHybrid"]["allow_unknown"] is True
-    assert planners["FollowHybrid"]["smooth_path"] is False
-    assert {k: v for k, v in planners["Hybrid"].items() if k != "allow_unknown"} == {
-        k: v for k, v in planners["FollowHybrid"].items() if k not in ("allow_unknown", "smooth_path")}
+    assert planners["planner_plugins"] == ["Hybrid"]
+    assert planners["Hybrid"]["allow_unknown"] is True
+    assert planners["Hybrid"]["smooth_path"] is False
     follow = ET.parse(ROOT / "behavior_trees/follow_navigate_to_pose.xml")
     pipeline = follow.find('./BehaviorTree/PipelineSequence')
     assert [node.tag for node in pipeline] == ['RateController', 'FollowPath']
@@ -71,7 +67,7 @@ def test_follow_and_search_planners_share_kinematics_and_keep_unknown_policy_sep
     assert 'nav2_goal_updater_node_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
     assert 'nav2_rate_controller_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
     assert 'nav2_pipeline_sequence_bt_node' in config['bt_navigator']['ros__parameters']['plugin_lib_names']
-    assert follow.find('.//ComputePathToPose').get('planner_id') == 'FollowHybrid'
+    assert follow.find('.//ComputePathToPose').get('planner_id') == 'Hybrid'
     assert follow.find('.//FollowPath').get('goal_checker_id') == 'search_goal_checker'
     search = ET.parse(ROOT.parent / "piracer_search/behavior_trees/search_navigate_to_pose.xml")
     assert search.find('.//ComputePathToPose').get('planner_id') == 'Hybrid'

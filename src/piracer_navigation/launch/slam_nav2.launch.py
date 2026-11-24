@@ -53,27 +53,12 @@ def _build_launch(context, *args, **kwargs):
         launch_arguments={"publish_tf": "true"}.items(),
     )
 
-    scan_converter = Node(
-        package="depthimage_to_laserscan",
-        executable="depthimage_to_laserscan_node",
-        name="depthimage_to_laserscan",
+    obstacle_scan = Node(
+        package="robot_perception",
+        executable="obstacle_scan_node",
+        name="obstacle_scan_node",
+        parameters=[{"use_sim_time": True}],
         output="screen",
-        parameters=[
-            {
-                "use_sim_time": True,
-                "scan_time": 0.033,
-                "range_min": 0.05,
-                "range_max": 3.0,
-                "scan_height": 1,
-                # The converter requires a laser/body frame, not the optical frame.
-                "output_frame": "sim_camera_link",
-            }
-        ],
-        remappings=[
-            ("depth", "/sim_camera/depth/image_raw"),
-            ("depth_camera_info", "/sim_camera/depth/camera_info"),
-            ("scan", "/piracer/scan"),
-        ],
     )
 
     rtabmap_config = os.path.join(package_share, "config", "rtabmap.yaml")
@@ -178,7 +163,7 @@ def _build_launch(context, *args, **kwargs):
     return [
         simulation,
         native_visual_odometry,
-        scan_converter,
+        obstacle_scan,
         rtabmap,
         start_zone_map,
         nav2,

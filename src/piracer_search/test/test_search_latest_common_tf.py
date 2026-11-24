@@ -65,14 +65,17 @@ class RealTfLatestCommonTest(unittest.TestCase):
         node._tf_future_lead_ns = round(tf_future_lead_sec * 1_000_000_000)
         node._clock_epoch = 0
         node._localization_reason = None
-        node._pending_goal = None
         class Handle:
             count = 0
             def cancel_goal_async(self):
                 self.count += 1
         handle = Handle()
-        node._active_goal = {"handle": handle, "cancel_requested": False,
-                             "cancel_reason": None}
+        node._owned_goals = {1: {
+            "token": 1, "handle": handle, "state": "active",
+            "cancel_requested": False, "cancel_reason": None,
+            "localization_invalidated": False,
+        }}
+        node._current_goal_token = 1
         node.get_parameter = lambda name: types.SimpleNamespace(
             value=1.0 if name == "max_localization_age_sec" else "base_link")
         node.get_clock = lambda: types.SimpleNamespace(

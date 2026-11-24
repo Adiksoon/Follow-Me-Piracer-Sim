@@ -86,7 +86,7 @@ class AcquireNode(Node):
         defaults = {
             "enable_service": "/acquire/enable", "point_topic": "/piracer/follow/target_point",
             "odom_info_topic": "/visual_vo/odom_info_lite", "odom_topic": "/visual_odom",
-            "scan_topic": "/piracer/scan", "planner_action": "/compute_path_to_pose",
+            "scan_topic": "/piracer/obstacle_scan", "planner_action": "/compute_path_to_pose",
             "controller_action": "/follow_path", "path_valid_service": "/is_path_valid",
             "result_topic": "/piracer/acquire/result",
             "command_topic": "/piracer/ackermann_cmd_vel",

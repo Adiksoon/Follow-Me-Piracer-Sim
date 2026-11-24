@@ -24,6 +24,7 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>piracer_navigation</exec_depend>
   <exec_depend>piracer_search</exec_depend>
+  <exec_depend>piracer_explore_core</exec_depend>
   <exec_depend>robot_perception</exec_depend>
   <test_depend>python3-pytest</test_depend>
   <test_depend>unique_identifier_msgs</test_depend>
