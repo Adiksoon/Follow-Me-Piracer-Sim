@@ -70,6 +70,48 @@ OpenCV 4.13.0 loaded this model in the project environment. Ubuntu 22.04's
 OpenCV 4.5.4 failed to load an attention layer. Use an OpenCV build compatible
 with the Python environment used by ROS 2 and `cv_bridge`.
 
+## Preview without detector weights
+
+To see the classroom and the robot, start the base scene from the built
+workspace. This preview needs neither a detector model nor RTAB-Map at runtime.
+
+```bash
+ros2 launch robot_simulation piracer_sim_base.launch.py \
+  gui:=true start_paused:=true camera_viewer_enabled:=false \
+  visual_odometry_enabled:=false suitcase_control_gui:=false yolo_enabled:=false
+```
+
+To inspect the live occupancy map, stop the base scene and start the
+standalone mapping launch instead. It starts the RGB-D camera, visual
+odometry and RTAB-Map with the detector disabled.
+
+```bash
+ros2 launch piracer_navigation slam_nav2.launch.py gui:=true nav2_autostart:=false
+```
+
+In another terminal with the workspace sourced, start RViz:
+
+```bash
+rviz2 --ros-args -p use_sim_time:=true
+```
+
+In RViz, set **Fixed Frame** to `map` and add a **Map** display on `/map`.
+The map expands as the robot sees new parts of the room. To inspect more
+than the initial view, send a slow forward command while the path is clear:
+
+```bash
+ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.05}}'
+```
+
+Stop the publisher with **Ctrl+C**, then publish a zero command:
+
+```bash
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{}'
+```
+
+This preview runs without the SEARCH, ACQUIRE and FOLLOW behaviors. Use
+the full simulation below to try suitcase following.
+
 ## Run the full simulation
 
 Obtain the fine-tuned single-class YOLO11n suitcase model (`best.onnx`) from
