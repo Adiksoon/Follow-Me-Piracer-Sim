@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main-sim]
+  push:
+    branches: [main-sim]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-python:
+    name: Offline Python tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install pytest
+        run: python -m pip install 'pytest>=7,<9'
+      - name: Test behavior, control and perception logic
+        env:
+          PYTHONPATH: src/piracer_state_manager:src/robot_perception
+        run: |
+          python -m pytest -q \
+            src/piracer_state_manager/test/test_state_machine.py \
+            src/piracer_state_manager/test/test_follow_control.py \
+            src/piracer_state_manager/test/test_pd_pi_control.py \
+            src/robot_perception/test/test_target_point.py \
+            src/robot_perception/test/test_yolo_timing.py

@@ -1,5 +1,7 @@
 # PiRacer Follow-Me
 
+[![CI](https://github.com/Adiksoon/Follow-Me-Piracer-Sim/actions/workflows/ci.yml/badge.svg?branch=main-sim)](https://github.com/Adiksoon/Follow-Me-Piracer-Sim/actions/workflows/ci.yml)
+
 **An autonomous PiRacer that finds a suitcase and follows it through an indoor environment.**
 This engineering thesis project combines RGB-D perception, visual odometry,
 mapping and navigation on a small Ackermann-steered vehicle. This branch
@@ -93,6 +95,10 @@ option enables drive commands from FOLLOW. SEARCH and ACQUIRE can still
 issue Nav2 goals with that option disabled.
 
 ## Verification
+
+GitHub Actions runs selected offline tests of the state machine, FOLLOW
+controller and perception logic on Python 3.10. These tests run without ROS,
+Gazebo or detector weights.
 
 At revision `5bbbb8c`, all 10 packages built in a fresh local clone. The
 offline checks passed 783 Python tests and the C++ frontier test suite.
