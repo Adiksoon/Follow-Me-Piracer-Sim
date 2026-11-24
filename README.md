@@ -5,12 +5,27 @@ This engineering thesis project combines RGB-D perception, visual odometry,
 mapping and navigation on a small Ackermann-steered vehicle. This branch
 contains the Gazebo Classic simulation.
 
+## Demo
+
+A wooden obstacle blocks the direct path from the green PiRacer to the red
+suitcase. These Gazebo frames show the robot approaching, turning around
+the obstacle and moving past it.
+
+| Approach | Detour | After passing |
+| --- | --- | --- |
+| ![PiRacer approaches the obstacle with the suitcase visible beyond it](docs/images/detour-start.png) | ![PiRacer changes heading to go around the obstacle](docs/images/detour-middle.png) | ![PiRacer is on the other side of the obstacle](docs/images/detour-end.png) |
+
+<details>
+<summary>Classroom and Nav2 costmap</summary>
+
 | Gazebo classroom | Nav2 global costmap in RViz |
 | :---: | :---: |
 | ![Overhead view of the simulated classroom with four groups of tables and PiRacer near the center](docs/images/gazebo-classroom.png) | ![Global costmap showing areas of elevated cost around the same four groups of tables](docs/images/nav2-global-costmap.png) |
 
 *Screenshots from the same paused SEARCH run. The costmap shows how Nav2
 represents the classroom arrangement for planning.*
+
+</details>
 
 ## How it works
 
@@ -26,6 +41,15 @@ represents the classroom arrangement for planning.*
   ACQUIRE confirms or reacquires the target. FOLLOW regulates distance and
   heading directly and can use Nav2 to go around an obstacle. The State
   Manager coordinates transitions between these behaviors.
+
+## Code highlights
+
+- [State Manager](src/piracer_state_manager/piracer_state_manager/state_node.py)
+  coordinates SEARCH, ACQUIRE and FOLLOW and hands over control between them.
+- [FOLLOW controller](src/piracer_state_manager/piracer_state_manager/follow_control.py)
+  turns the target position into a speed and steering command.
+- [RGB-D target localization](src/robot_perception/robot_perception/target_point.py)
+  estimates a 3D point from the suitcase detection and the depth image.
 
 ## Build
 
