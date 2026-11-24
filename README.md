@@ -1,10 +1,31 @@
 # PiRacer Follow-Me
 
-A ROS 2 simulation of a PiRacer that searches for, acquires and follows a
-suitcase. Gazebo Classic supplies RGB-D data. RTAB-Map estimates motion and
-builds an occupancy map, while Nav2 plans and executes navigation goals.
-SEARCH uses frontier detection and ranking from
-[m-explore-ros2](src/piracer_search/third_party/m-explore-ros2/README.md).
+**An autonomous PiRacer that finds a suitcase and follows it through an indoor environment.**
+This engineering thesis project combines RGB-D perception, visual odometry,
+mapping and navigation on a small Ackermann-steered vehicle. This branch
+contains the Gazebo Classic simulation.
+
+| Gazebo classroom | Nav2 global costmap in RViz |
+| :---: | :---: |
+| ![Overhead view of the simulated classroom with four groups of tables and PiRacer near the center](docs/images/gazebo-classroom.png) | ![Global costmap showing areas of elevated cost around the same four groups of tables](docs/images/nav2-global-costmap.png) |
+
+*Screenshots from the same paused SEARCH run. The costmap shows how Nav2
+represents the classroom arrangement for planning.*
+
+## How it works
+
+- **Perception.** YOLO11n detects the suitcase in the RGB image. The depth
+  image and camera calibration give its 3D position. A separate depth
+  projection supplies obstacle observations.
+- **Mapping and navigation.** RTAB-Map estimates motion and builds an
+  occupancy map. Nav2 uses Smac Hybrid-A* and Regulated Pure Pursuit to
+  plan and execute forward motion.
+- **Robot behavior.** SEARCH explores boundaries between observed and unknown
+  space, using frontier ranking from
+  [m-explore-ros2](src/piracer_search/third_party/m-explore-ros2/README.md).
+  ACQUIRE confirms or reacquires the target. FOLLOW regulates distance and
+  heading directly and can use Nav2 to go around an obstacle. The State
+  Manager coordinates transitions between these behaviors.
 
 ## Build
 
@@ -47,7 +68,15 @@ after receiving fresh detector messages. The explicit `follow_publish_cmd_vel`
 option enables drive commands from FOLLOW. SEARCH and ACQUIRE can still
 issue Nav2 goals with that option disabled.
 
-See the package guides for [simulation](src/robot_simulation/README.md),
+## Verification
+
+At revision `ef9c37f`, all 10 packages built in a fresh local clone. The
+offline checks passed 783 Python tests and the C++ frontier test suite.
+The FT01 model also completed offline inference with OpenCV DNN.
+
+## Package guides
+
+[Simulation](src/robot_simulation/README.md),
 [navigation](src/piracer_navigation/README.md),
 [perception](src/robot_perception/README.md) and the
 [State Manager](src/piracer_state_manager/README.md).
