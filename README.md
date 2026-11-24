@@ -13,7 +13,7 @@ the obstacle and moving past it.
 
 | Approach | Detour | After passing |
 | --- | --- | --- |
-| ![PiRacer approaches the obstacle with the suitcase visible beyond it](docs/images/detour-start.png) | ![PiRacer changes heading to go around the obstacle](docs/images/detour-middle.png) | ![PiRacer is on the other side of the obstacle](docs/images/detour-end.png) |
+| <a href="docs/images/detour-start.png"><img src="docs/images/detour-start.png" width="240" alt="PiRacer approaches the obstacle with the suitcase visible beyond it"></a> | <a href="docs/images/detour-middle.png"><img src="docs/images/detour-middle.png" width="240" alt="PiRacer changes heading to go around the obstacle"></a> | <a href="docs/images/detour-end.png"><img src="docs/images/detour-end.png" width="240" alt="PiRacer is on the other side of the obstacle"></a> |
 
 <details>
 <summary>Classroom and Nav2 costmap</summary>
