@@ -44,14 +44,18 @@ represents the classroom arrangement for planning.*
   heading directly and can use Nav2 to go around an obstacle. The State
   Manager coordinates transitions between these behaviors.
 
-## Code highlights
+## What I built
 
-- [State Manager](src/piracer_state_manager/piracer_state_manager/state_node.py)
-  coordinates SEARCH, ACQUIRE and FOLLOW and hands over control between them.
-- [FOLLOW controller](src/piracer_state_manager/piracer_state_manager/follow_control.py)
-  turns the target position into a speed and steering command.
-- [RGB-D target localization](src/robot_perception/robot_perception/target_point.py)
-  estimates a 3D point from the suitcase detection and the depth image.
+- [Behavior coordination](src/piracer_state_manager/piracer_state_manager/state_node.py).
+  I implemented the transition logic for SEARCH, ACQUIRE and FOLLOW, including
+  the handoff between behaviors that issue drive commands.
+- [RGB-D target localization](src/robot_perception/robot_perception/target_point.py).
+  I combined suitcase detections with depth to obtain a 3D target and select
+  the nearest valid observation.
+- [Direct following](src/piracer_state_manager/piracer_state_manager/follow_control.py)
+  and [obstacle detours](src/piracer_state_manager/piracer_state_manager/follow_node.py).
+  I implemented distance and steering control and integrated Nav2 for detours
+  when an obstacle blocks the direct path.
 
 ## Build
 
@@ -138,8 +142,9 @@ issue Nav2 goals with that option disabled.
 
 ## Verification
 
-GitHub Actions runs selected offline tests of the state machine, FOLLOW
-controller and perception logic on Python 3.10. These tests run without ROS,
+GitHub Actions runs unit tests of the state machine, FOLLOW controller and
+perception logic on Python 3.10. A separate ROS 2 Humble job exercises detection
+messages, target confirmation and control handoffs. Both jobs run without
 Gazebo or detector weights.
 
 At revision `5bbbb8c`, all 10 packages built in a fresh local clone. The

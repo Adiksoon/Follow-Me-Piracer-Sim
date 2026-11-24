@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.10'
       - name: Install pytest
@@ -31,3 +31,26 @@ jobs:
             src/piracer_state_manager/test/test_pd_pi_control.py \
             src/robot_perception/test/test_target_point.py \
             src/robot_perception/test/test_yolo_timing.py
+
+  ros-integration:
+    name: ROS 2 behavior integration
+    runs-on: ubuntu-22.04
+    container: ros:humble-ros-base-jammy
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3-pytest \
+            ros-humble-nav2-msgs \
+            ros-humble-rtabmap-msgs \
+            ros-humble-tf2-geometry-msgs \
+            ros-humble-vision-msgs
+      - name: Test detection, target confirmation and control handoff
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          export PYTHONPATH="$PWD/src/piracer_state_manager:${PYTHONPATH:-}"
+          python3 -m pytest -q src/piracer_state_manager/test/test_workflow_integration.py
