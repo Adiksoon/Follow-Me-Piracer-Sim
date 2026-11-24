@@ -1,6 +1,7 @@
 # Keep workspace metadata and generated artifacts out of Git.
 /*
 !/.gitignore
+!/README.md
 !/src/
 /artefakty/
 

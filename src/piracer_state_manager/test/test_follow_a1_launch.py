@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from launch import LaunchContext
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
@@ -106,6 +108,31 @@ def test_full_simulation_forwards_motion_gate_without_enabling_it():
     assert perform_substitutions(
         LaunchContext(), forwarded.variable_name
     ) == "follow_publish_cmd_vel"
+
+
+def test_full_simulation_forwards_existing_model_path(tmp_path):
+    launch = _load_launch(
+        "detector_piracer_sim_launch_under_test",
+        SOURCE / "launch/piracer_sim.launch.py",
+    )
+    description = launch.generate_launch_description()
+    context = LaunchContext()
+    model = tmp_path / "model weights.onnx"
+    context.launch_configurations["yolo_model_path"] = str(model)
+    with pytest.raises(RuntimeError, match="ONNX model was not found"):
+        launch._check_yolo_model(context)
+
+    model.touch()
+    launch._check_yolo_model(context)
+    detector = next(
+        entity
+        for entity in description.entities
+        if isinstance(entity, Node) and entity._Node__node_name == "yolo11n_node"
+    )
+    model_parameters = detector._Node__parameters[-1]
+    [(key, value)] = model_parameters.items()
+    assert perform_substitutions(context, key) == "model_path"
+    assert value.evaluate(context) == str(model)
 
 
 def test_search_launch_forwards_motion_gate_to_state_manager():

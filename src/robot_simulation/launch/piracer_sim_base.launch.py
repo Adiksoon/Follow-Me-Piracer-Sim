@@ -159,6 +159,10 @@ def _build_simulation(context):
                 if not os.path.isfile(yolo_params_file):
                     raise RuntimeError(f"YOLO parameter file was not found at {yolo_params_file}")
                 yolo_node_parameters = [yolo_params_file]
+                if model_path:
+                    if not os.path.isfile(model_path):
+                        raise RuntimeError(f"YOLO11n ONNX model was not found at {model_path}")
+                    yolo_node_parameters.append({"model_path": model_path})
             else:
                 if not model_path:
                     model_path = os.path.join(

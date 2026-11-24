@@ -1,11 +1,24 @@
 """Launch PiRacer simulation, perception, mapping and integrated FOLLOW/Nav2."""
 
+from pathlib import Path
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def _check_yolo_model(context):
+    path = LaunchConfiguration("yolo_model_path").perform(context)
+    if not Path(path).expanduser().is_file():
+        raise RuntimeError(f"YOLO11n ONNX model was not found at {path!r}")
 
 
 def generate_launch_description():
@@ -27,6 +40,11 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("acquire_params_file", default_value=PathJoinSubstitution(
                 [state_manager_share, "config", "acquire.yaml"])),
+            DeclareLaunchArgument(
+                "yolo_model_path",
+                description="Path to the fine-tuned, single-class suitcase YOLO11n ONNX model.",
+            ),
+            OpaqueFunction(function=_check_yolo_model),
             DeclareLaunchArgument("gui", default_value="true"),
             DeclareLaunchArgument(
                 "start_paused",
@@ -80,7 +98,14 @@ def generate_launch_description():
                 package="robot_perception",
                 executable="yolo11n_node",
                 name="yolo11n_node",
-                parameters=[detector_parameters],
+                parameters=[
+                    detector_parameters,
+                    {
+                        "model_path": ParameterValue(
+                            LaunchConfiguration("yolo_model_path"), value_type=str
+                        )
+                    },
+                ],
                 output="screen",
             ),
             Node(

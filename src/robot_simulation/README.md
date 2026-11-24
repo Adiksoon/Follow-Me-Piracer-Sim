@@ -24,11 +24,6 @@ production Ackermann plugin enabled. That session still logged LCP errors in
 the world log. The positive visual assessment is retained separately from
 numerical qualification and does not establish error-free driving.
 
-Evidence and source hashes are retained in
-[the solver finding](../../verification/vehicle_jitter_damping_ab_20261019/steering_inertia_fix_20261019/simple_physics_01/DRIFT_SOLVER_FINDING.md)
-and its linked run records. Source backups and this production decision are in
-the adjacent production_world_preview_20261020_01 directory.
-
 ## Gazebo and camera preview without VO
 
 After sourcing ROS 2 Humble and this workspace:
@@ -51,9 +46,11 @@ The one-command simulation, VO, RTAB-Map, Nav2, perception, and state-managed
 behavior entrypoint is:
 
 ```bash
-ros2 launch piracer_state_manager piracer_sim.launch.py
+ros2 launch piracer_state_manager piracer_sim.launch.py \
+  yolo_model_path:=/absolute/path/to/best.onnx
 ```
 
+See the [workspace instructions](../../README.md) for the required detector model.
 Gazebo starts paused. After checking the ROS graph, press Play to advance
 simulation time. The State Manager starts SEARCH after fresh detector data
 arrives and selects ACQUIRE and FOLLOW as observations are confirmed.
