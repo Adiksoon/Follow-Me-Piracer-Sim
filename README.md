@@ -32,8 +32,8 @@ represents the classroom arrangement for planning.*
 Use Ubuntu 22.04 with ROS 2 Humble and initialized `rosdep`.
 
 ```bash
-git clone --branch main-sim https://github.com/Adiksoon/Follow-Me-Piracer.git
-cd Follow-Me-Piracer
+git clone --branch main-sim https://github.com/Adiksoon/Follow-Me-Piracer-Sim.git
+cd Follow-Me-Piracer-Sim
 source /opt/ros/humble/setup.bash
 rosdep update
 rosdep install --from-paths src --ignore-src --rosdistro humble -y
@@ -70,7 +70,7 @@ issue Nav2 goals with that option disabled.
 
 ## Verification
 
-At revision `ef9c37f`, all 10 packages built in a fresh local clone. The
+At revision `5bbbb8c`, all 10 packages built in a fresh local clone. The
 offline checks passed 783 Python tests and the C++ frontier test suite.
 The FT01 model also completed offline inference with OpenCV DNN.
 
