@@ -118,6 +118,15 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{}'
 This preview runs without the SEARCH, ACQUIRE and FOLLOW behaviors. Use
 the full simulation below to try suitcase following.
 
+### Recorded mapping run
+
+On 10 November 2026, I drove PiRacer manually in Gazebo Classic with ROS 2 Humble,
+with YOLO disabled and Nav2 autostart turned off. RTAB-Map updated the 2D
+occupancy grid on `/map`, which I inspected in RViz.
+[Source revision used for the run](https://github.com/Adiksoon/Follow-Me-Piracer-Sim/commit/692d7c133513cdfd49755a13bf65292669dde7aa).
+
+![RTAB-Map occupancy grid in RViz after a manual PiRacer drive](docs/images/rviz-occupancy-grid.png)
+
 ## Run the full simulation
 
 Obtain the fine-tuned single-class YOLO11n suitcase model (`best.onnx`) from
